@@ -1,0 +1,2780 @@
+from flask import Flask, request, jsonify, send_from_directory, render_template_string
+import subprocess
+import uuid
+import threading
+import os
+import re
+import copy
+import json
+import time
+import requests
+import shutil
+import tempfile
+import sqlite3
+
+app = Flask(__name__)
+
+QUEUE = {}
+LOCK = threading.Lock()
+PROCESSES = {}
+
+DEFAULT_YT_DIR = "/media/YouTube"
+DEFAULT_MUSIC_DIR = "/opt/navidrome/music/navidrome/music"
+DEFAULT_GALLERY_DIR = "/media/Gallery"
+
+SETTINGS_FILE = "/opt/mediagrabber/settings.json"
+ARCHIVE_FILE = "/home/christopher/.mediagrabber/archive.txt"
+
+REORG_LOGS = []
+REORG_RUNNING = False
+REORG_LOCK = threading.Lock()
+REORG_MOVED_DIRS = []
+
+DEDUP_LOGS = []
+DEDUP_RUNNING = False
+DEDUP_LOCK = threading.Lock()
+
+TMP_REORG_LOGS = []
+TMP_REORG_RUNNING = False
+TMP_REORG_LOCK = threading.Lock()
+
+# ---------- Radio Manager ----------
+RADIO_DB_PATH = "/var/lib/navidrome/navidrome.db"
+
+def load_settings():
+    try:
+        with open(SETTINGS_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return {
+            "video_res": "1080",
+            "audio_format": "mp3",
+            "audio_bitrate": "320k",
+            "container": "mp4",
+            "generate_lrc": False,
+            "jellyfin_url": "http://localhost:8096",
+            "jellyfin_api_key": "",
+            "navidrome_url": "http://localhost:4533",
+            "navidrome_api_key": "",
+            "plex_url": "",
+            "plex_token": "",
+            "plex_section_id": "",
+            "ytdlp_extra": "",
+            "spotdl_extra": "",
+            "gallerydl_extra": "",
+            "folder_structure": "default",
+            "theme": "dark",
+            "yt_base_path": DEFAULT_YT_DIR,
+            "music_base_path": DEFAULT_MUSIC_DIR,
+            "gallery_base_path": DEFAULT_GALLERY_DIR,
+            "cookies_youtube_path": "",
+            "cookies_gallery_path": ""
+        }
+
+def save_settings(data):
+    os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def update(job_id, key, value):
+    with LOCK:
+        if job_id in QUEUE:
+            QUEUE[job_id][key] = value
+
+def append_log(job_id, line):
+    with LOCK:
+        if job_id in QUEUE:
+            QUEUE[job_id]["log"].append(line)
+
+def scan_for_thumbnail(job):
+    if not job:
+        return None
+    file_path = job.get("file")
+    if file_path and os.path.exists(file_path):
+        dir_path = os.path.dirname(file_path)
+        for root, _, files in os.walk(dir_path):
+            for f in files:
+                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    return os.path.join(root, f)
+    output_dir = job.get("output_dir")
+    if output_dir and os.path.exists(output_dir):
+        for root, _, files in os.walk(output_dir):
+            for f in files:
+                if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                    return os.path.join(root, f)
+    return None
+
+def refresh_library(dir_path):
+    settings = load_settings()
+    jf_url = settings.get("jellyfin_url", "").strip()
+    jf_key = settings.get("jellyfin_api_key", "").strip()
+    if jf_url:
+        try:
+            refresh_url = f"{jf_url.rstrip('/')}/Library/Refresh"
+            params = {"path": dir_path}
+            headers = {"X-Emby-Token": jf_key} if jf_key else {}
+            r = requests.post(refresh_url, params=params, headers=headers, timeout=10)
+            if r.status_code in (200, 204):
+                print(f"✅ Jellyfin refresh triggered for {dir_path}")
+            else:
+                print(f"⚠️ Jellyfin refresh failed: {r.status_code}")
+        except Exception as e:
+            print(f"⚠️ Jellyfin error: {e}")
+    nav_url = settings.get("navidrome_url", "").strip()
+    if nav_url:
+        try:
+            touch_file = os.path.join(dir_path, ".scan_trigger")
+            with open(touch_file, "w") as f:
+                f.write(str(time.time()))
+            print(f"✅ Navidrome scan triggered (touch file) for {dir_path}")
+        except Exception as e:
+            print(f"⚠️ Navidrome trigger error: {e}")
+    plex_url = settings.get("plex_url", "").strip()
+    plex_token = settings.get("plex_token", "").strip()
+    plex_section = settings.get("plex_section_id", "").strip()
+    if plex_url and plex_token and plex_section:
+        try:
+            refresh_url = f"{plex_url.rstrip('/')}/library/sections/{plex_section}/refresh"
+            params = {"path": dir_path}
+            headers = {"X-Plex-Token": plex_token}
+            r = requests.put(refresh_url, params=params, headers=headers, timeout=10)
+            if r.status_code in (200, 201, 204):
+                print(f"✅ Plex refresh triggered for {dir_path}")
+            else:
+                print(f"⚠️ Plex refresh failed: {r.status_code}")
+        except Exception as e:
+            print(f"⚠️ Plex error: {e}")
+
+def remove_from_archive(url_or_id):
+    if not os.path.exists(ARCHIVE_FILE):
+        return
+    with open(ARCHIVE_FILE, "r") as f:
+        lines = f.readlines()
+    new_lines = []
+    video_id = None
+    if "youtu" in url_or_id:
+        match = re.search(r'(?:v=|youtu\.be/|video_id=)([a-zA-Z0-9_-]{11})', url_or_id)
+        if match:
+            video_id = match.group(1)
+    else:
+        video_id = url_or_id
+    for line in lines:
+        line_lower = line.lower()
+        if url_or_id.lower() in line_lower:
+            continue
+        if video_id and video_id in line:
+            continue
+        new_lines.append(line)
+    with open(ARCHIVE_FILE, "w") as f:
+        f.writelines(new_lines)
+
+def get_archive_contents():
+    if not os.path.exists(ARCHIVE_FILE):
+        return []
+    with open(ARCHIVE_FILE, "r") as f:
+        lines = f.readlines()
+    return [line.strip() for line in lines if line.strip()]
+
+def command_exists(cmd):
+    return subprocess.call(["which", cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+
+def get_ffprobe_metadata(file_path, tag):
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", f"format_tags={tag}",
+             "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.stdout.strip()
+    except:
+        return ""
+
+# ---------- Metadata endpoints ----------
+@app.route("/metadata/<path:path>")
+def get_metadata(path):
+    full_path = os.path.join("/", path)
+    if not os.path.exists(full_path):
+        return jsonify({"error": "File not found"}), 404
+    base = os.path.splitext(full_path)[0]
+    info_file = base + ".info.json"
+    if not os.path.exists(info_file):
+        return jsonify({"error": "Metadata file not found"}), 404
+    try:
+        with open(info_file, "r") as f:
+            data = json.load(f)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/metadata/recent")
+def get_recent_metadata():
+    with LOCK:
+        recent = list(QUEUE.items())[-20:]
+        result = []
+        for job_id, job in recent:
+            if job.get("file") and job.get("status") == "done":
+                file_path = job["file"]
+                base = os.path.splitext(file_path)[0]
+                info_file = base + ".info.json"
+                if os.path.exists(info_file):
+                    try:
+                        with open(info_file, "r") as f:
+                            info = json.load(f)
+                        result.append({
+                            "job_id": job_id,
+                            "file": file_path,
+                            "title": info.get("title"),
+                            "uploader": info.get("uploader"),
+                            "upload_date": info.get("upload_date"),
+                            "thumbnail": job.get("thumbnail")
+                        })
+                    except:
+                        pass
+        return jsonify(result)
+
+@app.route("/metadata/scan", methods=["POST"])
+def metadata_scan():
+    data = request.get_json()
+    path = data.get("path")
+    if not path or not os.path.isdir(path):
+        return jsonify({"error": "Invalid directory"}), 400
+
+    result = []
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            if f.endswith(".info.json"):
+                info_path = os.path.join(root, f)
+                try:
+                    with open(info_path, "r") as fp:
+                        info = json.load(fp)
+                    base = os.path.splitext(info_path)[0]
+                    video_file = None
+                    for ext in [".mp4", ".webm", ".mkv"]:
+                        candidate = base + ext
+                        if os.path.exists(candidate):
+                            video_file = candidate
+                            break
+                    if video_file:
+                        result.append({
+                            "info_file": info_path,
+                            "video_file": video_file,
+                            "title": info.get("title", ""),
+                            "uploader": info.get("uploader", ""),
+                            "upload_date": info.get("upload_date", ""),
+                            "description": info.get("description", ""),
+                            "tags": info.get("tags", [])
+                        })
+                except Exception as e:
+                    pass
+    return jsonify(result)
+
+@app.route("/metadata/update", methods=["POST"])
+def metadata_update():
+    data = request.get_json()
+    info_file = data.get("info_file")
+    if not info_file or not os.path.exists(info_file):
+        return jsonify({"error": "Invalid info file"}), 400
+
+    try:
+        with open(info_file, "r") as f:
+            info = json.load(f)
+    except:
+        return jsonify({"error": "Unable to read info file"}), 500
+
+    if "title" in data:
+        info["title"] = data["title"]
+    if "uploader" in data:
+        info["uploader"] = data["uploader"]
+    if "upload_date" in data:
+        info["upload_date"] = data["upload_date"]
+    if "description" in data:
+        info["description"] = data["description"]
+    if "tags" in data:
+        info["tags"] = data["tags"]
+
+    try:
+        with open(info_file, "w") as f:
+            json.dump(info, f, indent=2)
+    except:
+        return jsonify({"error": "Unable to write info file"}), 500
+
+    dir_path = os.path.dirname(info_file)
+    refresh_library(dir_path)
+
+    return jsonify({"status": "updated"})
+
+@app.route("/refresh/<path:path>", methods=["POST"])
+def refresh_path(path):
+    full_path = os.path.join("/", path)
+    if not os.path.exists(full_path):
+        return jsonify({"error": "File not found"}), 404
+    dir_path = os.path.dirname(full_path)
+    refresh_library(dir_path)
+    return jsonify({"status": "refreshed", "path": dir_path})
+
+# ---------- Archive Manager ----------
+@app.route("/archive", methods=["GET"])
+def get_archive():
+    entries = get_archive_contents()
+    result = []
+    for entry in entries:
+        video_id = None
+        if "youtu" in entry:
+            match = re.search(r'(?:v=|youtu\.be/|video_id=)([a-zA-Z0-9_-]{11})', entry)
+            if match:
+                video_id = match.group(1)
+        result.append({
+            "entry": entry,
+            "video_id": video_id if video_id else entry[:20] + "..."
+        })
+    return jsonify(result)
+
+@app.route("/archive/delete", methods=["POST"])
+def delete_archive_entry():
+    data = request.get_json()
+    entry = data.get("entry")
+    if not entry:
+        return jsonify({"error": "No entry provided"}), 400
+    remove_from_archive(entry)
+    return jsonify({"status": "deleted"})
+
+# ---------- Grab endpoint ----------
+@app.route("/grab", methods=["POST"])
+def grab():
+    url = request.form["url"]
+    mode = request.form.get("mode", "video")
+    job_id = str(uuid.uuid4())
+    with LOCK:
+        QUEUE[job_id] = {
+            "url": url,
+            "status": "queued",
+            "progress": 0,
+            "file": None,
+            "thumbnail": None,
+            "output_dir": None,
+            "log": [],
+            "job_id": job_id
+        }
+    def run():
+        update(job_id, "status", "running")
+        job = QUEUE[job_id]
+        job["output_dir"] = f"/tmp/mediagrabber/{job_id}"
+        os.makedirs(job["output_dir"], exist_ok=True)
+
+        settings = load_settings()
+        env = os.environ.copy()
+        env["GRAB_OUTPUT_DIR"] = job["output_dir"]
+        env["GRAB_YT_DIR"] = settings.get("yt_base_path", DEFAULT_YT_DIR)
+        env["GRAB_MUSIC_DIR"] = settings.get("music_base_path", DEFAULT_MUSIC_DIR)
+        env["GRAB_GALLERY_DIR"] = settings.get("gallery_base_path", DEFAULT_GALLERY_DIR)
+        env["GRAB_COOKIES_YOUTUBE"] = settings.get("cookies_youtube_path", "")
+        env["GRAB_COOKIES_GALLERY"] = settings.get("cookies_gallery_path", "")
+        env["GRAB_VIDEO_RES"] = settings.get("video_res", "1080")
+        env["GRAB_AUDIO_FORMAT"] = settings.get("audio_format", "mp3")
+        env["GRAB_AUDIO_BITRATE"] = settings.get("audio_bitrate", "320k")
+        env["GRAB_CONTAINER"] = settings.get("container", "mp4")
+        env["GRAB_GENERATE_LRC"] = "true" if settings.get("generate_lrc", False) else "false"
+        if mode == "audio":
+            env["GRAB_AUDIO_ONLY"] = "true"
+        else:
+            env["GRAB_AUDIO_ONLY"] = "false"
+
+        if settings.get("ytdlp_extra"):
+            env["GRAB_EXTRA_YT"] = settings["ytdlp_extra"]
+        if settings.get("spotdl_extra"):
+            env["GRAB_EXTRA_SPOTIFY"] = settings["spotdl_extra"]
+        if settings.get("gallerydl_extra"):
+            env["GRAB_EXTRA_GALLERY"] = settings["gallerydl_extra"]
+
+        proc = subprocess.Popen(
+            ["grab", url],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env
+        )
+        with LOCK:
+            PROCESSES[job_id] = proc
+
+        last_progress = 0
+        gallery_download_started = False
+        engine = "UNKNOWN"
+
+        for line in proc.stdout:
+            line = line.strip()
+            append_log(job_id, line)
+
+            if "Engine → SPOTIFY" in line:
+                engine = "SPOTIFY"
+            elif "Engine → GALLERY" in line:
+                engine = "GALLERY"
+            elif "Engine → YOUTUBE" in line:
+                engine = "YOUTUBE"
+
+            if "[download]" in line and "%" in line:
+                m = re.search(r'(\d{1,3}(?:\.\d+)?)%', line)
+                if m:
+                    try:
+                        val = float(m.group(1))
+                        if val >= last_progress:
+                            last_progress = val
+                            update(job_id, "progress", val)
+                    except:
+                        pass
+
+            if "PROGRESS:" in line:
+                m = re.search(r'PROGRESS:\s*(\d+)/(\d+)\s*(?:\((\d+)%\))?', line)
+                if m:
+                    downloaded = int(m.group(1))
+                    total = int(m.group(2))
+                    if total > 0:
+                        progress = int(m.group(3)) if m.group(3) else (downloaded / total) * 100
+                        if progress >= last_progress:
+                            last_progress = progress
+                            update(job_id, "progress", progress)
+
+            if engine == "GALLERY" and "Downloading" in line:
+                if not gallery_download_started:
+                    gallery_download_started = True
+                    update(job_id, "progress", 50)
+
+            if "FINAL_FILE:" in line:
+                final_file = line.split("FINAL_FILE:", 1)[1].strip()
+                update(job_id, "file", final_file)
+            if "FINAL_THUMB:" in line:
+                final_thumb = line.split("FINAL_THUMB:", 1)[1].strip()
+                update(job_id, "thumbnail", final_thumb)
+
+        proc.wait()
+        with LOCK:
+            if job_id in PROCESSES:
+                del PROCESSES[job_id]
+
+        if engine == "GALLERY" and not QUEUE[job_id].get("file"):
+            update(job_id, "progress", 100)
+
+        if not QUEUE[job_id].get("file"):
+            files = []
+            for root, _, f in os.walk(job["output_dir"]):
+                for file in f:
+                    if file.lower().endswith((".mp4", ".webm", ".mkv", ".mp3", ".flac", ".m4a")):
+                        files.append(os.path.join(root, file))
+            if files:
+                update(job_id, "file", max(files, key=os.path.getctime))
+
+        thumb = scan_for_thumbnail(QUEUE[job_id])
+        if thumb:
+            update(job_id, "thumbnail", thumb)
+
+        if QUEUE[job_id].get("file"):
+            update(job_id, "status", "done")
+            update(job_id, "progress", 100)
+            refresh_library(os.path.dirname(QUEUE[job_id]["file"]))
+        else:
+            if proc.returncode != 0:
+                update(job_id, "status", "failed")
+                update(job_id, "progress", 0)
+            else:
+                update(job_id, "status", "done")
+                update(job_id, "progress", 100)
+
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"job_id": job_id})
+
+# ---------- Retry endpoint ----------
+@app.route("/retry/<job_id>", methods=["POST"])
+def retry_job(job_id):
+    with LOCK:
+        job = QUEUE.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        url = job.get("url")
+        if job_id in QUEUE:
+            del QUEUE[job_id]
+        if url:
+            remove_from_archive(url)
+    with app.test_request_context('/grab', method='POST', data={'url': url}):
+        resp = app.full_dispatch_request()
+        if resp.status_code == 200:
+            data = resp.get_json()
+            return jsonify({"status": "retried", "new_job_id": data.get("job_id")})
+        else:
+            return jsonify({"error": "Failed to retry"}), 500
+
+# ---------- Clear Archive (from queue) ----------
+@app.route("/clear-archive/<job_id>", methods=["POST"])
+def clear_archive(job_id):
+    with LOCK:
+        job = QUEUE.get(job_id)
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        url = job.get("url")
+        if url:
+            remove_from_archive(url)
+            append_log(job_id, "🗑️ Archive entry removed")
+            status = job.get("status")
+            if status in ("done", "failed", "cancelled"):
+                del QUEUE[job_id]
+                return jsonify({"status": "archive cleared and job removed"})
+            return jsonify({"status": "archive cleared"})
+        return jsonify({"error": "No URL found"}), 400
+
+# ---------- Cancel / Remove / Clear ----------
+@app.route("/cancel/<job_id>", methods=["POST"])
+def cancel_job(job_id):
+    with LOCK:
+        if job_id in PROCESSES:
+            try:
+                PROCESSES[job_id].terminate()
+                append_log(job_id, "🛑 Job cancelled by user")
+                time.sleep(1)
+                if PROCESSES[job_id].poll() is None:
+                    PROCESSES[job_id].kill()
+            except Exception as e:
+                append_log(job_id, f"⚠️ Cancel error: {e}")
+            finally:
+                if job_id in PROCESSES:
+                    del PROCESSES[job_id]
+        if job_id in QUEUE:
+            QUEUE[job_id]["status"] = "cancelled"
+            QUEUE[job_id]["progress"] = 0
+    return jsonify({"status": "cancelled"})
+
+@app.route("/remove/<job_id>", methods=["DELETE"])
+def remove_job(job_id):
+    with LOCK:
+        if job_id in QUEUE:
+            if job_id in PROCESSES:
+                try:
+                    PROCESSES[job_id].terminate()
+                except:
+                    pass
+                finally:
+                    if job_id in PROCESSES:
+                        del PROCESSES[job_id]
+            del QUEUE[job_id]
+    return jsonify({"status": "removed"})
+
+@app.route("/clear-completed", methods=["POST"])
+def clear_completed():
+    with LOCK:
+        to_remove = [jid for jid, job in QUEUE.items() if job.get("status") in ("done", "failed", "cancelled")]
+        for jid in to_remove:
+            if jid in PROCESSES:
+                try:
+                    PROCESSES[jid].terminate()
+                except:
+                    pass
+                finally:
+                    if jid in PROCESSES:
+                        del PROCESSES[jid]
+            del QUEUE[jid]
+    return jsonify({"status": "cleared"})
+
+# ---------- Reorganize ----------
+@app.route("/reorganize", methods=["POST"])
+def reorganize():
+    global REORG_RUNNING, REORG_LOGS, REORG_MOVED_DIRS
+    with REORG_LOCK:
+        if REORG_RUNNING:
+            return jsonify({"status": "already running"}), 400
+        REORG_RUNNING = True
+        REORG_LOGS = []
+        REORG_MOVED_DIRS = []
+    def run_reorg():
+        global REORG_RUNNING, REORG_LOGS, REORG_MOVED_DIRS
+        try:
+            settings = load_settings()
+            env = os.environ.copy()
+            env["REORG_YT_DIR"] = settings.get("yt_base_path", DEFAULT_YT_DIR)
+            env["REORG_MUSIC_DIR"] = settings.get("music_base_path", DEFAULT_MUSIC_DIR)
+            env["REORG_GALLERY_DIR"] = settings.get("gallery_base_path", DEFAULT_GALLERY_DIR)
+            proc = subprocess.Popen(
+                ["/usr/local/bin/reorganize-youtube"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env
+            )
+            for line in proc.stdout:
+                line = line.strip()
+                with REORG_LOCK:
+                    REORG_LOGS.append(line)
+                    if line.startswith("MOVED_TO:"):
+                        moved_dir = line.split("MOVED_TO:", 1)[1].strip()
+                        if moved_dir not in REORG_MOVED_DIRS:
+                            REORG_MOVED_DIRS.append(moved_dir)
+                time.sleep(0.1)
+            proc.wait()
+        except Exception as e:
+            with REORG_LOCK:
+                REORG_LOGS.append(f"❌ Error: {e}")
+        finally:
+            with REORG_LOCK:
+                REORG_RUNNING = False
+                for dir_path in REORG_MOVED_DIRS:
+                    refresh_library(dir_path)
+                refresh_library("/media/YouTube")
+    threading.Thread(target=run_reorg, daemon=True).start()
+    return jsonify({"status": "started"})
+
+@app.route("/reorganize-logs")
+def reorganize_logs():
+    with REORG_LOCK:
+        return jsonify({
+            "running": REORG_RUNNING,
+            "logs": REORG_LOGS[-200:]
+        })
+
+# ---------- Deduplicate ----------
+@app.route("/deduplicate", methods=["POST"])
+def deduplicate():
+    data = request.get_json()
+    target = data.get("target")
+    action = data.get("action", "scan")
+    if not target or not os.path.isdir(target):
+        return jsonify({"error": "Invalid target directory"}), 400
+
+    def run_dedup():
+        import subprocess as sp
+        cmd = ["/usr/local/bin/deduplicate-files", "--target", target, "--action", action]
+        proc = sp.Popen(cmd, stdout=sp.PIPE, stderr=sp.STDOUT, text=True)
+        for line in proc.stdout:
+            yield line.strip()
+        proc.wait()
+
+    from flask import Response
+    return Response(run_dedup(), mimetype='text/plain')
+
+# ---------- Tmp Reorder ----------
+@app.route("/tmp-reorder", methods=["POST"])
+def tmp_reorder():
+    global TMP_REORG_LOGS, TMP_REORG_RUNNING
+    with TMP_REORG_LOCK:
+        if TMP_REORG_RUNNING:
+            return jsonify({"status": "already running"}), 400
+        TMP_REORG_RUNNING = True
+        TMP_REORG_LOGS = []
+    def run_tmp_reorg():
+        global TMP_REORG_RUNNING, TMP_REORG_LOGS
+        try:
+            settings = load_settings()
+            env = os.environ.copy()
+            env["REORG_YT_DIR"] = settings.get("yt_base_path", DEFAULT_YT_DIR)
+            env["REORG_MUSIC_DIR"] = settings.get("music_base_path", DEFAULT_MUSIC_DIR)
+            env["REORG_GALLERY_DIR"] = settings.get("gallery_base_path", DEFAULT_GALLERY_DIR)
+            proc = subprocess.Popen(
+                ["/usr/local/bin/tmp-reorder"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env
+            )
+            for line in proc.stdout:
+                line = line.strip()
+                with TMP_REORG_LOCK:
+                    TMP_REORG_LOGS.append(line)
+                    if line.startswith("MOVED_TO:"):
+                        moved_dir = line.split("MOVED_TO:", 1)[1].strip()
+                        refresh_library(moved_dir)
+                time.sleep(0.1)
+            proc.wait()
+        except Exception as e:
+            with TMP_REORG_LOCK:
+                TMP_REORG_LOGS.append(f"❌ Error: {e}")
+        finally:
+            with TMP_REORG_LOCK:
+                TMP_REORG_RUNNING = False
+    threading.Thread(target=run_tmp_reorg, daemon=True).start()
+    return jsonify({"status": "started"})
+
+@app.route("/tmp-reorder-logs")
+def tmp_reorder_logs():
+    with TMP_REORG_LOCK:
+        return jsonify({
+            "running": TMP_REORG_RUNNING,
+            "logs": TMP_REORG_LOGS[-200:]
+        })
+
+# ---------- Radio Manager (SQLite + Radio-Browser API) ----------
+import requests
+
+RADIO_DB_PATH = "/var/lib/navidrome/navidrome.db"
+
+def get_db_connection():
+    conn = sqlite3.connect(RADIO_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def ensure_radio_table():
+    """Create radio_station table if it doesn't exist."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS radio_station (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE,
+                homepage TEXT,
+                favicon TEXT,
+                tags TEXT,
+                country TEXT,
+                language TEXT,
+                bitrate INTEGER,
+                codec TEXT,
+                last_updated DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"⚠️ Failed to create radio_station table: {e}")
+        return False
+
+@app.route("/radio/status", methods=["GET"])
+def radio_status():
+    ensure_radio_table()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM radio_station LIMIT 1")
+        conn.close()
+        return jsonify({"installed": True, "message": "Radio manager ready (direct DB)"})
+    except Exception as e:
+        return jsonify({"installed": False, "message": f"DB error: {str(e)}"}), 500
+
+@app.route("/radio/search", methods=["POST"])
+def radio_search():
+    data = request.get_json()
+    query = data.get("query", "").strip()
+    search_type = data.get("type", "name")  # name, genre, country
+    page = data.get("page", 1)
+    limit = 50
+    offset = (page - 1) * limit
+
+    if not query:
+        return jsonify({"error": "Search query required"}), 400
+
+    # Build Radio-Browser API URL
+    try:
+        if search_type == "name":
+            url = f"https://de1.api.radio-browser.info/json/stations/byname/{query}"
+        elif search_type == "genre":
+            url = f"https://de1.api.radio-browser.info/json/stations/bytag/{query}"
+        elif search_type == "country":
+            url = f"https://de1.api.radio-browser.info/json/stations/bycountry/{query}"
+        else:
+            return jsonify({"error": "Invalid search type"}), 400
+
+        # Add limit & offset via query params
+        response = requests.get(url, params={"limit": limit, "offset": offset}, timeout=15)
+        if response.status_code != 200:
+            return jsonify({"error": "Radio-Browser API error", "details": response.text}), 500
+
+        stations = []
+        for item in response.json():
+            stations.append({
+                "name": item.get("name", "Unknown"),
+                "url": item.get("url", ""),
+                "country": item.get("country", ""),
+                "homepage": item.get("homepage", ""),
+                "favicon": item.get("favicon", "")
+            })
+
+        # Check if there might be more results (we got exactly 'limit' results)
+        has_next = len(stations) == limit
+        return jsonify({
+            "stations": stations,
+            "page": page,
+            "has_next": has_next,
+            "total": len(stations) + (page - 1) * limit  # approximate
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/radio/add", methods=["POST"])
+def radio_add():
+    data = request.get_json()
+    url = data.get("url", "").strip()
+    name = data.get("name", "").strip()
+    if not url or not name:
+        return jsonify({"error": "URL and name are required"}), 400
+
+    ensure_radio_table()
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return jsonify({"error": "Cannot connect to database"}), 500
+        cursor = conn.cursor()
+        # Check duplicate
+        cursor.execute("SELECT id FROM radio_station WHERE url = ?", (url,))
+        if cursor.fetchone():
+            conn.close()
+            return jsonify({"error": "Station already exists"}), 400
+        cursor.execute(
+            "INSERT INTO radio_station (name, url) VALUES (?, ?)",
+            (name, url)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": f"Radio '{name}' added"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/radio/list", methods=["GET"])
+def radio_list():
+    ensure_radio_table()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, url FROM radio_station ORDER BY name")
+        rows = cursor.fetchall()
+        conn.close()
+        stations = [{"name": row["name"], "url": row["url"]} for row in rows]
+        return jsonify({"stations": stations})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/radio/remove", methods=["POST"])
+def radio_remove():
+    data = request.get_json()
+    url = data.get("url", "").strip()
+    if not url:
+        return jsonify({"error": "Radio URL required"}), 400
+    ensure_radio_table()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM radio_station WHERE url = ?", (url,))
+        conn.commit()
+        conn.close()
+        return jsonify({"status": "success", "message": "Station removed"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/radio/setdb", methods=["POST"])
+def radio_setdb():
+    data = request.get_json()
+    db_path = data.get("db_path", "").strip()
+    if not db_path or not os.path.exists(db_path):
+        return jsonify({"error": "Invalid database path"}), 400
+    global RADIO_DB_PATH
+    RADIO_DB_PATH = db_path
+    # Test connection and create table if needed
+    ensure_radio_table()
+    return jsonify({"status": "success", "message": f"Database path set to {db_path}"})
+
+# ---------- Log page ----------
+@app.route("/log/<job_id>")
+def log_page(job_id):
+    with LOCK:
+        job = QUEUE.get(job_id)
+        if not job:
+            return "Job not found", 404
+        log_lines = job.get("log", [])
+        status = job.get("status", "unknown")
+        url = job.get("url", "")
+    return render_template_string("""
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Log</title>
+<style>body{background:#0f0f11;color:#eaeef2;font-family:sans-serif;padding:20px;max-width:900px;margin:auto;}
+.back{color:#8899aa;text-decoration:none;display:inline-block;margin-bottom:20px;}
+.back:hover{color:#eaeef2;}
+pre{background:#0a0a0e;padding:20px;border-radius:8px;font-size:.85rem;max-height:80vh;overflow-y:auto;white-space:pre-wrap;word-break:break-word;color:#b0c0d0;border:1px solid #1a1a22;}
+.status{color:#6fcf97;}.failed{color:#cf6f6f;}
+</style>
+</head><body>
+<a href="/" class="back">← Back to queue</a>
+<h2>Log for <span style="font-family:monospace;">{{ job_id[:8] }}</span></h2>
+<p>Status: <span class="status">{{ status }}</span> | URL: {{ url }}</p>
+<pre>{{ log_lines | join('\\n') }}</pre>
+</body></html>
+    """, job_id=job_id, log_lines=log_lines, status=status, url=url)
+
+@app.route("/media/<path:path>")
+def media(path):
+    if not path:
+        return "Invalid", 400
+    return send_from_directory("/", path)
+
+@app.route("/queue")
+def queue():
+    with LOCK:
+        return jsonify(copy.deepcopy(QUEUE))
+
+@app.route("/settings/theme", methods=["POST"])
+def set_theme():
+    data = request.get_json()
+    theme = data.get("theme", "dark")
+    settings = load_settings()
+    settings["theme"] = theme
+    save_settings(settings)
+    return jsonify({"status": "ok"})
+
+@app.route("/settings", methods=["GET", "POST"])
+def settings_page():
+    if request.method == "POST":
+        data = {
+            "video_res": request.form.get("video_res", "1080"),
+            "audio_format": request.form.get("audio_format", "mp3"),
+            "audio_bitrate": request.form.get("audio_bitrate", "320k"),
+            "container": request.form.get("container", "mp4"),
+            "generate_lrc": request.form.get("generate_lrc") == "on",
+            "jellyfin_url": request.form.get("jellyfin_url", ""),
+            "jellyfin_api_key": request.form.get("jellyfin_api_key", ""),
+            "navidrome_url": request.form.get("navidrome_url", ""),
+            "navidrome_api_key": request.form.get("navidrome_api_key", ""),
+            "plex_url": request.form.get("plex_url", ""),
+            "plex_token": request.form.get("plex_token", ""),
+            "plex_section_id": request.form.get("plex_section_id", ""),
+            "ytdlp_extra": request.form.get("ytdlp_extra", ""),
+            "spotdl_extra": request.form.get("spotdl_extra", ""),
+            "gallerydl_extra": request.form.get("gallerydl_extra", ""),
+            "folder_structure": request.form.get("folder_structure", "default"),
+            "yt_base_path": request.form.get("yt_base_path", DEFAULT_YT_DIR),
+            "music_base_path": request.form.get("music_base_path", DEFAULT_MUSIC_DIR),
+            "gallery_base_path": request.form.get("gallery_base_path", DEFAULT_GALLERY_DIR),
+            "cookies_youtube_path": request.form.get("cookies_youtube_path", ""),
+            "cookies_gallery_path": request.form.get("cookies_gallery_path", "")
+        }
+        save_settings(data)
+        return jsonify({"status": "saved"})
+    return jsonify(load_settings())
+
+# ---------- Metadata Editor ----------
+@app.route("/metadata/editor/scan", methods=["POST"])
+def metadata_editor_scan():
+    data = request.get_json()
+    path = data.get("path")
+    if not path or not os.path.isdir(path):
+        return jsonify({"error": "Invalid directory"}), 400
+
+    result = []
+    try:
+        for root, _, files in os.walk(path):
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext in [".mp3", ".flac", ".m4a", ".mp4", ".webm", ".mkv", ".avi"]:
+                    file_path = os.path.join(root, f)
+                    info_file = os.path.splitext(file_path)[0] + ".info.json"
+                    if os.path.exists(info_file):
+                        try:
+                            with open(info_file, "r") as fp:
+                                info = json.load(fp)
+                            title = info.get("title", "")
+                            artist = info.get("uploader", "")
+                            album = info.get("album", "")
+                            date = info.get("upload_date", "")
+                            description = info.get("description", "")
+                        except:
+                            title = artist = album = date = description = ""
+                    else:
+                        if command_exists("ffprobe"):
+                            title = get_ffprobe_metadata(file_path, "title")
+                            artist = get_ffprobe_metadata(file_path, "artist")
+                            album = get_ffprobe_metadata(file_path, "album")
+                            date = get_ffprobe_metadata(file_path, "date")
+                            description = ""
+                        else:
+                            title = artist = album = date = description = ""
+                    if not title:
+                        title = os.path.splitext(f)[0]
+                    result.append({
+                        "file_path": file_path,
+                        "info_file": info_file if os.path.exists(info_file) else None,
+                        "title": title,
+                        "artist": artist,
+                        "album": album,
+                        "date": date,
+                        "description": description,
+                        "extension": ext[1:],
+                        "has_cover": os.path.exists(os.path.splitext(file_path)[0] + ".jpg") or os.path.exists(os.path.splitext(file_path)[0] + ".png")
+                    })
+    except Exception as e:
+        return jsonify({"error": f"Scan failed: {str(e)}"}), 500
+
+    return jsonify(result)
+
+@app.route("/metadata/editor/update", methods=["POST"])
+def metadata_editor_update():
+    file_path = request.form.get("file_path")
+    if not file_path or not os.path.exists(file_path):
+        return jsonify({"error": "Invalid file path"}), 400
+
+    title = request.form.get("title", "")
+    artist = request.form.get("artist", "")
+    album = request.form.get("album", "")
+    date = request.form.get("date", "")
+    description = request.form.get("description", "")
+
+    info_file = os.path.splitext(file_path)[0] + ".info.json"
+    if os.path.exists(info_file):
+        try:
+            with open(info_file, "r") as f:
+                info = json.load(f)
+        except:
+            info = {}
+        info["title"] = title
+        info["uploader"] = artist
+        info["album"] = album
+        info["upload_date"] = date
+        info["description"] = description
+        with open(info_file, "w") as f:
+            json.dump(info, f, indent=2)
+    else:
+        info = {
+            "title": title,
+            "uploader": artist,
+            "album": album,
+            "upload_date": date,
+            "description": description
+        }
+        with open(info_file, "w") as f:
+            json.dump(info, f, indent=2)
+
+    cover_file = request.files.get("cover")
+    if cover_file and cover_file.filename:
+        base = os.path.splitext(file_path)[0]
+        ext = os.path.splitext(cover_file.filename)[1].lower()
+        if ext in [".jpg", ".jpeg", ".png", ".webp"]:
+            cover_path = base + ext
+            cover_file.save(cover_path)
+            if file_path.lower().endswith((".mp3", ".flac", ".m4a")):
+                if command_exists("ffmpeg"):
+                    try:
+                        tmp_file = file_path + ".tmp"
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-i", file_path, "-i", cover_path,
+                             "-map", "0", "-map", "1", "-c", "copy",
+                             "-c:v:1", "png", "-metadata:s:v:1", "title=Album cover",
+                             tmp_file],
+                            check=True, capture_output=True
+                        )
+                        shutil.move(tmp_file, file_path)
+                    except Exception as e:
+                        print(f"Failed to embed cover: {e}")
+
+    refresh_library(os.path.dirname(file_path))
+    return jsonify({"status": "updated"})
+
+# ---------- Main page ----------
+@app.route("/")
+def home():
+    settings = load_settings()
+    theme = settings.get("theme", "dark")
+    html = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+    <title>MediaGrabber</title>
+    <style>
+        :root {
+            --bg: #0f0f11;
+            --card-bg: #1a1a20;
+            --border: #2c2c36;
+            --accent: #5b7cfa;
+            --accent-hover: #6f8cff;
+            --text: #eaeef2;
+            --text-muted: #8899aa;
+            --radius: 14px;
+            --shadow: 0 8px 24px rgba(0,0,0,0.6);
+            --transition: 0.25s ease;
+            --sidebar-width: 200px;
+        }
+        body.light {
+            --bg: #f5f7fc;
+            --card-bg: #ffffff;
+            --border: #d0d7e6;
+            --text: #1e2230;
+            --text-muted: #4a5268;
+            --shadow: 0 8px 24px rgba(0,0,0,0.08);
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            padding: 0;
+            min-height: 100vh;
+            transition: background var(--transition), color var(--transition);
+            display: flex;
+        }
+        .sidebar {
+            width: var(--sidebar-width);
+            background: var(--card-bg);
+            border-right: 1px solid var(--border);
+            height: 100vh;
+            position: sticky;
+            top: 0;
+            padding: 20px 0;
+            display: flex;
+            flex-direction: column;
+            transition: background var(--transition), border var(--transition);
+            flex-shrink: 0;
+        }
+        .sidebar button {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            padding: 10px 20px;
+            text-align: left;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: all var(--transition);
+            border-left: 3px solid transparent;
+            width: 100%;
+        }
+        .sidebar button:hover { background: var(--border); color: var(--text); }
+        .sidebar button.active {
+            color: var(--accent);
+            border-left-color: var(--accent);
+            background: var(--border);
+        }
+        .sidebar .version {
+            margin-top: auto;
+            padding: 20px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            border-top: 1px solid var(--border);
+        }
+        .main {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            max-height: 100vh;
+        }
+        .top-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 24px;
+        }
+        .top-header h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a0b4ff, #5b7cfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .top-header .subtitle {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+        .view { display: none; }
+        .view.active { display: block; }
+        .form-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 28px;
+        }
+        .form-row input {
+            flex: 1;
+            min-width: 200px;
+            padding: 14px 18px;
+            font-size: 1rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text);
+            outline: none;
+            transition: border-color var(--transition), background var(--transition), color var(--transition);
+        }
+        .form-row input:focus { border-color: var(--accent); }
+        .form-row input::placeholder { color: var(--text-muted); }
+        .form-row button {
+            padding: 14px 28px;
+            font-size: 1rem;
+            font-weight: 600;
+            background: var(--accent);
+            border: none;
+            border-radius: var(--radius);
+            color: #fff;
+            cursor: pointer;
+            transition: background var(--transition), transform 0.1s;
+            white-space: nowrap;
+        }
+        .form-row button:hover { background: var(--accent-hover); }
+        .form-row button:active { transform: scale(0.96); }
+        .form-row button:disabled { opacity: 0.7; cursor: default; }
+        .mode-selector {
+            display: none;
+            margin: 8px 0;
+            padding: 8px 12px;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+        .mode-selector label {
+            margin-right: 16px;
+            font-size: 0.95rem;
+            cursor: pointer;
+        }
+        .mode-selector input[type="radio"] {
+            margin-right: 4px;
+            transform: scale(1.1);
+        }
+        .mode-selector .hint {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-left: 12px;
+        }
+        .queue-title {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 16px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 8px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .queue-title span {
+            font-size: 1.2rem;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+        .clear-btn {
+            background: #3a1a1a;
+            color: #cf6f6f;
+            border: none;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: background var(--transition);
+        }
+        .clear-btn:hover { background: #5a2a2a; }
+        body.light .clear-btn { background: #f8d7da; color: #721c24; }
+        body.light .clear-btn:hover { background: #f5c6cb; }
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 16px;
+            margin-bottom: 16px;
+            box-shadow: var(--shadow);
+            transition: background var(--transition), border var(--transition), box-shadow var(--transition);
+        }
+        .card:hover { border-color: #3a3a4a; }
+        body.light .card:hover { border-color: #b0bcd6; }
+        .card-top {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+        .card-thumb {
+            flex: 0 0 120px;
+            min-height: 80px;
+            border-radius: 10px;
+            overflow: hidden;
+            background: #222;
+            border: 1px solid var(--border);
+            transition: border var(--transition);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        body.light .card-thumb { background: #eef2f8; }
+        .card-thumb img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .thumb-yt img { aspect-ratio: 16/9; }
+        .thumb-spotify img { aspect-ratio: 1/1; }
+        .thumb-gallery img {
+            aspect-ratio: 9/16;
+            object-fit: contain;
+            background: #111;
+        }
+        .card-info {
+            flex: 1;
+            min-width: 160px;
+        }
+        .card-status {
+            display: inline-block;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            padding: 2px 10px;
+            border-radius: 20px;
+            background: #2a2a34;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+        .card-status.done { background: #1a3a2a; color: #6fcf97; }
+        .card-status.running { background: #1a2a3a; color: #6fa8cf; }
+        .card-status.failed { background: #3a1a1a; color: #cf6f6f; }
+        .card-status.queued { background: #2a2a20; color: #c4c46f; }
+        .card-status.cancelled { background: #3a3a3a; color: #8899aa; }
+        body.light .card-status.done { background: #d4edda; color: #155724; }
+        body.light .card-status.running { background: #cce5ff; color: #004085; }
+        body.light .card-status.failed { background: #f8d7da; color: #721c24; }
+        body.light .card-status.queued { background: #fff3cd; color: #856404; }
+        body.light .card-status.cancelled { background: #e9ecef; color: #495057; }
+        .engine-badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 12px;
+            background: #2a2a34;
+            color: #8899aa;
+            margin-left: 6px;
+        }
+        body.light .engine-badge { background: #e9ecef; color: #495057; }
+        .card-url {
+            font-size: 0.9rem;
+            word-break: break-all;
+            color: var(--text-muted);
+            margin: 4px 0 6px;
+        }
+        .card-meta {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 12px 20px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+        .card-meta .jobid {
+            font-family: monospace;
+            background: #0a0a0e;
+            padding: 0 8px;
+            border-radius: 4px;
+            color: #8899bb;
+        }
+        body.light .card-meta .jobid {
+            background: #eef2f8;
+            color: #3a4a6a;
+        }
+        .action-btn {
+            background: transparent;
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 2px 10px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            color: var(--text-muted);
+            transition: all var(--transition);
+            text-decoration: none;
+            display: inline-block;
+            margin: 0 4px 4px 0;
+        }
+        .action-btn:hover { background: var(--border); color: var(--text); }
+        .action-btn.danger:hover { background: #3a1a1a; color: #cf6f6f; border-color: #cf6f6f; }
+        body.light .action-btn.danger:hover { background: #f8d7da; color: #721c24; border-color: #721c24; }
+        .action-btn.retry { border-color: #f0ad4e; color: #f0ad4e; }
+        .action-btn.retry:hover { background: #f0ad4e; color: #1a1a20; }
+        .action-btn.archive { border-color: #dc3545; color: #dc3545; }
+        .action-btn.archive:hover { background: #dc3545; color: #fff; }
+        .progress-wrap {
+            margin: 12px 0 8px;
+        }
+        .progress-bar {
+            height: 6px;
+            background: #2a2a34;
+            border-radius: 10px;
+            overflow: hidden;
+        }
+        body.light .progress-bar { background: #dde3ed; }
+        .progress-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #5b7cfa, #a0b4ff);
+            border-radius: 10px;
+            transition: width 0.3s ease;
+        }
+        .progress-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 2px;
+        }
+        .file-path {
+            font-size: 0.8rem;
+            color: #6fcf97;
+            background: #0f1f1a;
+            padding: 4px 10px;
+            border-radius: 6px;
+            border: 1px solid #1a3a2a;
+            display: inline-block;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            margin: 4px 0 8px;
+        }
+        body.light .file-path {
+            background: #e6f4ea;
+            color: #155724;
+            border-color: #b8dfc6;
+        }
+        .empty {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 40px 0;
+            font-size: 0.95rem;
+        }
+        .settings-group {
+            margin-bottom: 24px;
+        }
+        .settings-group h3 {
+            color: var(--text-muted);
+            margin-bottom: 12px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 6px;
+        }
+        .settings-group label {
+            display: block;
+            margin: 12px 0 4px;
+            font-weight: 500;
+        }
+        .settings-group select, .settings-group input[type="text"], .settings-group input[type="number"] {
+            width: 100%;
+            padding: 10px;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 1rem;
+        }
+        .settings-group select option { background: var(--card-bg); }
+        .settings-group input[type="checkbox"] {
+            transform: scale(1.3);
+            margin-right: 8px;
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            margin-top: 8px;
+        }
+        .checkbox-group label {
+            display: inline;
+            margin: 0;
+        }
+        .hint {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+        }
+        .settings-actions {
+            margin-top: 20px;
+        }
+        .settings-actions button {
+            padding: 12px 24px;
+            background: var(--accent);
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .settings-actions button:hover { background: var(--accent-hover); }
+        .theme-toggle-btn {
+            padding: 6px 14px;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            color: var(--text);
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        .theme-toggle-btn:hover { background: var(--border); }
+
+        /* Utilities styles */
+        .utility-section {
+            margin-bottom: 24px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+        }
+        .utility-section summary {
+            font-weight: 600;
+            font-size: 1.1rem;
+            cursor: pointer;
+            color: var(--text);
+            padding: 4px 0;
+        }
+        .utility-section summary:hover {
+            color: var(--accent);
+        }
+        .utility-section .content {
+            margin-top: 12px;
+        }
+        .utility-section button {
+            padding: 8px 16px;
+            background: var(--accent);
+            border: none;
+            border-radius: 6px;
+            color: #fff;
+            cursor: pointer;
+            margin-right: 8px;
+        }
+        .utility-section button:disabled {
+            opacity: 0.6;
+            cursor: default;
+        }
+        .utility-section input[type="text"] {
+            width: 100%;
+            padding: 8px;
+            margin: 8px 0;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+        }
+        .utility-log {
+            background: #0a0a0e;
+            padding: 16px;
+            border-radius: 8px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 0.8rem;
+            white-space: pre-wrap;
+            word-break: break-word;
+            color: #b0c0d0;
+            border: 1px solid var(--border);
+            margin-top: 12px;
+        }
+        body.light .utility-log {
+            background: #f0f2f6;
+            color: #1e2230;
+        }
+        .utility-status {
+            margin-bottom: 12px;
+            font-weight: 500;
+        }
+        .utility-status.running { color: #6fa8cf; }
+        .utility-status.done { color: #6fcf97; }
+        .utility-status.failed { color: #cf6f6f; }
+
+        /* Metadata list mobile fix */
+        .metadata-list {
+            max-height: 400px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+        .metadata-item {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            word-break: break-word;
+        }
+        .metadata-item .title {
+            font-weight: 600;
+            word-break: break-word;
+        }
+        .metadata-item .uploader {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            word-break: break-word;
+        }
+        .metadata-item .actions {
+            display: flex;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+        .metadata-item .actions button {
+            padding: 4px 10px;
+            font-size: 0.75rem;
+        }
+
+        /* Archive manager */
+        .archive-entry {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid var(--border);
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .archive-entry:last-child { border-bottom: none; }
+        .archive-entry .entry-text {
+            font-family: monospace;
+            font-size: 0.85rem;
+            word-break: break-all;
+            flex: 1;
+        }
+        .archive-entry .delete-btn {
+            background: #dc3545;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 2px 8px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        .archive-entry .delete-btn:hover { background: #c82333; }
+
+        /* Metadata Editor */
+        .file-item {
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .file-item:hover { background: var(--border); }
+        .file-item .file-name { flex: 1; }
+        .file-item .file-cover { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; background: #222; }
+        .file-item .file-tags { font-size: 0.8rem; color: var(--text-muted); }
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .modal.active {
+            display: flex;
+        }
+        .modal-content {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .modal-content h3 {
+            margin-bottom: 16px;
+        }
+        .modal-content label {
+            display: block;
+            margin-top: 12px;
+            font-weight: 500;
+        }
+        .modal-content input, .modal-content textarea {
+            width: 100%;
+            padding: 8px;
+            margin-top: 4px;
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+        }
+        .modal-content textarea {
+            min-height: 60px;
+            resize: vertical;
+        }
+        .modal-content input[type="file"] {
+            padding: 6px;
+            background: transparent;
+            border: none;
+        }
+        .modal-actions {
+            margin-top: 16px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .modal-actions button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .modal-actions .save-btn { background: var(--accent); color: #fff; }
+        .modal-actions .cancel-btn { background: var(--border); color: var(--text); }
+        .modal-actions .cover-preview { max-width: 100px; max-height: 100px; }
+
+        @media (max-width: 768px) {
+            body { flex-direction: column; }
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: static;
+                border-right: none;
+                border-bottom: 1px solid var(--border);
+                flex-direction: row;
+                flex-wrap: wrap;
+                padding: 10px;
+            }
+            .sidebar button { flex: 1; min-width: 80px; text-align: center; border-left: none; border-bottom: 3px solid transparent; padding: 8px 12px; }
+            .sidebar button.active { border-bottom-color: var(--accent); border-left-color: transparent; }
+            .sidebar .version { display: none; }
+            .main { padding: 12px; max-height: none; }
+            .top-header h1 { font-size: 1.4rem; }
+            .metadata-item { flex-direction: column; align-items: stretch; }
+            .metadata-item .actions { justify-content: flex-start; }
+        }
+    </style>
+</head>
+<body class="{theme}">
+<div class="sidebar">
+    <button class="active" data-view="queue">📋 Queue</button>
+    <button data-view="settings">⚙️ Settings</button>
+    <button data-view="utilities">🔧 Utilities</button>
+    <div class="version">v44.0</div>
+</div>
+<div class="main">
+    <div class="top-header">
+        <h1>📡 MediaGrabber</h1>
+        <span class="subtitle">v44.0</span>
+    </div>
+    <!-- Queue -->
+    <div id="view-queue" class="view active">
+        <div class="form-row">
+            <input id="url" type="url" placeholder="Paste URL (YouTube, Spotify, etc.)" autofocus>
+            <button onclick="grab()">Grab</button>
+        </div>
+        <div class="mode-selector" id="modeSelector">
+            <label><input type="radio" name="mode" value="video" checked> Video</label>
+            <label><input type="radio" name="mode" value="audio"> Audio (MP3)</label>
+            <span class="hint">For YouTube Music, choose Audio</span>
+        </div>
+        <div class="queue-title">
+            <span>Queue</span>
+            <button class="clear-btn" onclick="clearCompleted()">🗑️ Clear Completed</button>
+        </div>
+        <div id="queue"><div class="empty">No jobs yet</div></div>
+    </div>
+    <!-- Settings -->
+    <div id="view-settings" class="view">
+        <h2>⚙️ Settings</h2>
+        <form id="settingsForm">
+            <div class="settings-group">
+                <h3>Theme</h3>
+                <button type="button" class="theme-toggle-btn" onclick="toggleTheme()">Toggle Dark/Light</button>
+                <div class="hint">Current: <span id="currentTheme">{theme}</span></div>
+            </div>
+            <div class="settings-group">
+                <h3>Video / Audio</h3>
+                <label for="video_res">Max Video Resolution</label>
+                <select id="video_res" name="video_res">
+                    <option value="2160">4K (2160p)</option>
+                    <option value="1440">1440p</option>
+                    <option value="1080" selected>1080p</option>
+                    <option value="720">720p</option>
+                    <option value="480">480p</option>
+                    <option value="360">360p</option>
+                </select>
+                <label for="container">Container Format</label>
+                <select id="container" name="container">
+                    <option value="mp4" selected>MP4</option>
+                    <option value="webm">WebM</option>
+                    <option value="mkv">MKV</option>
+                </select>
+                <label for="audio_format">Audio Format</label>
+                <select id="audio_format" name="audio_format">
+                    <option value="mp3" selected>MP3</option>
+                    <option value="flac">FLAC</option>
+                </select>
+                <label for="audio_bitrate">Audio Bitrate (MP3)</label>
+                <select id="audio_bitrate" name="audio_bitrate">
+                    <option value="320k" selected>320 kbps</option>
+                    <option value="192k">192 kbps</option>
+                    <option value="128k">128 kbps</option>
+                </select>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="generate_lrc" name="generate_lrc">
+                    <label for="generate_lrc">Generate LRC files (Spotify)</label>
+                </div>
+            </div>
+            <div class="settings-group">
+                <h3>Folder Structure</h3>
+                <label for="folder_structure">Template</label>
+                <select id="folder_structure" name="folder_structure">
+                    <option value="default" selected>Default (YouTube: Uploader/Year, Spotify: Artist/Album)</option>
+                    <option value="flat">Flat (all in root)</option>
+                </select>
+                <div class="hint">More options coming soon.</div>
+            </div>
+            <div class="settings-group">
+                <h3>📂 Storage Paths</h3>
+                <label for="yt_base_path">YouTube Base Path</label>
+                <input type="text" id="yt_base_path" name="yt_base_path" placeholder="/media/YouTube">
+                <div class="hint">Where YouTube videos will be stored (Uploader/Year/ inside)</div>
+                <label for="music_base_path">Music Base Path</label>
+                <input type="text" id="music_base_path" name="music_base_path" placeholder="/opt/navidrome/music/navidrome/music">
+                <div class="hint">Where Spotify downloads will be stored (Artist/Album/ inside)</div>
+                <label for="gallery_base_path">Gallery Base Path</label>
+                <input type="text" id="gallery_base_path" name="gallery_base_path" placeholder="/media/Gallery">
+                <div class="hint">Where gallery‑dl downloads (Instagram, TikTok, etc.) will be stored</div>
+            </div>
+            <div class="settings-group">
+                <h3>🍪 Cookie Files</h3>
+                <label for="cookies_youtube_path">YouTube Cookies File</label>
+                <input type="text" id="cookies_youtube_path" name="cookies_youtube_path" placeholder="/path/to/youtube_cookies.txt">
+                <div class="hint">Path to a cookies.txt file for YouTube (or use Firefox cookies via --cookies-from-browser in extra args)</div>
+                <label for="cookies_gallery_path">Gallery Cookies File</label>
+                <input type="text" id="cookies_gallery_path" name="cookies_gallery_path" placeholder="/path/to/gallery_cookies.txt">
+                <div class="hint">For Instagram, TikTok, etc. (used by gallery-dl)</div>
+            </div>
+            <div class="settings-group">
+                <h3>Media Servers</h3>
+                <label for="jellyfin_url">Jellyfin URL</label>
+                <input type="text" id="jellyfin_url" name="jellyfin_url" placeholder="http://localhost:8096">
+                <label for="jellyfin_api_key">Jellyfin API Key</label>
+                <input type="text" id="jellyfin_api_key" name="jellyfin_api_key" placeholder="(optional)">
+                <label for="navidrome_url">Navidrome URL</label>
+                <input type="text" id="navidrome_url" name="navidrome_url" placeholder="http://localhost:4533">
+                <label for="navidrome_api_key">Navidrome API Key</label>
+                <input type="text" id="navidrome_api_key" name="navidrome_api_key" placeholder="(optional)">
+                <label for="plex_url">Plex URL</label>
+                <input type="text" id="plex_url" name="plex_url" placeholder="http://localhost:32400">
+                <label for="plex_token">Plex Token</label>
+                <input type="text" id="plex_token" name="plex_token" placeholder="Your Plex token">
+                <label for="plex_section_id">Plex Library Section ID</label>
+                <input type="text" id="plex_section_id" name="plex_section_id" placeholder="e.g., 1">
+                <div class="hint">Find the section ID from Plex Web → Settings → Manage → Libraries → hover the library, the URL shows ?sectionId=...</div>
+            </div>
+            <div class="settings-group">
+                <h3>Extra Arguments</h3>
+                <label for="ytdlp_extra">yt‑dlp extra args</label>
+                <input type="text" id="ytdlp_extra" name="ytdlp_extra" placeholder="--no-check-certificate">
+                <label for="spotdl_extra">spotdl extra args</label>
+                <input type="text" id="spotdl_extra" name="spotdl_extra" placeholder="--no-cache">
+                <label for="gallerydl_extra">gallery‑dl extra args</label>
+                <input type="text" id="gallerydl_extra" name="gallerydl_extra" placeholder="--retries 5">
+            </div>
+            <div class="settings-actions">
+                <button type="submit">Save Settings</button>
+                <span id="settingsStatus" style="margin-left:16px;color:#6fcf97;"></span>
+            </div>
+        </form>
+    </div>
+    <!-- Utilities -->
+    <div id="view-utilities" class="view">
+        <h2>🔧 Utilities</h2>
+
+        <details class="utility-section">
+            <summary>🔄 Reorganize Files</summary>
+            <div class="content">
+                <p>Scan configured paths and move files to proper folders (YouTube: Uploader/Year, Music: Artist/Album, Gallery: Extractor/Uploader).</p>
+                <button id="reorgBtn" onclick="startReorganize()">🚀 Start Reorganize</button>
+                <div class="utility-status" id="reorgStatus">Idle</div>
+                <div class="utility-log" id="reorgLog">Waiting to start...</div>
+            </div>
+        </details>
+
+        <details class="utility-section">
+            <summary>🗑️ Deduplicate Files</summary>
+            <div class="content">
+                <p>Find and remove exact duplicate files (SHA‑256) from a folder. Keeps the largest copy, moves duplicates to /media/duplicates_trash/.</p>
+                <label for="dedupTarget">Target folder:</label>
+                <input type="text" id="dedupTarget" placeholder="/media/YouTube" value="/media/YouTube">
+                <div>
+                    <button id="dedupScanBtn" onclick="startDedup('scan')">🔍 Scan Duplicates</button>
+                    <button id="dedupDeleteBtn" onclick="startDedup('delete')">🗑️ Delete Duplicates</button>
+                </div>
+                <div class="utility-status" id="dedupStatus">Idle</div>
+                <div class="utility-log" id="dedupLog">Ready to scan...</div>
+            </div>
+        </details>
+
+        <details class="utility-section">
+            <summary>📝 Metadata Updater</summary>
+            <div class="content">
+                <p>Scan a folder, edit metadata (title, description, uploader, date, tags) for any video file.</p>
+                <label for="metadataPath">Folder to scan:</label>
+                <input type="text" id="metadataPath" placeholder="/media/YouTube" value="/media/YouTube">
+                <button onclick="scanMetadata()">🔍 Scan Metadata</button>
+                <div id="metadataStatus" style="margin-top:8px; color:var(--text-muted);"></div>
+                <div class="metadata-list" id="metadataList"></div>
+            </div>
+        </details>
+
+        <details class="utility-section">
+            <summary>🗂️ Tmp Reorder</summary>
+            <div class="content">
+                <p>Move orphaned files from <code>/tmp/mediagrabber/</code> to their correct final directories (YouTube, Music, or Gallery).</p>
+                <button id="tmpReorgBtn" onclick="startTmpReorg()">🚀 Reorder Tmp Files</button>
+                <div class="utility-status" id="tmpReorgStatus">Idle</div>
+                <div class="utility-log" id="tmpReorgLog">Waiting to start...</div>
+            </div>
+        </details>
+
+        <details class="utility-section">
+            <summary>📋 Archive Manager</summary>
+            <div class="content">
+                <p>View and delete entries from the download archive (<code>~/.mediagrabber/archive.txt</code>).</p>
+                <button onclick="loadArchive()">🔄 Refresh Archive List</button>
+                <div id="archiveList" style="margin-top:12px;">
+                    <p>Click "Refresh" to load archive entries.</p>
+                </div>
+            </div>
+        </details>
+
+        <details class="utility-section" open>
+            <summary>🖼️ Metadata Editor</summary>
+            <div class="content">
+                <p>Browse a folder, click a file to edit its metadata (title, artist, album, date, description) and upload a new cover image.</p>
+                <label for="editorPath">Folder to scan:</label>
+                <input type="text" id="editorPath" placeholder="/media/YouTube or /opt/navidrome/music/navidrome/music" value="/media/YouTube">
+                <button onclick="scanEditorFiles()">🔍 Scan Files</button>
+                <div id="editorStatus" style="margin-top:8px; color:var(--text-muted);"></div>
+                <div id="fileList" style="margin-top:10px; max-height:400px; overflow-y:auto;"></div>
+            </div>
+        </details>
+
+        <!-- Radio Manager -->
+        <details class="utility-section">
+            <summary>📻 Radio Manager</summary>
+            <div class="content">
+                <p>Search and add internet radio stations to your Navidrome server using the <a href="https://www.radio-browser.info/" target="_blank">Radio-Browser</a> API.</p>
+                
+                <!-- Database path -->
+                <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; align-items:center;">
+                    <label style="font-weight:500;">📁 Database Path:</label>
+                    <input type="text" id="radioDbPath" placeholder="/var/lib/navidrome/navidrome.db" value="/var/lib/navidrome/navidrome.db" style="flex:2; min-width:200px; padding:8px; background:var(--card-bg); border:1px solid var(--border); border-radius:6px; color:var(--text);">
+                    <button onclick="setRadioDb()">💾 Save Path</button>
+                    <button onclick="checkRadioStatus()">🔄 Check Status</button>
+                    <span id="radioStatusMsg" style="font-size:0.9rem; color:var(--text-muted);"></span>
+                </div>
+                
+                <!-- Search -->
+                <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+                    <input type="text" id="radioSearchInput" placeholder="Search by name, genre, or country..." style="flex:2; min-width:200px; padding:8px; background:var(--card-bg); border:1px solid var(--border); border-radius:6px; color:var(--text);">
+                    <select id="radioSearchType" style="padding:8px; background:var(--card-bg); border:1px solid var(--border); border-radius:6px; color:var(--text);">
+                        <option value="name">Name</option>
+                        <option value="genre">Genre</option>
+                        <option value="country">Country</option>
+                    </select>
+                    <button onclick="searchRadios()">🔍 Search</button>
+                    <button onclick="listRadios()">📋 List Added</button>
+                </div>
+                
+                <!-- Results -->
+                <div id="radioResults" style="max-height:400px; overflow-y:auto; margin-top:8px;"></div>
+                
+                <!-- Manual add -->
+                <div style="margin-top:12px; padding-top:12px; border-top:1px solid var(--border);">
+                    <h4>➕ Add Radio Manually</h4>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <input type="text" id="radioUrlInput" placeholder="Stream URL (e.g., http://example.com:8000/stream.mp3)" style="flex:2; min-width:200px; padding:8px; background:var(--card-bg); border:1px solid var(--border); border-radius:6px; color:var(--text);">
+                        <input type="text" id="radioNameInput" placeholder="Station name (optional)" style="flex:1; min-width:150px; padding:8px; background:var(--card-bg); border:1px solid var(--border); border-radius:6px; color:var(--text);">
+                        <button onclick="addRadioManually()">➕ Add</button>
+                    </div>
+                </div>
+            </div>
+        </details>
+    </div>
+</div>
+
+<!-- Metadata Editor Edit Modal -->
+<div class="modal" id="editEditorModal">
+    <div class="modal-content">
+        <h3>✏️ Edit Metadata & Cover</h3>
+        <form id="editorForm" enctype="multipart/form-data">
+            <input type="hidden" id="editFilePath" name="file_path">
+            <label>Title</label>
+            <input type="text" id="editTitle" name="title" placeholder="Title">
+            <label>Artist / Uploader</label>
+            <input type="text" id="editArtist" name="artist" placeholder="Artist">
+            <label>Album</label>
+            <input type="text" id="editAlbum" name="album" placeholder="Album">
+            <label>Date</label>
+            <input type="text" id="editDate" name="date" placeholder="YYYYMMDD">
+            <label>Description</label>
+            <textarea id="editDescription" name="description" placeholder="Description"></textarea>
+            <label>Cover Image</label>
+            <input type="file" id="editCover" name="cover" accept="image/*">
+            <div id="currentCoverPreview" style="margin-top:8px;"></div>
+            <div class="modal-actions">
+                <button class="save-btn" type="submit">💾 Save</button>
+                <button class="cancel-btn" type="button" onclick="closeEditorModal()">Cancel</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    // ---------- Theme ----------
+    let currentTheme = '{theme}';
+    function setTheme(theme) {
+        document.body.className = theme === 'light' ? 'light' : '';
+        currentTheme = theme;
+        document.getElementById('currentTheme').textContent = theme;
+        fetch('/settings/theme', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ theme: theme })
+        }).then(() => localStorage.setItem('mediagrabber-theme', theme));
+    }
+    function toggleTheme() {
+        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        setTheme(newTheme);
+    }
+    const savedTheme = localStorage.getItem('mediagrabber-theme');
+    if (savedTheme && savedTheme !== currentTheme) setTheme(savedTheme);
+
+    // ---------- Show/hide mode selector ----------
+    document.getElementById('url').addEventListener('input', function() {
+        const url = this.value.trim();
+        const isYoutube = url.includes('youtube.com') || url.includes('youtu.be');
+        document.getElementById('modeSelector').style.display = isYoutube ? 'block' : 'none';
+    });
+
+    // ---------- View switching ----------
+    document.querySelectorAll('.sidebar button[data-view]').forEach(btn => {
+        btn.addEventListener('click', function() {
+            document.querySelectorAll('.sidebar button').forEach(b => b.classList.remove('active'));
+            this.classList.add('active');
+            const view = this.dataset.view;
+            document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+            document.getElementById('view-' + view).classList.add('active');
+        });
+    });
+
+    // ---------- Queue functions ----------
+    async function grab() {
+        const url = document.getElementById('url').value.trim();
+        if (!url) return;
+        const mode = document.querySelector('input[name="mode"]:checked')?.value || 'video';
+        const btn = document.querySelector('.form-row button');
+        btn.textContent = '⏳';
+        btn.disabled = true;
+        await fetch('/grab', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'url=' + encodeURIComponent(url) + '&mode=' + mode
+        });
+        document.getElementById('url').value = '';
+        btn.textContent = 'Grab';
+        btn.disabled = false;
+    }
+
+    async function clearArchive(id) {
+        if (!confirm('This will remove the URL from the archive and delete the job from the queue if it is completed. Proceed?')) return;
+        const btn = document.querySelector(`.card[data-job-id="${id}"] .archive-btn`);
+        if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+        try {
+            const res = await fetch('/clear-archive/' + id, { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'archive cleared' || data.status === 'archive cleared and job removed') {
+                alert('Archive entry cleared');
+            } else {
+                alert('Error: ' + (data.error || 'unknown'));
+            }
+        } catch (e) {
+            alert('Error: ' + e);
+        }
+        if (btn) { btn.disabled = false; btn.textContent = '🗑️ Archive'; }
+    }
+
+    async function retryJob(id) {
+        if (!confirm('This will remove the existing entry from the archive and re-download the video. Proceed?')) return;
+        const btn = document.querySelector(`.card[data-job-id="${id}"] .retry-btn`);
+        if (btn) { btn.textContent = '⏳'; btn.disabled = true; }
+        try {
+            const res = await fetch('/retry/' + id, { method: 'POST' });
+            const data = await res.json();
+            if (data.status === 'retried') {
+                alert('Retry started: ' + data.new_job_id);
+            } else {
+                alert('Retry failed: ' + (data.error || 'unknown error'));
+            }
+        } catch (e) {
+            alert('Error: ' + e);
+        }
+        if (btn) { btn.disabled = false; btn.textContent = '🔄 Retry'; }
+    }
+
+    async function cancelJob(id) {
+        if (!confirm('Cancel this job?')) return;
+        await fetch('/cancel/' + id, { method: 'POST' });
+    }
+    async function removeJob(id) {
+        if (!confirm('Remove this job from queue?')) return;
+        await fetch('/remove/' + id, { method: 'DELETE' });
+    }
+    async function clearCompleted() {
+        if (!confirm('Remove all completed (done/failed/cancelled) jobs?')) return;
+        await fetch('/clear-completed', { method: 'POST' });
+    }
+
+    function renderQueue(data) {
+        const q = document.getElementById('queue');
+        const entries = Object.entries(data);
+        if (!entries.length) {
+            q.innerHTML = '<div class="empty">No jobs yet</div>';
+            return;
+        }
+        let html = '';
+        for (const [id, job] of entries) {
+            const status = job.status || 'queued';
+            const thumb = job.thumbnail ? `<img src="/media/${job.thumbnail}" alt="thumb">` : '';
+            let engine = 'UNKNOWN';
+            (job.log || []).forEach(line => {
+                if (line.includes('Engine → SPOTIFY')) engine = 'SPOTIFY';
+                else if (line.includes('Engine → GALLERY')) engine = 'GALLERY';
+                else if (line.includes('Engine → YOUTUBE')) engine = 'YOUTUBE';
+            });
+            // YouTube Music tag
+            if (engine === 'YOUTUBE' && job.url && job.url.includes('music.youtube.com')) {
+                engine = 'YT MUSIC';
+            }
+            let thumbClass = '';
+            if (engine === 'YOUTUBE') thumbClass = 'thumb-yt';
+            else if (engine === 'SPOTIFY') thumbClass = 'thumb-spotify';
+            else if (engine === 'GALLERY') thumbClass = 'thumb-gallery';
+            let actions = '';
+            if (status === 'running') {
+                actions += `<button class="action-btn danger" onclick="cancelJob('${id}')">⏹ Cancel</button>`;
+            } else if (status === 'queued') {
+                actions += `<button class="action-btn danger" onclick="removeJob('${id}')">✕ Remove</button>`;
+            } else {
+                if (job.url) {
+                    actions += `<button class="action-btn retry retry-btn" onclick="retryJob('${id}')">🔄 Retry</button>`;
+                    actions += `<button class="action-btn archive archive-btn" onclick="clearArchive('${id}')">🗑️ Archive</button>`;
+                }
+                actions += `<button class="action-btn" onclick="removeJob('${id}')">✕ Remove</button>`;
+            }
+            const logBtn = `<a href="/log/${id}" class="action-btn">📋 Log</a>`;
+            html += `
+            <div class="card" data-job-id="${id}">
+                <div class="card-top">
+                    <div class="card-thumb ${thumbClass}">${thumb}</div>
+                    <div class="card-info">
+                        <div>
+                            <span class="card-status ${status}">${status}</span>
+                            <span class="engine-badge">${engine}</span>
+                            <span style="float:right;">${logBtn} ${actions}</span>
+                        </div>
+                        <div class="card-url">${job.url}</div>
+                        <div class="card-meta">
+                            <span class="jobid">${id.slice(0,8)}</span>
+                            ${job.file ? '<span style="color:#6fcf97;">✓ done</span>' : ''}
+                        </div>
+                    </div>
+                </div>
+                <div class="progress-wrap">
+                    <div class="progress-label"><span>Progress</span><span>${Math.round(job.progress || 0)}%</span></div>
+                    <div class="progress-bar"><div class="progress-fill" style="width:${job.progress || 0}%"></div></div>
+                </div>
+                ${job.file ? `<div class="file-path">📁 ${job.file}</div>` : ''}
+            </div>`;
+        }
+        q.innerHTML = html;
+    }
+
+    async function loadQueue() {
+        try {
+            const res = await fetch('/queue', { cache: 'no-store' });
+            const data = await res.json();
+            renderQueue(data);
+        } catch (_) {}
+    }
+
+    // ---------- Reorganize ----------
+    let reorgInterval = null;
+    async function startReorganize() {
+        const btn = document.getElementById('reorgBtn');
+        btn.disabled = true;
+        btn.textContent = '⏳ Starting...';
+        const res = await fetch('/reorganize', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'already running') {
+            alert('Already running.');
+            btn.disabled = false;
+            btn.textContent = '🚀 Start Reorganize';
+            return;
+        }
+        if (reorgInterval) clearInterval(reorgInterval);
+        document.getElementById('reorgLog').textContent = 'Loading logs...';
+        document.getElementById('reorgStatus').textContent = 'Running...';
+        document.getElementById('reorgStatus').className = 'utility-status running';
+        reorgInterval = setInterval(fetchReorgLogs, 1500);
+        fetchReorgLogs();
+        btn.textContent = '🔄 Running...';
+    }
+
+    async function fetchReorgLogs() {
+        try {
+            const res = await fetch('/reorganize-logs');
+            const data = await res.json();
+            const logDiv = document.getElementById('reorgLog');
+            const statusDiv = document.getElementById('reorgStatus');
+            logDiv.textContent = data.logs.join('\\n');
+            if (!data.running) {
+                statusDiv.textContent = '✅ Completed';
+                statusDiv.className = 'utility-status done';
+                if (reorgInterval) {
+                    clearInterval(reorgInterval);
+                    reorgInterval = null;
+                    document.getElementById('reorgBtn').disabled = false;
+                    document.getElementById('reorgBtn').textContent = '🚀 Start Reorganize';
+                }
+            } else {
+                statusDiv.textContent = '🔄 Running...';
+                statusDiv.className = 'utility-status running';
+                document.getElementById('reorgBtn').disabled = true;
+                document.getElementById('reorgBtn').textContent = '🔄 Running...';
+            }
+            logDiv.scrollTop = logDiv.scrollHeight;
+        } catch (_) {}
+    }
+
+    // ---------- Deduplicate ----------
+    async function startDedup(action) {
+        const target = document.getElementById('dedupTarget').value.trim();
+        if (!target) { alert('Please enter a target folder.'); return; }
+        const scanBtn = document.getElementById('dedupScanBtn');
+        const delBtn = document.getElementById('dedupDeleteBtn');
+        const logDiv = document.getElementById('dedupLog');
+        const statusDiv = document.getElementById('dedupStatus');
+        scanBtn.disabled = true;
+        delBtn.disabled = true;
+        logDiv.textContent = 'Running...';
+        statusDiv.textContent = 'Running...';
+        statusDiv.className = 'utility-status running';
+
+        try {
+            const response = await fetch('/deduplicate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ target: target, action: action })
+            });
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let result = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                const chunk = decoder.decode(value);
+                result += chunk;
+                logDiv.textContent = result;
+                logDiv.scrollTop = logDiv.scrollHeight;
+            }
+            statusDiv.textContent = '✅ Completed';
+            statusDiv.className = 'utility-status done';
+        } catch (e) {
+            logDiv.textContent = 'Error: ' + e;
+            statusDiv.textContent = '❌ Error';
+            statusDiv.className = 'utility-status failed';
+        }
+        scanBtn.disabled = false;
+        delBtn.disabled = false;
+    }
+
+    // ---------- Metadata Updater ----------
+    let currentMetadata = [];
+
+    async function scanMetadata() {
+        const path = document.getElementById('metadataPath').value.trim();
+        if (!path) { alert('Please enter a folder path.'); return; }
+        const statusDiv = document.getElementById('metadataStatus');
+        statusDiv.textContent = 'Scanning...';
+        try {
+            const res = await fetch('/metadata/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path })
+            });
+            const data = await res.json();
+            if (data.error) {
+                statusDiv.textContent = '❌ ' + data.error;
+                return;
+            }
+            currentMetadata = data;
+            statusDiv.textContent = `✅ Found ${data.length} files with metadata.`;
+            renderMetadataList(data);
+        } catch (e) {
+            statusDiv.textContent = '❌ Error: ' + e;
+        }
+    }
+
+    function renderMetadataList(items) {
+        const container = document.getElementById('metadataList');
+        if (!items.length) {
+            container.innerHTML = '<p style="color:var(--text-muted);">No metadata files found.</p>';
+            return;
+        }
+        let html = '';
+        for (const item of items) {
+            html += `
+            <div class="metadata-item">
+                <div>
+                    <div class="title">${item.title || 'Untitled'}</div>
+                    <div class="uploader">${item.uploader || 'Unknown'} · ${item.upload_date || ''}</div>
+                </div>
+                <div class="actions">
+                    <button onclick="openEditModal('${item.info_file}')">✏️ Edit</button>
+                </div>
+            </div>
+            `;
+        }
+        container.innerHTML = html;
+    }
+
+    function openEditModal(infoFile) {
+        const item = currentMetadata.find(i => i.info_file === infoFile);
+        if (!item) return;
+        document.getElementById('editInfoFile').value = infoFile;
+        document.getElementById('editTitle').value = item.title || '';
+        document.getElementById('editUploader').value = item.uploader || '';
+        document.getElementById('editDate').value = item.upload_date || '';
+        document.getElementById('editDescription').value = item.description || '';
+        document.getElementById('editTags').value = (item.tags || []).join(', ');
+        document.getElementById('editModal').classList.add('active');
+    }
+
+    function closeModal() {
+        document.getElementById('editModal').classList.remove('active');
+    }
+
+    async function saveMetadata() {
+        const infoFile = document.getElementById('editInfoFile').value;
+        const data = {
+            info_file: infoFile,
+            title: document.getElementById('editTitle').value,
+            uploader: document.getElementById('editUploader').value,
+            upload_date: document.getElementById('editDate').value,
+            description: document.getElementById('editDescription').value,
+            tags: document.getElementById('editTags').value.split(',').map(s => s.trim()).filter(Boolean)
+        };
+        try {
+            const res = await fetch('/metadata/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            const result = await res.json();
+            if (result.status === 'updated') {
+                alert('Metadata updated successfully!');
+                closeModal();
+                scanMetadata();
+            } else {
+                alert('Error: ' + (result.error || 'Unknown error'));
+            }
+        } catch (e) {
+            alert('Error: ' + e);
+        }
+    }
+
+    // ---------- Tmp Reorder ----------
+    let tmpReorgInterval = null;
+    async function startTmpReorg() {
+        const btn = document.getElementById('tmpReorgBtn');
+        btn.disabled = true;
+        btn.textContent = '⏳ Starting...';
+        const res = await fetch('/tmp-reorder', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'already running') {
+            alert('Already running.');
+            btn.disabled = false;
+            btn.textContent = '🚀 Reorder Tmp Files';
+            return;
+        }
+        if (tmpReorgInterval) clearInterval(tmpReorgInterval);
+        document.getElementById('tmpReorgLog').textContent = 'Loading logs...';
+        document.getElementById('tmpReorgStatus').textContent = 'Running...';
+        document.getElementById('tmpReorgStatus').className = 'utility-status running';
+        tmpReorgInterval = setInterval(fetchTmpReorgLogs, 1500);
+        fetchTmpReorgLogs();
+        btn.textContent = '🔄 Running...';
+    }
+
+    async function fetchTmpReorgLogs() {
+        try {
+            const res = await fetch('/tmp-reorder-logs');
+            const data = await res.json();
+            const logDiv = document.getElementById('tmpReorgLog');
+            const statusDiv = document.getElementById('tmpReorgStatus');
+            logDiv.textContent = data.logs.join('\\n');
+            if (!data.running) {
+                statusDiv.textContent = '✅ Completed';
+                statusDiv.className = 'utility-status done';
+                if (tmpReorgInterval) {
+                    clearInterval(tmpReorgInterval);
+                    tmpReorgInterval = null;
+                    document.getElementById('tmpReorgBtn').disabled = false;
+                    document.getElementById('tmpReorgBtn').textContent = '🚀 Reorder Tmp Files';
+                }
+            } else {
+                statusDiv.textContent = '🔄 Running...';
+                statusDiv.className = 'utility-status running';
+                document.getElementById('tmpReorgBtn').disabled = true;
+                document.getElementById('tmpReorgBtn').textContent = '🔄 Running...';
+            }
+            logDiv.scrollTop = logDiv.scrollHeight;
+        } catch (_) {}
+    }
+
+    // ---------- Archive Manager ----------
+    async function loadArchive() {
+        const container = document.getElementById('archiveList');
+        container.innerHTML = 'Loading...';
+        try {
+            const res = await fetch('/archive');
+            const data = await res.json();
+            if (!data.length) {
+                container.innerHTML = '<p style="color:var(--text-muted);">No entries in archive.</p>';
+                return;
+            }
+            let html = '';
+            for (const entry of data) {
+                html += `
+                <div class="archive-entry">
+                    <span class="entry-text">${entry.entry}</span>
+                    <button class="delete-btn" onclick="deleteArchiveEntry('${entry.entry.replace(/'/g, "\\'")}')">Delete</button>
+                </div>
+                `;
+            }
+            container.innerHTML = html;
+        } catch (e) {
+            container.innerHTML = '<p style="color:#cf6f6f;">Error loading archive: ' + e + '</p>';
+        }
+    }
+
+    async function deleteArchiveEntry(entry) {
+        if (!confirm(`Delete this entry from the archive?`)) return;
+        try {
+            const res = await fetch('/archive/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entry: entry })
+            });
+            const data = await res.json();
+            if (data.status === 'deleted') {
+                loadArchive();
+            } else {
+                alert('Error deleting entry: ' + (data.error || 'unknown'));
+            }
+        } catch (e) {
+            alert('Error: ' + e);
+        }
+    }
+
+    // ---------- Metadata Editor ----------
+    let editorFiles = [];
+
+    async function scanEditorFiles() {
+        const path = document.getElementById('editorPath').value.trim();
+        if (!path) { alert('Please enter a folder path.'); return; }
+        const statusDiv = document.getElementById('editorStatus');
+        const fileList = document.getElementById('fileList');
+        statusDiv.textContent = 'Scanning...';
+        try {
+            const res = await fetch('/metadata/editor/scan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path })
+            });
+            const data = await res.json();
+            if (data.error) {
+                statusDiv.textContent = '❌ ' + data.error;
+                return;
+            }
+            editorFiles = data;
+            statusDiv.textContent = `✅ Found ${data.length} files. Click a file to edit.`;
+            renderFileList(data);
+        } catch (e) {
+            statusDiv.textContent = '❌ Error: ' + e;
+        }
+    }
+
+    function renderFileList(files) {
+        const container = document.getElementById('fileList');
+        if (!files.length) {
+            container.innerHTML = '<p style="color:var(--text-muted);">No supported files found.</p>';
+            return;
+        }
+        let html = '';
+        for (const file of files) {
+            const title = file.title || file.file_path.split('/').pop();
+            const tags = `${file.artist || 'Unknown'} · ${file.album || ''} ${file.date ? '· ' + file.date : ''}`;
+            const hasCover = file.has_cover ? '🖼️' : '';
+            html += `
+            <div class="file-item" onclick="openEditorModal('${file.file_path}')">
+                <span class="file-name">${title}</span>
+                <span class="file-tags">${tags} ${hasCover}</span>
+                <span style="font-size:0.7rem;color:var(--text-muted);">${file.extension}</span>
+            </div>
+            `;
+        }
+        container.innerHTML = html;
+    }
+
+    function openEditorModal(filePath) {
+        const file = editorFiles.find(f => f.file_path === filePath);
+        if (!file) return;
+        document.getElementById('editFilePath').value = filePath;
+        document.getElementById('editTitle').value = file.title || '';
+        document.getElementById('editArtist').value = file.artist || '';
+        document.getElementById('editAlbum').value = file.album || '';
+        document.getElementById('editDate').value = file.date || '';
+        document.getElementById('editDescription').value = file.description || '';
+        // Show current cover preview if exists
+        const previewDiv = document.getElementById('currentCoverPreview');
+        previewDiv.innerHTML = '';
+        if (file.has_cover) {
+            const base = file.file_path.replace(/\.[^.]*$/, '');
+            // Try to find the cover image
+            for (const ext of ['jpg', 'png', 'webp']) {
+                const coverPath = base + '.' + ext;
+                if (coverPath) {
+                    previewDiv.innerHTML = `<img src="/media/${coverPath}" style="max-width:100px;max-height:100px;border-radius:4px;border:1px solid var(--border);">`;
+                    break;
+                }
+            }
+        }
+        document.getElementById('editEditorModal').classList.add('active');
+    }
+
+    function closeEditorModal() {
+        document.getElementById('editEditorModal').classList.remove('active');
+    }
+
+    // Handle form submission for metadata editor
+    document.getElementById('editorForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+        const formData = new FormData(this);
+        try {
+            const res = await fetch('/metadata/editor/update', {
+                method: 'POST',
+                body: formData
+            });
+            const result = await res.json();
+            if (result.status === 'updated') {
+                alert('Metadata updated successfully!');
+                closeEditorModal();
+                // Refresh file list
+                scanEditorFiles();
+            } else {
+                alert('Error: ' + (result.error || 'Unknown error'));
+            }
+        } catch (e) {
+            alert('Error: ' + e);
+        }
+    });
+
+    // ---------- Radio Manager ----------
+    let radioPage = 1;
+
+    async function checkRadioStatus() {
+        const statusSpan = document.getElementById('radioStatusMsg');
+        statusSpan.textContent = 'Checking...';
+        try {
+            const res = await fetch('/radio/status');
+            const data = await res.json();
+            if (data.installed) {
+                statusSpan.innerHTML = '✅ ' + data.message;
+            } else {
+                statusSpan.innerHTML = '❌ ' + data.message;
+            }
+        } catch (e) {
+            statusSpan.innerHTML = '❌ Error checking status';
+        }
+    }
+
+    async function setRadioDb() {
+        const path = document.getElementById('radioDbPath').value.trim();
+        if (!path) { alert('Please enter a database path.'); return; }
+        try {
+            const res = await fetch('/radio/setdb', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ db_path: path })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                document.getElementById('radioStatusMsg').innerHTML = '✅ ' + data.message;
+            } else {
+                alert('Error: ' + data.error);
+            }
+        } catch (e) {
+            alert('Error: ' + e);
+        }
+    }
+
+    async function searchRadios(page = 1) {
+        const query = document.getElementById('radioSearchInput').value.trim();
+        const type = document.getElementById('radioSearchType').value;
+        if (!query) { alert('Please enter a search query.'); return; }
+        if (page < 1) page = 1;
+        radioPage = page;
+        
+        const resultsDiv = document.getElementById('radioResults');
+        resultsDiv.innerHTML = '<div style="color:var(--text-muted);">Searching...</div>';
+        
+        try {
+            const res = await fetch('/radio/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query, type, page })
+            });
+            const data = await res.json();
+            if (data.error) {
+                resultsDiv.innerHTML = '<p style="color:#cf6f6f;">❌ ' + data.error + '</p>';
+                return;
+            }
+            if (!data.stations || data.stations.length === 0) {
+                resultsDiv.innerHTML = '<p style="color:var(--text-muted);">No stations found.</p>';
+                return;
+            }
+            let html = '<div style="font-weight:600; margin-bottom:8px;">Page ' + data.page + ' (found ~' + data.total + ' total):</div>';
+            for (const station of data.stations) {
+                html += `
+                <div class="archive-entry">
+                    <span class="entry-text"><strong>${station.name}</strong> ${station.country ? '· ' + station.country : ''}</span>
+                    <div>
+                        <button onclick="addRadio('${station.url.replace(/'/g, "\\'")}', '${station.name.replace(/'/g, "\\'")}')" style="background:#28a745;color:#fff;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;">➕ Add</button>
+                    </div>
+                </div>
+                `;
+            }
+            // Pagination controls
+            html += `<div style="margin-top:12px; display:flex; gap:8px; justify-content:center;">
+                <button onclick="searchRadios(${data.page - 1})" ${data.page <= 1 ? 'disabled' : ''} style="padding:4px 12px; background:var(--accent); color:#fff; border:none; border-radius:4px; cursor:pointer;">⬅ Previous</button>
+                <span style="padding:4px 12px;">Page ${data.page}</span>
+                <button onclick="searchRadios(${data.page + 1})" ${!data.has_next ? 'disabled' : ''} style="padding:4px 12px; background:var(--accent); color:#fff; border:none; border-radius:4px; cursor:pointer;">Next ➡</button>
+            </div>`;
+            resultsDiv.innerHTML = html;
+        } catch (e) {
+            resultsDiv.innerHTML = '<p style="color:#cf6f6f;">❌ Error: ' + e + '</p>';
+        }
+    }
+
+    async function addRadio(url, name) {
+        if (!confirm(`Add "${name}" to Navidrome?`)) return;
+        try {
+            const res = await fetch('/radio/add', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, name })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                alert('✅ Radio added successfully!');
+                // Refresh the list if visible
+                listRadios();
+            } else {
+                alert('❌ Failed: ' + data.error);
+            }
+        } catch (e) {
+            alert('Error: ' + e);
+        }
+    }
+
+    async function addRadioManually() {
+        const url = document.getElementById('radioUrlInput').value.trim();
+        const name = document.getElementById('radioNameInput').value.trim();
+        if (!url) { alert('Please enter a stream URL.'); return; }
+        await addRadio(url, name);
+        document.getElementById('radioUrlInput').value = '';
+        document.getElementById('radioNameInput').value = '';
+    }
+
+    async function listRadios() {
+        const resultsDiv = document.getElementById('radioResults');
+        resultsDiv.innerHTML = '<div style="color:var(--text-muted);">Loading...</div>';
+        try {
+            const res = await fetch('/radio/list');
+            const data = await res.json();
+            if (data.error) {
+                resultsDiv.innerHTML = '<p style="color:#cf6f6f;">❌ ' + data.error + '</p>';
+                return;
+            }
+            if (!data.stations || data.stations.length === 0) {
+                resultsDiv.innerHTML = '<p style="color:var(--text-muted);">No stations added yet.</p>';
+                return;
+            }
+            let html = '<div style="font-weight:600; margin-bottom:8px;">Added stations (' + data.stations.length + '):</div>';
+            for (const station of data.stations) {
+                html += `
+                <div class="archive-entry">
+                    <span class="entry-text"><strong>${station.name}</strong> · ${station.url}</span>
+                    <div>
+                        <button onclick="removeRadio('${station.url.replace(/'/g, "\\'")}')" style="background:#dc3545;color:#fff;border:none;border-radius:4px;padding:2px 8px;cursor:pointer;">🗑️ Remove</button>
+                    </div>
+                </div>
+                `;
+            }
+            resultsDiv.innerHTML = html;
+        } catch (e) {
+            resultsDiv.innerHTML = '<p style="color:#cf6f6f;">❌ Error: ' + e + '</p>';
+        }
+    }
+
+    async function removeRadio(url) {
+        if (!confirm('Remove this radio station?')) return;
+        try {
+            const res = await fetch('/radio/remove', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+            const data = await res.json();
+            if (data.status === 'success') {
+                alert('✅ Station removed.');
+                listRadios();
+            } else {
+                alert('❌ Failed: ' + data.error);
+            }
+        } catch (e) {
+            alert('Error: ' + e);
+        }
+    }
+
+    // ---------- Settings form ----------
+    async function loadSettings() {
+        try {
+            const res = await fetch('/settings');
+            const data = await res.json();
+            for (const [key, value] of Object.entries(data)) {
+                const el = document.getElementById(key);
+                if (el) {
+                    if (el.type === 'checkbox') {
+                        el.checked = value === true;
+                    } else {
+                        el.value = value || '';
+                    }
+                }
+            }
+        } catch (_) {}
+    }
+
+    document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const data = new FormData(e.target);
+        const res = await fetch('/settings', { method: 'POST', body: data });
+        const result = await res.json();
+        document.getElementById('settingsStatus').textContent = '✅ ' + result.status;
+    });
+
+    // ---------- Polling ----------
+    setInterval(loadQueue, 1500);
+    loadQueue();
+    loadSettings();
+    setTimeout(fetchReorgLogs, 1000);
+    setTimeout(fetchTmpReorgLogs, 1000);
+    setTimeout(checkRadioStatus, 1500);
+</script>
+</body>
+</html>
+    '''.replace('{theme}', theme)
+    return html
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8080, debug=True)

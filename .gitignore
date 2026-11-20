@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# MediaGrabber Data (Privacy & Security)
+users.db
+users.db.bak.*
+auth.json
+settings.json
+avatars/
+logs/
+data/
+config/utilities.json
+
+# Downloads & Archives
+archive.txt
+
+# Backups
+*.tar.gz
+*.bak.*
