@@ -25,3 +25,5 @@ web/subscriptions.json
 
 # Thumbnail cache (regeneratable)
 thumbs.json
+*.bak
+*.working
