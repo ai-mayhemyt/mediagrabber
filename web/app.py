@@ -1007,7 +1007,10 @@ def grab(form_data=None):
                 except Exception as _pe:
                     print(f"[PUSH-FAIL] success(no-file) push {job_id}: {type(_pe).__name__}: {_pe}", flush=True)
 
-    threading.Thread(target=run, daemon=True).start()
+    def _run_with_ctx():
+        with app.app_context():
+            run()
+    threading.Thread(target=_run_with_ctx, daemon=True).start()
     return jsonify({"job_id": job_id})
 
 # ---------- Retry endpoint ----------
@@ -1965,7 +1968,7 @@ _version_cache = {"data": None, "ts": 0}
 def api_version_info():
     """Returns current + latest version from GitHub tags (5-min cache)."""
     import json, time, urllib.request
-    current = "v1.9.5"
+    current = "v1.9.6"
     now = time.time()
     # Return cache if <5 min old
     if _version_cache["data"] and (now - _version_cache["ts"]) < 300:
@@ -2541,7 +2544,7 @@ def home():
 </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-    <title>MediaGrabber v1.9</title>
+    <title>MediaGrabber v1.9.6</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1">
     <style>
         :root {
@@ -3220,7 +3223,7 @@ def home():
             .metadata-item .actions { justify-content: flex-start; }
         }
 
-        /* ===== v1.9.5 mobile phone fix (< 500px) ===== */
+        /* ===== v1.9.6 mobile phone fix (< 500px) ===== */
         @media (max-width: 500px) {
             /* 1. Setup body as a strict vertical flex container */
             body {
@@ -3327,7 +3330,7 @@ def home():
                 font-size: 1rem !important;
             }
         }
-        /* ===== end v1.9.5 mobile fix ===== */
+        /* ===== end v1.9.6 mobile fix ===== */
     
         .role-user .admin-only-utility,
         .role-user .admin-only-settings {
@@ -3363,7 +3366,7 @@ def home():
         <h4 style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase;">Storage Space</h4>
         <div id="storageBars"></div>
     </div>
-<div class="version">v1.9.5</div>
+<div class="version">v1.9.6</div>
     
         </div>
     </div>
@@ -3501,7 +3504,7 @@ def home():
 <div class="main">
     <div class="top-header">
         <h1>📡 MediaGrabber</h1>
-        <span class="subtitle">v1.9.5</span>
+        <span class="subtitle">v1.9.6</span>
     </div>
     <!-- Queue -->
     <div id="view-queue" class="view active">
@@ -5695,7 +5698,7 @@ def _pwa_sw():
     return resp
 
 
-# ========== SCHEDULED DOWNLOADS (v1.9.5) ==========
+# ========== SCHEDULED DOWNLOADS (v1.9.6) ==========
 import datetime as _sched_dt
 
 def _init_scheduled_db():
@@ -5718,6 +5721,8 @@ _init_scheduled_db()
 def _scheduler_loop():
     """Background thread: every 30s, check for due jobs and fire them."""
     import time
+    # Small startup delay so Flask finishes booting before we touch its context
+    time.sleep(5)
     while True:
         try:
             now = _sched_dt.datetime.now().strftime("%Y-%m-%dT%H:%M")
@@ -5728,18 +5733,26 @@ def _scheduler_loop():
                 (now,)
             ).fetchall()
             for row in rows:
-                job_id = str(uuid.uuid4())
                 try:
-                    grab(form_data={"url": row["url"], "mode": row["mode"] or "video"})
-                    # grab() created its own QUEUE entry with its own job_id,
-                    # but we don't need to link it — just mark as fired
+                    # Run grab() inside a Flask app context so request/url_for work
+                    with app.app_context():
+                        grab(form_data={"url": row["url"], "mode": row["mode"] or "video"})
                     conn.execute(
                         "UPDATE scheduled_jobs SET status='fired', fired_at=? WHERE id=?",
                         (_sched_dt.datetime.now().isoformat(timespec='seconds'), row["id"])
                     )
                     conn.commit()
+                    print(f"[scheduler] fired job {row['id']}: {row['url']}")
                 except Exception as e:
+                    import traceback
+                    traceback.print_exc()
                     print(f"[scheduler] failed to fire job {row['id']}: {e}")
+                    # Mark as failed so we don't loop forever on the same job
+                    conn.execute(
+                        "UPDATE scheduled_jobs SET status='failed', fired_at=? WHERE id=?",
+                        (_sched_dt.datetime.now().isoformat(timespec='seconds'), row["id"])
+                    )
+                    conn.commit()
             conn.close()
         except Exception as e:
             print(f"[scheduler] loop error: {e}")
