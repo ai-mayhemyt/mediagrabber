@@ -822,9 +822,11 @@ def delete_archive_entry():
 
 # ---------- Grab endpoint ----------
 @app.route("/grab", methods=["POST"])
-def grab():
-    url = request.form["url"]
-    mode = request.form.get("mode", "video")
+def grab(form_data=None):
+    if form_data is None:
+        form_data = request.form
+    url = form_data["url"]
+    mode = form_data.get("mode", "video")
     job_id = str(uuid.uuid4())
     with LOCK:
         QUEUE[job_id] = {
@@ -1957,6 +1959,56 @@ def settings_page():
     return jsonify(load_settings())
 
 # ---------- Metadata Editor ----------
+_version_cache = {"data": None, "ts": 0}
+
+@app.route("/api/version/info", methods=["GET"])
+def api_version_info():
+    """Returns current + latest version from GitHub tags (5-min cache)."""
+    import json, time, urllib.request
+    current = "v1.9.5"
+    now = time.time()
+    # Return cache if <5 min old
+    if _version_cache["data"] and (now - _version_cache["ts"]) < 300:
+        return jsonify(_version_cache["data"])
+    latest = current
+    update_available = False
+    error = None
+    try:
+        import subprocess
+        # Use git locally — credentials already configured in ~/.git-credentials
+        result = subprocess.run(
+            ["git", "-C", "/opt/mediagrabber", "ls-remote", "--tags", "origin"],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "git ls-remote failed")
+        names = []
+        for line in result.stdout.splitlines():
+            parts = line.split("refs/tags/")
+            if len(parts) == 2:
+                name = parts[1].strip()
+                if name.startswith("v") and not name.endswith("^{}"):
+                    names.append(name)
+        def _vkey(v):
+            try: return tuple(int(x) for x in v.lstrip("v").split("."))
+            except: return (0,)
+        names.sort(key=_vkey, reverse=True)
+        if names:
+            latest = names[0]
+            update_available = (_vkey(latest) > _vkey(current))
+    except Exception as e:
+        error = str(e)
+    data = {
+        "current": current,
+        "latest": latest,
+        "update_available": update_available,
+        "error": error,
+        "checked_at": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    _version_cache["data"] = data
+    _version_cache["ts"] = now
+    return jsonify(data)
+
 @app.route("/api/server/netwatch", methods=["GET"])
 def api_server_netwatch_status():
     """Read-only status of the mg-netwatch timer."""
@@ -3167,6 +3219,115 @@ def home():
             .metadata-item { flex-direction: column; align-items: stretch; }
             .metadata-item .actions { justify-content: flex-start; }
         }
+
+        /* ===== v1.9.5 mobile phone fix (< 500px) ===== */
+        @media (max-width: 500px) {
+            /* 1. Setup body as a strict vertical flex container */
+            body {
+                display: flex !important;
+                flex-direction: column !important;
+                padding: 0 !important;
+                margin: 0 !important;
+            }
+
+            /* 2. Flatten the main container so its children can be ordered */
+            .main {
+                display: contents !important;
+            }
+
+            /* 3. Extract the Top Header (Logo) to the very top */
+            .main .top-header {
+                order: 1 !important;
+                display: flex !important;
+                justify-content: space-between !important;
+                align-items: center !important;
+                width: 100% !important;
+                padding: 10px !important;
+                background: var(--card-bg) !important;
+                border-bottom: 1px solid var(--border) !important;
+                box-sizing: border-box !important;
+                margin: 0 !important;
+            }
+            
+            .main .top-header h1 { font-size: 1.2rem !important; margin: 0 !important; }
+
+            /* 4. The Sidebar (Profile, Nav, Storage) comes SECOND */
+            .sidebar {
+                order: 2 !important;
+                width: 100% !important;
+                height: auto !important;
+                position: relative !important;
+                border-right: none !important;
+                border-bottom: 1px solid var(--border) !important;
+                padding: 10px !important;
+                background: transparent !important;
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 10px !important;
+                box-sizing: border-box;
+            }
+
+            .sidebar .user-widget {
+                display: flex !important;
+                width: 100% !important;
+                margin: 0 !important;
+                padding: 12px !important;
+                border: 1px solid var(--border) !important;
+                border-radius: 8px !important;
+                background: rgba(0,0,0,0.2) !important;
+            }
+
+            .sidebar button[data-view] {
+                width: 100% !important;
+                text-align: left !important;
+                padding: 12px 16px !important;
+                border-radius: 8px !important;
+                background: rgba(255,255,255,0.05) !important;
+                margin-bottom: 4px !important;
+            }
+            .sidebar button[data-view].active {
+                background: var(--accent) !important;
+                color: white !important;
+            }
+
+            /* 5. The Main Content (Paste, Grab, Queue) comes THIRD */
+            .main > div:not(.top-header), 
+            .main .view {
+                order: 3 !important;
+                width: 100% !important;
+                padding: 10px !important;
+                box-sizing: border-box !important;
+            }
+
+            /* ===== THE PRECISE FORM FIX ===== */
+            .form-row {
+                flex-wrap: wrap !important;
+                width: 100% !important;
+            }
+
+            .form-row > div {
+                flex: 1 1 100% !important;
+                width: 100% !important;
+                display: flex !important;
+            }
+
+            .form-row textarea#url {
+                width: 100% !important;
+                min-height: 100px !important;
+                padding: 14px 90px 14px 18px !important;
+                font-size: 16px !important;
+                box-sizing: border-box !important;
+            }
+
+            .form-row > button {
+                flex: 1 1 100% !important;
+                width: 100% !important;
+                margin: 10px 0 0 0 !important;
+                padding: 14px !important;
+                font-size: 1rem !important;
+            }
+        }
+        /* ===== end v1.9.5 mobile fix ===== */
     
         .role-user .admin-only-utility,
         .role-user .admin-only-settings {
@@ -3202,7 +3363,7 @@ def home():
         <h4 style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase;">Storage Space</h4>
         <div id="storageBars"></div>
     </div>
-<div class="version">v1.9.4</div>
+<div class="version">v1.9.5</div>
     
         </div>
     </div>
@@ -3340,7 +3501,7 @@ def home():
 <div class="main">
     <div class="top-header">
         <h1>📡 MediaGrabber</h1>
-        <span class="subtitle">v1.9.4</span>
+        <span class="subtitle">v1.9.5</span>
     </div>
     <!-- Queue -->
     <div id="view-queue" class="view active">
@@ -3562,6 +3723,9 @@ def home():
             <span id="restartMGStatus" style="font-size: 0.85rem; margin-left: 12px;"></span>
         </div>
     </div>
+        
+        </div>
+
 </div>
 
 <div id="view-utilities" class="view">
@@ -4940,7 +5104,51 @@ document.getElementById('accountAvatarFile').addEventListener('change', function
     document.querySelector('button[data-view="history"]').addEventListener('click', loadHistory);
 document.querySelector('button[data-view="server"]').addEventListener('click', function() {
     if (typeof loadServerManager === 'function') loadServerManager();
+    if (typeof checkVersion === 'function') checkVersion();
 });
+function checkVersion() {
+    const btn = document.getElementById('vmCheckBtn');
+    const msg = document.getElementById('vmStatusMsg');
+    const latestEl = document.getElementById('vmLatest');
+    const currentEl = document.getElementById('vmCurrent');
+    const checkedEl = document.getElementById('vmChecked');
+    const badge = document.getElementById('vmBadge');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = '⏳ Checking…';
+    if (msg) { msg.textContent = 'Querying GitHub for latest tag…'; msg.style.color = 'var(--text-muted)'; }
+    fetch('/api/version/info', { credentials: 'same-origin' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (currentEl) currentEl.textContent = d.current || '?';
+            if (latestEl) {
+                latestEl.textContent = d.latest || '?';
+                latestEl.style.color = d.update_available ? '#f0c24a' : 'var(--text-muted)';
+            }
+            if (checkedEl) checkedEl.textContent = d.checked_at || '—';
+            if (badge) badge.style.display = d.update_available ? 'inline-block' : 'none';
+            if (msg) {
+                if (d.error) {
+                    msg.textContent = '⚠️ GitHub API error: ' + d.error;
+                    msg.style.color = '#ff6b6b';
+                } else if (d.update_available) {
+                    msg.textContent = '🎉 Update available: ' + d.current + ' → ' + d.latest;
+                    msg.style.color = '#f0c24a';
+                } else {
+                    msg.textContent = '✅ You are running the latest version.';
+                    msg.style.color = '#6fcf97';
+                }
+            }
+        })
+        .catch(function(err) {
+            if (msg) { msg.textContent = '❌ Check failed: ' + err.message; msg.style.color = '#ff6b6b'; }
+        })
+        .finally(function() {
+            btn.disabled = false;
+            btn.textContent = '🔄 Check for Update';
+        });
+}
+
 // ========== Server Manager ==========
 let _netwatchState = { pollTimer: null, countdownTimer: null, nextRunAt: null, visible: false };
 let _netwatchLoadedOnce = false;
@@ -5485,6 +5693,100 @@ def _pwa_sw():
     resp = send_from_directory("static", "service-worker.js", mimetype="application/javascript")
     resp.headers["Service-Worker-Allowed"] = "/"
     return resp
+
+
+# ========== SCHEDULED DOWNLOADS (v1.9.5) ==========
+import datetime as _sched_dt
+
+def _init_scheduled_db():
+    conn = sqlite3.connect(USER_DB_PATH)
+    conn.execute("""CREATE TABLE IF NOT EXISTS scheduled_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT NOT NULL,
+        mode TEXT DEFAULT 'video',
+        scheduled_time TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        fired_at TEXT,
+        job_id TEXT
+    )""")
+    conn.commit()
+    conn.close()
+
+_init_scheduled_db()
+
+def _scheduler_loop():
+    """Background thread: every 30s, check for due jobs and fire them."""
+    import time
+    while True:
+        try:
+            now = _sched_dt.datetime.now().strftime("%Y-%m-%dT%H:%M")
+            conn = sqlite3.connect(USER_DB_PATH)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE status='pending' AND scheduled_time <= ?",
+                (now,)
+            ).fetchall()
+            for row in rows:
+                job_id = str(uuid.uuid4())
+                try:
+                    grab(form_data={"url": row["url"], "mode": row["mode"] or "video"})
+                    # grab() created its own QUEUE entry with its own job_id,
+                    # but we don't need to link it — just mark as fired
+                    conn.execute(
+                        "UPDATE scheduled_jobs SET status='fired', fired_at=? WHERE id=?",
+                        (_sched_dt.datetime.now().isoformat(timespec='seconds'), row["id"])
+                    )
+                    conn.commit()
+                except Exception as e:
+                    print(f"[scheduler] failed to fire job {row['id']}: {e}")
+            conn.close()
+        except Exception as e:
+            print(f"[scheduler] loop error: {e}")
+        time.sleep(30)
+
+# Start the scheduler thread once (guard against Flask debug reloader double-start)
+if not os.environ.get("_MG_SCHEDULER_STARTED"):
+    os.environ["_MG_SCHEDULER_STARTED"] = "1"
+    threading.Thread(target=_scheduler_loop, daemon=True, name="scheduled-jobs").start()
+
+@app.route("/api/schedule", methods=["GET"])
+def api_schedule_list():
+    conn = sqlite3.connect(USER_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM scheduled_jobs ORDER BY scheduled_time ASC"
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/schedule", methods=["POST"])
+def api_schedule_add():
+    data = request.get_json(force=True)
+    url = (data.get("url") or "").strip()
+    mode = data.get("mode", "video")
+    scheduled_time = (data.get("scheduled_time") or "").strip()
+    if not url or not scheduled_time:
+        return jsonify({"error": "url and scheduled_time required"}), 400
+    conn = sqlite3.connect(USER_DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO scheduled_jobs (url, mode, scheduled_time) VALUES (?,?,?)",
+        (url, mode, scheduled_time)
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return jsonify({"id": new_id, "status": "pending"}), 201
+
+@app.route("/api/schedule/<int:job_id>", methods=["DELETE"])
+def api_schedule_delete(job_id):
+    conn = sqlite3.connect(USER_DB_PATH)
+    conn.execute("DELETE FROM scheduled_jobs WHERE id=?", (job_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"deleted": job_id})
+
+# ========== END SCHEDULED DOWNLOADS ==========
 
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "set-password":

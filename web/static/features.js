@@ -52,6 +52,107 @@ setTimeout(() => {
       
       ubtn.style.cssText = 'margin-left: 8px; background: #2b365e; color: #fff; border: none; border-radius: 8px; padding: 12px 20px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.3); font-size: 1rem; height: 100%;';
       
+      // Add Schedule button
+      const schedBtn = document.createElement('button');
+      schedBtn.innerText = '📅 Schedule';
+      schedBtn.style.cssText = 'margin-left: 8px; background: #2b365e; color: #fff; border: none; border-radius: 8px; padding: 12px 20px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 12px rgba(0,0,0,0.3); font-size: 1rem; height: 100%;';
+      grabBtn.parentNode.insertBefore(schedBtn, grabBtn.nextSibling.nextSibling.nextSibling);
+      
+      schedBtn.onclick = () => {
+          if (!document.getElementById('mg-sched-modal')) {
+              const sModal = document.createElement('div');
+              sModal.id = 'mg-sched-modal';
+              sModal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15,15,15,0.95); z-index: 100000; display: flex; flex-direction: column; padding: 20px; box-sizing: border-box; color: white; align-items: center; justify-content: center;';
+              sModal.innerHTML = `
+                  <div style="background: #1a1a20; border: 1px solid #333; border-radius: 12px; padding: 24px; width: 100%; max-width: 500px;">
+                      <h2 style="margin-top:0;">📅 Schedule Download</h2>
+                      <div style="margin-bottom: 15px;">
+                          <label style="display:block; font-size:0.9rem; margin-bottom:5px; color:#aaa;">URL</label>
+                          <input type="text" id="sched-url" style="width:100%; padding:10px; border-radius:6px; border:1px solid #444; background:#111; color:white; box-sizing:border-box;">
+                      </div>
+                      <div style="margin-bottom: 20px;">
+                          <label style="display:block; font-size:0.9rem; margin-bottom:5px; color:#aaa;">When (Date & Time)</label>
+                          <input type="datetime-local" id="sched-time" style="width:100%; padding:10px; border-radius:6px; border:1px solid #444; background:#111; color:white; box-sizing:border-box;">
+                      </div>
+                      <div style="display:flex; gap:10px; margin-bottom:20px;">
+                          <button id="sched-submit" style="flex:1; padding:12px; background:#5b7cfa; color:white; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">Queue Job</button>
+                          <button id="sched-close" style="flex:1; padding:12px; background:#333; color:white; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">Close</button>
+                      </div>
+                      <div id="sched-msg" style="margin-bottom:15px; font-size:0.9rem; text-align:center;"></div>
+                      
+                      <h3 style="margin-top:20px; border-top:1px solid #444; padding-top:15px;">Pending Jobs</h3>
+                      <div id="sched-list" style="max-height:200px; overflow-y:auto; display:flex; flex-direction:column; gap:8px;"></div>
+                  </div>
+              `;
+              document.body.appendChild(sModal);
+              
+              document.getElementById('sched-close').onclick = () => sModal.style.display = 'none';
+              
+              async function loadScheduledJobs() {
+                  const list = document.getElementById('sched-list');
+                  list.innerHTML = '<div style="color:#aaa; font-size:0.85rem;">Loading...</div>';
+                  try {
+                      const res = await fetch('/api/schedule');
+                      const jobs = await res.json();
+                      if (!jobs.length) {
+                          list.innerHTML = '<div style="color:#aaa; font-size:0.85rem;">No scheduled jobs.</div>';
+                          return;
+                      }
+                      let html = '';
+                      jobs.forEach(j => {
+                          const statusColor = j.status === 'pending' ? '#f0c24a' : (j.status === 'fired' ? '#6fcf97' : '#ff6b6b');
+                          html += `
+                              <div style="background:#111; border:1px solid #333; border-radius:6px; padding:8px; display:flex; justify-content:space-between; align-items:center; gap:8px;">
+                                  <div style="flex:1; min-width:0;">
+                                      <div style="font-size:0.8rem; color:#fff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${j.url}">${j.url}</div>
+                                      <div style="font-size:0.75rem; color:#888;">${j.scheduled_time} <span style="color:${statusColor};">[${j.status}]</span></div>
+                                  </div>
+                                  <button onclick="deleteScheduledJob(${j.id})" style="background:#e53e3e; color:white; border:none; padding:6px 10px; border-radius:4px; cursor:pointer; font-size:0.75rem;">✕</button>
+                              </div>`;
+                      });
+                      list.innerHTML = html;
+                  } catch(e) {
+                      list.innerHTML = '<div style="color:#ff6b6b; font-size:0.85rem;">Error: ' + e.message + '</div>';
+                  }
+              }
+              
+              window.deleteScheduledJob = async function(id) {
+                  if (!confirm('Delete this scheduled job?')) return;
+                  try {
+                      await fetch('/api/schedule/' + id, { method: 'DELETE' });
+                      loadScheduledJobs();
+                  } catch(e) {
+                      alert('Delete failed: ' + e.message);
+                  }
+              };
+              
+              loadScheduledJobs();
+              document.getElementById('sched-submit').onclick = async () => {
+                  const u = document.getElementById('sched-url').value;
+                  const t = document.getElementById('sched-time').value;
+                  const msg = document.getElementById('sched-msg');
+                  if (!u || !t) { msg.innerText = "Please fill both fields."; msg.style.color = "#ff6b6b"; return; }
+                  
+                  msg.innerText = "Saving..."; msg.style.color = "#f0c24a";
+                  try {
+                      const res = await fetch('/api/schedule', {
+                          method: 'POST',
+                          headers: {'Content-Type': 'application/json'},
+                          body: JSON.stringify({url: u, scheduled_time: t})
+                      });
+                      const data = await res.json();
+                      if (data.error) throw new Error(data.error);
+                      msg.innerText = "✅ Scheduled successfully!"; msg.style.color = "#6fcf97";
+                      document.getElementById('sched-url').value = '';
+                      if (typeof loadScheduledJobs === 'function') loadScheduledJobs();
+                  } catch(e) {
+                      msg.innerText = "❌ Error: " + e.message; msg.style.color = "#ff6b6b";
+                  }
+              };
+          }
+          document.getElementById('mg-sched-modal').style.display = 'flex';
+      };
+      
       grabBtn.parentNode.insertBefore(ubtn, grabBtn.nextSibling.nextSibling);
 
       ubtn.onclick = () => {
@@ -69,6 +170,30 @@ setTimeout(() => {
     <pre id="mg-utils-out" style="margin-top:20px; background:#111; padding:10px; border-radius:8px; overflow:auto; max-height:300px; white-space:pre-wrap;"></pre>
 </div>
 <div id="mg-versions-section" style="display:none; flex-direction:column; gap:10px;">
+    <!-- New Version Manager Block -->
+    <div style="background:#111; border:1px solid #333; border-radius:8px; padding:15px; margin-bottom:15px;">
+        <h3 style="margin:0 0 10px 0; font-size:1.1rem;">📦 Version Manager</h3>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:10px;">
+            <div>
+                <div style="font-size:0.8rem; color:#888; text-transform:uppercase;">Current Version</div>
+                <div id="vm-current" style="font-size:1.2rem; font-weight:bold; color:#fff;">v1.9.5</div>
+            </div>
+            <div>
+                <div style="font-size:0.8rem; color:#888; text-transform:uppercase;">Latest on GitHub</div>
+                <div id="vm-latest" style="font-size:1.2rem; font-weight:bold; color:#aaa;">—</div>
+            </div>
+            <div>
+                <div style="font-size:0.8rem; color:#888; text-transform:uppercase;">Last Checked</div>
+                <div id="vm-checked" style="font-size:0.9rem; color:#aaa;">Never</div>
+            </div>
+        </div>
+        <div style="display:flex; gap:10px; align-items:center;">
+            <button id="vm-check-btn" style="background:#5b7cfa; color:white; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-weight:bold;">🔄 Check for Update</button>
+            <span id="vm-badge" style="display:none; background:#f0c24a; color:#000; padding:4px 8px; border-radius:4px; font-size:0.75rem; font-weight:bold;">UPDATE AVAILABLE</span>
+            <span id="vm-msg" style="font-size:0.85rem; color:#aaa;"></span>
+        </div>
+    </div>
+    <h3 style="margin:0; font-size:1.1rem;">Backups</h3>
     <div id="mg-versions-list"></div>
 </div>
 <button id="mg-utils-close" style="margin-top:auto; padding:12px; background:#333; color:white; border:none; border-radius:8px;">Close</button>`;
@@ -89,10 +214,18 @@ setTimeout(() => {
                 document.getElementById('mg-utils-section').style.display = 'none';
                 document.getElementById('mg-versions-section').style.display = 'flex';
                 loadVersions();
+                checkVersion();
             };
             
         }
         document.getElementById('mg-utils-modal').style.display = 'flex';
+        // Wire up the Check Version button if not already done
+        setTimeout(() => {
+            const vmBtn = document.getElementById('vm-check-btn');
+            if (vmBtn && !vmBtn.onclick) {
+                vmBtn.onclick = checkVersion;
+            }
+        }, 100);
       };
     }
 
@@ -160,6 +293,51 @@ async function runUtils(id) {
         const data = await res.json();
         out.innerText = (data.stdout || "") + (data.stderr ? "\nSTDERR:\n" + data.stderr : "") + (data.error ? "\nERROR:\n" + data.error : "");
     } catch(e) { out.innerText = "Request failed."; }
+}
+
+async function checkVersion() {
+    const btn = document.getElementById('vm-check-btn');
+    const msg = document.getElementById('vm-msg');
+    const latestEl = document.getElementById('vm-latest');
+    const checkedEl = document.getElementById('vm-checked');
+    const badge = document.getElementById('vm-badge');
+    
+    if (!btn) return;
+    btn.disabled = true;
+    btn.innerText = '⏳ Checking...';
+    msg.innerText = 'Querying remote tags...';
+    msg.style.color = '#aaa';
+
+    try {
+        const res = await fetch('/api/version/info');
+        const d = await res.json();
+        
+        document.getElementById('vm-current').innerText = d.current || '?';
+        latestEl.innerText = d.latest || '?';
+        latestEl.style.color = d.update_available ? '#f0c24a' : '#fff';
+        checkedEl.innerText = d.checked_at || '—';
+        
+        if (d.update_available) {
+            badge.style.display = 'inline-block';
+            msg.innerText = 'Update available!';
+            msg.style.color = '#f0c24a';
+        } else {
+            badge.style.display = 'none';
+            msg.innerText = 'You are up to date.';
+            msg.style.color = '#6fcf97';
+        }
+        
+        if (d.error) {
+            msg.innerText = '⚠️ ' + d.error;
+            msg.style.color = '#ff6b6b';
+        }
+    } catch(e) {
+        msg.innerText = '❌ Check failed: ' + e.message;
+        msg.style.color = '#ff6b6b';
+    } finally {
+        btn.disabled = false;
+        btn.innerText = '🔄 Check for Update';
+    }
 }
 
 async function loadVersions() {
