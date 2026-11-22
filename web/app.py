@@ -188,11 +188,11 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
 <title>Sign in \u2014 MediaGrabber v1.0</title>
 <style>
   :root{
-      --sidebar: #141418;--bg:#0f0f11;--card:#1a1a20;--border:#2c2c36;--accent:#5b7cfa;--accent-hover:#6f8cff;--text:#eaeef2;--text-muted:#8899aa;}
+      --sidebar: #281F3D;--bg:#281F3D;--card:#1D2523;--border:#7489C1;--accent:#7489C1;--accent-hover:#93a7df;--text:#ACD5BA;--text-muted:#8899aa;}
   *{box-sizing:border-box;margin:0;padding:0;}
   body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
   .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:32px;width:100%;max-width:380px;box-shadow:0 8px 24px rgba(0,0,0,0.6);}
-  h1{font-size:1.4rem;margin-bottom:8px;background:linear-gradient(135deg,#a0b4ff,#5b7cfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+  h1{font-size:1.4rem;margin-bottom:8px;background:linear-gradient(135deg,#93a7df,#7489C1);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
   p.sub{color:var(--text-muted);font-size:0.9rem;margin-bottom:20px;}
   label{display:block;margin:12px 0 6px;font-weight:500;font-size:0.9rem;}
   input{width:100%;padding:12px 14px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:1rem;outline:none;transition:border-color .2s;}
@@ -2493,12 +2493,12 @@ def home():
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1">
     <style>
         :root {
-            --bg: #0f0f11;
-            --card-bg: #1a1a20;
-            --border: #2c2c36;
-            --accent: #5b7cfa;
-            --accent-hover: #6f8cff;
-            --text: #eaeef2;
+            --bg: #281F3D;
+            --card-bg: #1D2523;
+            --border: #7489C1;
+            --accent: #7489C1;
+            --accent-hover: #93a7df;
+            --text: #ACD5BA;
             --text-muted: #8899aa;
             --radius: 14px;
             --shadow: 0 8px 24px rgba(0,0,0,0.6);
@@ -2506,11 +2506,11 @@ def home():
             --sidebar-width: 200px;
         }
         body.light {
-            --bg: #f5f7fc;
-            --card-bg: #ffffff;
-            --border: #d0d7e6;
-            --text: #1e2230;
-            --text-muted: #4a5268;
+            --bg: #281F3D;
+            --card-bg: #1D2523;
+            --border: #7489C1;
+            --text: #ACD5BA;
+            --text-muted: #8899aa;
             --shadow: 0 8px 24px rgba(0,0,0,0.08);
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2584,7 +2584,7 @@ def home():
         .top-header h1 {
             font-size: 1.8rem;
             font-weight: 700;
-            background: linear-gradient(135deg, #a0b4ff, #5b7cfa);
+            background: linear-gradient(135deg, #93a7df,#7489C1);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
