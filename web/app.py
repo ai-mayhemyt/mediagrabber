@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 import secrets
+import hashlib
 import sys
 import base64
 import smtplib
@@ -290,11 +291,11 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
         <input id="username" name="username" autocomplete="username" required autofocus>
         <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="current-password" required>
-      {% endif %}
       
-      <button type="submit">{% if require_2fa %}Verify{% else %}Sign in{% endif %}</button>
+      
+      <button type="submit">{% if require_2fa %}Verify{% else %}Sign in</button>
     </form>
-    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    {% if error %}<div class="error">{{ error }}</div>
   </div>
 
 <!-- Theme Modal -->
@@ -1961,6 +1962,100 @@ def settings_page():
         return jsonify({"status": "saved"})
     return jsonify(load_settings())
 
+# ---------- API Tokens (v1.9.7) ----------
+def _require_admin():
+    return session.get("role") == "admin"
+
+@app.route("/api/tokens", methods=["GET"])
+def api_tokens_list():
+    if not _require_admin():
+        return jsonify({"error": "forbidden"}), 403
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT id, name, token_prefix, scope, created_by, created_at, last_used_at, revoked "
+            "FROM api_tokens ORDER BY id DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    tokens = [{
+        "id": r[0], "name": r[1], "prefix": r[2], "scope": r[3],
+        "created_by": r[4], "created_at": r[5],
+        "last_used_at": r[6], "revoked": bool(r[7])
+    } for r in rows]
+    return jsonify({"tokens": tokens})
+
+@app.route("/api/tokens", methods=["POST"])
+def api_tokens_create():
+    if not _require_admin():
+        return jsonify({"error": "forbidden"}), 403
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    scope = (data.get("scope") or "read").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    if scope not in ("read", "download", "admin"):
+        return jsonify({"error": "invalid scope"}), 400
+    raw = "mg_" + secrets.token_hex(16)
+    token_hash = hashlib.sha256(raw.encode()).hexdigest()
+    token_prefix = raw[:8]
+    created_by = session.get("username", "unknown")
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        conn.execute(
+            "INSERT INTO api_tokens (name, token_hash, token_prefix, scope, created_by) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (name, token_hash, token_prefix, scope, created_by)
+        )
+        conn.commit()
+        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    finally:
+        conn.close()
+    return jsonify({
+        "id": new_id, "name": name, "scope": scope,
+        "token": raw,
+        "warning": "This token is shown ONCE. Copy it now."
+    })
+
+@app.route("/api/tokens/<int:token_id>/revoke", methods=["POST"])
+def api_tokens_revoke(token_id):
+    if not _require_admin():
+        return jsonify({"error": "forbidden"}), 403
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        cur = conn.execute("UPDATE api_tokens SET revoked = 1 WHERE id = ?", (token_id,))
+        conn.commit()
+        if cur.rowcount == 0:
+            return jsonify({"error": "not found"}), 404
+    finally:
+        conn.close()
+    return jsonify({"status": "revoked"})
+
+@app.route("/api/tokens/<int:token_id>", methods=["DELETE"])
+def api_tokens_delete(token_id):
+    if not _require_admin():
+        return jsonify({"error": "forbidden"}), 403
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        cur = conn.execute("DELETE FROM api_tokens WHERE id = ?", (token_id,))
+        conn.commit()
+        if cur.rowcount == 0:
+            return jsonify({"error": "not found"}), 404
+    finally:
+        conn.close()
+    return jsonify({"status": "deleted"})
+
+@app.route("/api/tokens/me", methods=["GET"])
+def api_tokens_me():
+    # Session-only for now; enforcement wired in v1.9.8
+    if not session.get("username"):
+        return jsonify({"error": "unauthenticated"}), 401
+    return jsonify({
+        "username": session.get("username"),
+        "role": session.get("role"),
+        "auth": "session"
+    })
+
 # ---------- Metadata Editor ----------
 _version_cache = {"data": None, "ts": 0}
 
@@ -1968,7 +2063,7 @@ _version_cache = {"data": None, "ts": 0}
 def api_version_info():
     """Returns current + latest version from GitHub tags (5-min cache)."""
     import json, time, urllib.request
-    current = "v1.9.6"
+    current = "v1.9.7"
     now = time.time()
     # Return cache if <5 min old
     if _version_cache["data"] and (now - _version_cache["ts"]) < 300:
@@ -2544,7 +2639,7 @@ def home():
 </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-    <title>MediaGrabber v1.9.6</title>
+    <title>MediaGrabber v1.9.7</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1">
     <style>
         :root {
@@ -3366,7 +3461,7 @@ def home():
         <h4 style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase;">Storage Space</h4>
         <div id="storageBars"></div>
     </div>
-<div class="version">v1.9.6</div>
+<div class="version">v1.9.7</div>
     
         </div>
     </div>
@@ -3504,7 +3599,7 @@ def home():
 <div class="main">
     <div class="top-header">
         <h1>📡 MediaGrabber</h1>
-        <span class="subtitle">v1.9.6</span>
+        <span class="subtitle">v1.9.7</span>
     </div>
     <!-- Queue -->
     <div id="view-queue" class="view active">
@@ -3882,6 +3977,9 @@ def home():
                 <button type="button" class="tab-btn" onclick="switchAccountTab('profile', this)" style="background:transparent; border:none; color:var(--accent); border-bottom:2px solid var(--accent); font-weight:bold; cursor:pointer; padding:10px; font-size:1rem; margin-bottom:-1px;">Profile</button>
                 <button type="button" class="tab-btn" onclick="switchAccountTab('security', this)" style="background:transparent; border:none; color:var(--text-muted); font-weight:bold; cursor:pointer; padding:10px; font-size:1rem;">Security</button>
                 
+                <button type="button" class="tab-btn" onclick="switchAccountTab('tokens', this)" style="background:transparent; border:none; color:var(--text-muted); font-weight:bold; cursor:pointer; padding:10px; font-size:1rem;">🔑 API Tokens</button>
+                
+                
             </div>
 
             <!-- Tab 1: Profile -->
@@ -3942,7 +4040,35 @@ def home():
                 </div>
             </div>
 
-            <!-- Tab 3: SMTP (Admin Only) -->
+            
+            <!-- Tab 3: API Tokens (Admin Only) -->
+            <div id="tab-tokens" class="account-tab-content" style="display:none;">
+                <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:15px;">
+                    API tokens allow external scripts and apps to authenticate as you.
+                    <strong style="color:var(--accent);">The full token is shown only once at creation.</strong>
+                </p>
+
+                <div style="background:var(--card-bg); border:1px solid var(--border); border-radius:8px; padding:15px; margin-bottom:15px;">
+                    <h4 style="margin-bottom:10px;">➕ Create New Token</h4>
+                    <label style="font-size:0.85rem;">Name</label>
+                    <input type="text" id="newTokenName" placeholder="e.g. iPad PWA, Home Assistant" style="width:100%; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); margin-bottom:10px;">
+                    <label style="font-size:0.85rem;">Scope</label>
+                    <select id="newTokenScope" style="width:100%; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); margin-bottom:10px;">
+                        <option value="read">read — GET endpoints only</option>
+                        <option value="download">download — read + trigger downloads</option>
+                        <option value="admin">admin — full access</option>
+                    </select>
+                    <button type="button" onclick="createToken()" style="background:var(--accent); color:#fff; border:none; padding:10px; border-radius:6px; cursor:pointer; width:100%;">Create Token</button>
+                </div>
+
+                <h4 style="margin-bottom:10px;">🔑 Existing Tokens</h4>
+                <div id="tokens-list" style="margin-bottom:15px;">
+                    <p style="color:var(--text-muted); font-size:0.85rem;">Loading…</p>
+                </div>
+
+                <button type="button" onclick="loadTokens()" style="background:transparent; border:1px solid var(--border); color:var(--text-muted); padding:8px; border-radius:6px; cursor:pointer; width:100%; font-size:0.85rem;">🔄 Refresh</button>
+            </div>
+            
             
 
             <!-- Action Buttons -->
@@ -4930,6 +5056,119 @@ document.getElementById('settingsForm').addEventListener('submit', async (e) => 
         btn.style.borderBottom = '2px solid var(--accent)';
         btn.style.marginBottom = '-1px';
     }
+
+
+    // ---------- API Tokens (v1.9.7) ----------
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    async function loadTokens() {
+        const box = document.getElementById('tokens-list');
+        if (!box) return;
+        try {
+            const r = await fetch('/api/tokens');
+            if (!r.ok) { box.innerHTML = '<p style="color:#cf6f6f;">Failed to load (' + r.status + ')</p>'; return; }
+            const data = await r.json();
+            const list = data.tokens || [];
+            if (!list.length) {
+                box.innerHTML = '<p style="color:var(--text-muted); font-size:0.85rem;">No tokens yet. Create one above.</p>';
+                return;
+            }
+            box.innerHTML = list.map(t => {
+                const revokedTag = t.revoked ? ' <span style="color:#cf6f6f;font-size:0.75rem;">[REVOKED]</span>' : '';
+                const lastUsed = t.last_used_at ? esc(t.last_used_at) : 'never';
+                return '<div style="background:var(--card-bg); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:8px;">' +
+                    '<div style="display:flex; justify-content:space-between; align-items:start; gap:8px;">' +
+                    '<div style="flex:1; min-width:0;">' +
+                    '<div style="font-weight:600; margin-bottom:4px;">' + esc(t.name) + revokedTag + '</div>' +
+                    '<div style="font-family:monospace; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">' + esc(t.prefix) + '••••••••</div>' +
+                    '<div style="font-size:0.75rem; color:var(--text-muted);">scope: <strong>' + esc(t.scope) + '</strong> · created by ' + esc(t.created_by) + ' · used: ' + lastUsed + '</div>' +
+                    '</div>' +
+                    '<div style="display:flex; flex-direction:column; gap:6px;">' +
+                    (!t.revoked ? '<button type="button" onclick="revokeToken(' + t.id + ')" style="background:#3a2a1a; color:#cfaa6f; border:none; padding:6px 10px; border-radius:6px; cursor:pointer; font-size:0.75rem;">Revoke</button>' : '') +
+                    '<button type="button" onclick="deleteToken(' + t.id + ')" style="background:#3a1a1a; color:#cf6f6f; border:none; padding:6px 10px; border-radius:6px; cursor:pointer; font-size:0.75rem;">Delete</button>' +
+                    '</div></div></div>';
+            }).join('');
+        } catch (e) {
+            box.innerHTML = '<p style="color:#cf6f6f;">Error: ' + esc(e.message) + '</p>';
+        }
+    }
+
+    async function createToken() {
+        const name = (document.getElementById('newTokenName').value || '').trim();
+        const scope = document.getElementById('newTokenScope').value;
+        if (!name) { alert('Please enter a name.'); return; }
+        try {
+            const r = await fetch('/api/tokens', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, scope: scope})
+            });
+            const data = await r.json();
+            if (!r.ok) { alert('Failed: ' + (data.error || r.status)); return; }
+            document.getElementById('newTokenName').value = '';
+            showTokenModal(data.token, data.name);
+            loadTokens();
+        } catch (e) {
+            alert('Error: ' + e.message);
+        }
+    }
+
+    async function revokeToken(id) {
+        if (!confirm('Revoke this token? It will stop working immediately.')) return;
+        try {
+            const r = await fetch('/api/tokens/' + id + '/revoke', {method: 'POST'});
+            if (!r.ok) { alert('Failed: ' + r.status); return; }
+            loadTokens();
+        } catch (e) { alert('Error: ' + e.message); }
+    }
+
+    async function deleteToken(id) {
+        if (!confirm('Permanently delete this token? This cannot be undone.')) return;
+        try {
+            const r = await fetch('/api/tokens/' + id, {method: 'DELETE'});
+            if (!r.ok) { alert('Failed: ' + r.status); return; }
+            loadTokens();
+        } catch (e) { alert('Error: ' + e.message); }
+    }
+
+    function showTokenModal(rawToken, name) {
+        const existing = document.getElementById('tokenShowModal');
+        if (existing) existing.remove();
+        const div = document.createElement('div');
+        div.id = 'tokenShowModal';
+        div.className = 'modal';
+        div.style.display = 'block';
+        div.innerHTML = '<div class="modal-content" style="max-width:520px;">' +
+            '<h3>🔑 Token Created: ' + esc(name) + '</h3>' +
+            '<p style="color:#cfaa6f; font-weight:600; margin-bottom:10px;">⚠️ Copy this token NOW. It will never be shown again.</p>' +
+            '<textarea readonly id="tokenRawText" style="width:100%; padding:10px; background:var(--bg); border:1px solid var(--accent); border-radius:6px; color:var(--text); font-family:monospace; font-size:0.9rem; min-height:70px; resize:vertical;">' + esc(rawToken) + '</textarea>' +
+            '<div class="modal-actions" style="margin-top:15px;">' +
+            '<button type="button" onclick="copyTokenValue()" style="background:var(--accent); color:#fff; border:none; padding:10px; border-radius:6px; cursor:pointer;">📋 Copy</button>' +
+            '<button type="button" onclick="document.getElementById(\'tokenShowModal\').remove()" style="background:transparent; border:1px solid var(--border); color:var(--text); padding:10px; border-radius:6px; cursor:pointer;">Close</button>' +
+            '</div></div>';
+        document.body.appendChild(div);
+    }
+
+    function copyTokenValue() {
+        const t = document.getElementById('tokenRawText');
+        if (!t) return;
+        t.select();
+        navigator.clipboard.writeText(t.value).then(() => {
+            alert('Copied to clipboard.');
+        }).catch(() => {
+            document.execCommand('copy');
+            alert('Copied.');
+        });
+    }
+
+    // Auto-load tokens when the tokens tab is opened
+    const _origSwitchAccountTab = switchAccountTab;
+    switchAccountTab = function(tabId, btn) {
+        _origSwitchAccountTab(tabId, btn);
+        if (tabId === 'tokens') { setTimeout(loadTokens, 50); }
+    };
 
 
     // ---------- 2FA ----------
