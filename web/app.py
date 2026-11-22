@@ -378,6 +378,34 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
 """
 
 app = Flask(__name__)
+
+def send_push(title, body):
+    try:
+        from pywebpush import webpush, WebPushException
+        import json
+        SUB_FILE = "/opt/mediagrabber/web/subscriptions.json"
+        VAPID_PRIVATE_KEY = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgq08f9ePKxlNY3ATOvN_s1HHwnt4Tu6wd1GuXjXwSO1ihRANCAASW6lLATM1HrMnX4YXEs76dpfEYrBjjdrT-Lxn0A5W9vPgbdiJtk7rV7oa8IyEGW_RPO4_csO4B_5m5XR955Oi8"
+        VAPID_CLAIM_EMAIL = "mailto:admin@example.com"
+        
+        if not os.path.exists(SUB_FILE):
+            return
+        with open(SUB_FILE, "r") as f:
+            subs = json.load(f)
+            
+        for sub in subs:
+            try:
+                webpush(
+                    subscription_info=sub,
+                    data=json.dumps({"title": title, "body": body}),
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims={"sub": VAPID_CLAIM_EMAIL}
+                )
+            except WebPushException as ex:
+                pass # Ignore failed ones
+    except Exception as e:
+        print(f"Push error: {e}")
+
+
 from api_features import features_bp
 app.register_blueprint(features_bp)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -574,6 +602,54 @@ def remove_from_archive(url_or_id):
     with open(ARCHIVE_FILE, "w") as f:
         f.writelines(new_lines)
 
+def append_to_archive(source, url_or_id):
+    """Append a source-tagged archive line. Idempotent; matches parse_archive_line's contract.
+    source: 'youtube' | 'ytmusic' | 'spotify' | 'instagram' | 'tiktok'
+    """
+    try:
+        source = (source or "").strip().lower()
+        raw = (url_or_id or "").strip()
+        if not raw or source not in ("youtube", "ytmusic", "spotify", "instagram", "tiktok"):
+            return False
+        if source in ("youtube", "ytmusic"):
+            m = re.search(r'(?:v=|youtu\.be/|video_id=|/shorts/)([a-zA-Z0-9_-]{11})', raw)
+            key = m.group(1) if m else raw
+        elif source == "spotify":
+            # Caller may hand us a bare 22-char base62 track ID. Expand to canonical URL.
+            if raw.startswith("http"):
+                key = raw
+            elif re.fullmatch(r'[A-Za-z0-9]{22}', raw):
+                key = "https://open.spotify.com/track/" + raw
+            else:
+                print(f"append_to_archive: refusing non-URL spotify value: {raw!r}", file=sys.stderr)
+                return False
+        elif source in ("instagram", "tiktok"):
+            if not raw.startswith("http"):
+                print(f"append_to_archive: refusing non-URL {source} value: {raw!r}", file=sys.stderr)
+                return False
+            key = raw
+        else:
+            key = raw
+        new_line = f"{source} {key}\n"
+        existing = []
+        if os.path.exists(ARCHIVE_FILE):
+            with open(ARCHIVE_FILE, "r") as f:
+                existing = f.readlines()
+        norm = new_line.strip().lower()
+        for line in existing:
+            if line.strip().lower() == norm:
+                return False
+        os.makedirs(os.path.dirname(ARCHIVE_FILE), exist_ok=True)
+        with open(ARCHIVE_FILE, "a") as f:
+            f.write(new_line)
+        return True
+    except Exception as e:
+        try:
+            print(f"append_to_archive error: {e}", file=sys.stderr)
+        except Exception:
+            pass
+        return False
+
 def get_archive_contents():
     if not os.path.exists(ARCHIVE_FILE):
         return []
@@ -764,6 +840,13 @@ def grab():
     def run():
         update(job_id, "status", "running")
         job = QUEUE[job_id]
+        # Ensure the output directory exists and is writable before handing to grab
+        try:
+            out_dir = job.get("output_dir") or os.path.join("/tmp/mediagrabber", job_id)
+            os.makedirs(out_dir, exist_ok=True)
+            job["output_dir"] = out_dir
+        except Exception as e:
+            append_log(job_id, f"Failed to create output dir: {e}")
         job["output_dir"] = f"/tmp/mediagrabber/{job_id}"
         os.makedirs(job["output_dir"], exist_ok=True)
 
@@ -879,14 +962,48 @@ def grab():
         if QUEUE[job_id].get("file"):
             update(job_id, "status", "done")
             update(job_id, "progress", 100)
+            # Archive Spotify + Gallery (YouTube/YT Music already written by the
+            # `grab` wrapper's `yt-dlp --download-archive`; appending here would dupe).
+            try:
+                job_url = (job.get("url") or "").strip()
+                if engine == "SPOTIFY" and job_url:
+                    append_to_archive("spotify", job_url)
+                elif engine == "GALLERY" and job_url:
+                    if "instagram.com" in job_url:
+                        append_to_archive("instagram", job_url)
+                    elif "tiktok.com" in job_url:
+                        append_to_archive("tiktok", job_url)
+            except Exception as _e:
+                append_log(job_id, f"archive append failed: {_e}")
             refresh_library(os.path.dirname(QUEUE[job_id]["file"]))
+            try:
+                _fname = os.path.basename(QUEUE[job_id]["file"])
+                print(f"[PUSH] sending success push for {job_id}: {_fname}", flush=True)
+                send_push("MediaGrabber", "Download complete: " + _fname)
+                print(f"[PUSH] success push sent for {job_id}", flush=True)
+            except Exception as _pe:
+                print(f"[PUSH-FAIL] success push {job_id}: {type(_pe).__name__}: {_pe}", flush=True)
         else:
             if proc.returncode != 0:
                 update(job_id, "status", "failed")
                 update(job_id, "progress", 0)
+                try:
+                    print(f"[PUSH] sending failure push for {job_id}", flush=True)
+                    send_push("MediaGrabber", "Download failed: " + (job.get("url") or ""))
+                    print(f"[PUSH] failure push sent for {job_id}", flush=True)
+                except Exception as _pe:
+                    print(f"[PUSH-FAIL] failure push {job_id}: {type(_pe).__name__}: {_pe}", flush=True)
             else:
                 update(job_id, "status", "done")
                 update(job_id, "progress", 100)
+                # Success but file unknown — still notify, but flag it.
+                _fname = os.path.basename(QUEUE[job_id].get("file", "Unknown file"))
+                try:
+                    print(f"[PUSH] sending success(no-file) push for {job_id}: {_fname}", flush=True)
+                    send_push("MediaGrabber", "Download complete: " + _fname)
+                    print(f"[PUSH] success(no-file) push sent for {job_id}", flush=True)
+                except Exception as _pe:
+                    print(f"[PUSH-FAIL] success(no-file) push {job_id}: {type(_pe).__name__}: {_pe}", flush=True)
 
     threading.Thread(target=run, daemon=True).start()
     return jsonify({"job_id": job_id})
@@ -1299,6 +1416,31 @@ def radio_setdb():
     return jsonify({"status": "success", "message": f"Database path set to {db_path}"})
 
 # ---------- Auth routes ----------
+
+import json
+import os
+
+SUB_FILE = "/opt/mediagrabber/web/subscriptions.json"
+
+@app.route("/api/subscribe", methods=["POST"])
+def api_subscribe():
+    try:
+        sub = request.get_json()
+        subs = []
+        if os.path.exists(SUB_FILE):
+            with open(SUB_FILE, "r") as f:
+                subs = json.load(f)
+        
+        # Check if already exists
+        if not any(s.get("endpoint") == sub.get("endpoint") for s in subs):
+            subs.append(sub)
+            with open(SUB_FILE, "w") as f:
+                json.dump(subs, f)
+            return {"status": "success", "message": "Subscribed"}, 201
+        return {"status": "success", "message": "Already subscribed"}, 200
+    except Exception as e:
+        return {"status": "error", "message": str(e)}, 500
+
 @app.route("/login", methods=["GET"])
 def login_page():
     if session.get("user_id"):
@@ -1436,79 +1578,33 @@ def api_me_update():
 
 def send_reset_email(to_email, reset_url):
     settings = load_settings()
-    host = settings.get("smtp_host", "").strip()
+    host = (settings.get("smtp_host") or "").strip()
     if not host:
         return False, "SMTP is not configured by the administrator."
 
-    port = int(settings.get("smtp_port", 587))
-    user = settings.get("smtp_user", "").strip()
-    password = settings.get("smtp_pass", "").strip()
-    from_addr = settings.get("smtp_from", "").strip() or user or "noreply@mediagrabber.local"
+    try:
+        port = int((settings.get("smtp_port") or "587").strip())
+    except ValueError:
+        return False, "SMTP port is invalid."
+    user = (settings.get("smtp_user") or "").strip()
+    password = "".join((settings.get("smtp_pass") or "").split())
+    from_addr = (settings.get("smtp_from") or "").strip() or user or "noreply@mediagrabber.local"
 
     msg = MIMEMultipart()
-    msg['From'] = from_addr
-    msg['To'] = to_email
-    msg['Subject'] = "MediaGrabber Password Reset"
+    msg["From"] = from_addr
+    msg["To"] = to_email
+    msg["Subject"] = "MediaGrabber Password Reset"
 
-    body = f"""
-    <html>
+    body = f"""<html>
     <body style="font-family: sans-serif; background: #0f0f11; color: #eaeef2; padding: 20px;">
         <h2 style="color: #5b7cfa;">MediaGrabber Password Reset</h2>
         <p>A password reset was requested for your account.</p>
         <p>Click the button below to reset your password. This link expires in 1 hour.</p>
         <a href="{reset_url}" style="display: inline-block; padding: 12px 24px; background: #5b7cfa; color: #fff; text-decoration: none; border-radius: 6px; margin-top: 10px; font-weight: bold;">Reset Password</a>
         <p style="margin-top: 20px; font-size: 0.8rem; color: #8899aa;">If you did not request this, you can safely ignore this email.</p>
-    
-<!-- Theme Modal -->
-    <div id="themeModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:9999; align-items:center; justify-content:center;">
-        <div style="background:var(--card); padding:20px; border-radius:12px; width:360px; border:1px solid var(--border); max-height: 90vh; overflow-y: auto;">
-            <h3 style="margin-bottom:10px; color:var(--text);">🎨 Customize Theme</h3>
-            
-            <select id="themePreset" onchange="loadPreset()" style="width:100%; margin-bottom:15px; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.9rem;">
-                <option value="custom">-- Custom / Manual --</option>
-                <option value="default">Default Dark</option>
-                <option value="light">Light Mode</option>
-                <option value="cyberpunk">Cyberpunk (Neon)</option>
-                <option value="christmas">Christmas 🎄</option>
-                <option value="halloween">Halloween 🎃</option>
-                <option value="birthday">Birthday 🎂</option>
-                <option value="midnight">Midnight Blue</option>
-                <option value="forest">Forest Green</option>
-                <option value="sunset">Sunset Orange</option>
-                <option value="matrix">Matrix</option>
-            </select>
-
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:15px;">
-                <label style="color:var(--text); font-size:0.85rem;">Background<input type="color" id="theme-bg" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Sidebar<input type="color" id="theme-sidebar" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Card<input type="color" id="theme-card" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Border<input type="color" id="theme-border" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Text<input type="color" id="theme-text" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Accent<input type="color" id="theme-accent" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-            </div>
-
-            <!-- Custom Theme Saving -->
-            <div style="margin-bottom:15px; border-top:1px solid var(--border); padding-top:10px;">
-                <div style="display:flex; gap:5px;">
-                    <input type="text" id="customThemeName" placeholder="My Custom Theme" style="flex:1; padding:6px; border-radius:4px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.85rem;">
-                    <button onclick="saveCustomPreset()" style="background:var(--border); border:none; color:var(--text); padding:6px 10px; border-radius:4px; cursor:pointer; font-size:0.85rem;">Save</button>
-                </div>
-                <select id="customPresetsList" onchange="loadCustomPreset()" style="width:100%; margin-top:8px; padding:6px; border-radius:4px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.85rem;">
-                    <option value="">-- Load Custom Theme --</option>
-                </select>
-            </div>
-
-            <div style="display:flex; gap:10px; justify-content:space-between;">
-                <button onclick="resetTheme()" style="background:transparent; border:1px solid #ff4444; color:#ff4444; padding:6px 12px; border-radius:4px; cursor:pointer;">Reset</button>
-                <div style="display:flex; gap:10px;">
-                    <button onclick="document.getElementById('themeModal').style.display='none'" style="background:transparent; border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:4px; cursor:pointer;">Cancel</button>
-                    <button onclick="saveTheme()" style="background:var(--accent); border:none; color:white; padding:6px 12px; border-radius:4px; cursor:pointer;">Save</button>
-                </div>
-            </div>
-</body>
-    </html>
-    """
-    msg.attach(MIMEText(body, 'html'))
+    </body>
+    </html>"""
+    msg.attach(MIMEText(body, "html"))
 
     try:
         if port == 465:
@@ -1516,16 +1612,62 @@ def send_reset_email(to_email, reset_url):
         else:
             server = smtplib.SMTP(host, port, timeout=10)
             server.starttls()
-        
         if user and password:
             server.login(user, password)
-        
         server.send_message(msg)
         server.quit()
         return True, "Email sent successfully."
     except Exception as e:
-        print(f"SMTP Error: {e}")
+        print(f"SMTP Error: {e}", file=sys.stderr)
         return False, f"Failed to send email: {str(e)}"
+
+@app.route("/api/settings/email/test", methods=["POST"])
+def api_settings_email_test():
+    if session.get("role") != "admin":
+        return jsonify({"ok": False, "error": "Admin access required"}), 403
+    data = request.get_json(silent=True) or {}
+    s = load_settings()
+    host = (s.get("smtp_host") or "").strip()
+    port_raw = (s.get("smtp_port") or "").strip()
+    user = (s.get("smtp_user") or "").strip()
+    password = "".join((s.get("smtp_pass") or "").split())
+    from_addr = (s.get("smtp_from") or "").strip() or user or "noreply@mediagrabber.local"
+    to_addr = (data.get("to") or user or "").strip()
+    if not host or not port_raw:
+        return jsonify({"ok": False, "error": "SMTP host and port are not configured. Save Settings first."}), 400
+    if not to_addr:
+        return jsonify({"ok": False, "error": "No recipient. Enter a 'to' address or configure SMTP Username."}), 400
+    try:
+        port = int(port_raw)
+    except ValueError:
+        return jsonify({"ok": False, "error": f"Invalid SMTP port: {port_raw!r}"}), 400
+    msg = MIMEMultipart()
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg["Subject"] = "MediaGrabber - SMTP Test"
+    body = (
+        "<html><body style='font-family:sans-serif;background:#0f0f11;color:#eaeef2;padding:20px;'>"
+        "<h2 style='color:#5b7cfa;'>&#x2705; SMTP is working</h2>"
+        "<p>This is a test email from your MediaGrabber instance.</p>"
+        f"<p style='color:#8899aa;font-size:0.85rem;'>Host: {host}:{port} &middot; From: {from_addr}</p>"
+        "</body></html>"
+    )
+    msg.attach(MIMEText(body, "html"))
+    try:
+        if port == 465:
+            server = smtplib.SMTP_SSL(host, port, timeout=10)
+        else:
+            server = smtplib.SMTP(host, port, timeout=10)
+            server.starttls()
+        if user and password:
+            server.login(user, password)
+        server.send_message(msg)
+        server.quit()
+        return jsonify({"ok": True, "message": f"Test email sent to {to_addr}"})
+    except Exception as e:
+        print(f"SMTP test error: {e}", file=sys.stderr)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route("/api/me/reset-request", methods=["POST"])
 def api_me_reset_request():
@@ -1537,8 +1679,12 @@ def api_me_reset_request():
     conn.execute("UPDATE users SET reset_token = ?, reset_expires = ? WHERE id = ?", (token, time.time() + 3600, user["id"]))
     conn.commit()
     conn.close()
-    print(f"\n\U0001F511 PASSWORD RESET LINK: {url_for('reset_password', token=token, _external=True)}\n")
-    return jsonify({"status": "success", "message": "Reset link printed to server log."})
+    reset_url = url_for("reset_password", token=token, _external=True)
+    ok, err = send_reset_email(user["email"], reset_url)
+    if ok:
+        return jsonify({"status": "success", "message": f"Reset link sent to {user['email']}."})
+    print(f"\n\U0001F511 PASSWORD RESET LINK (SMTP FAILED): {reset_url}\n")
+    return jsonify({"status": "partial", "message": "Email failed, link printed to server log.", "smtp_error": err}), 500
 
 @app.route("/avatars/<filename>")
 def serve_avatar(filename):
@@ -1799,17 +1945,146 @@ def settings_page():
             data["ytdlp_extra"] = request.form.get("ytdlp_extra", current.get("ytdlp_extra"))
             data["spotdl_extra"] = request.form.get("spotdl_extra", current.get("spotdl_extra"))
             data["gallerydl_extra"] = request.form.get("gallerydl_extra", current.get("gallerydl_extra"))
-            data["smtp_host"] = request.form.get("smtp_host", current.get("smtp_host"))
-            data["smtp_port"] = request.form.get("smtp_port", current.get("smtp_port"))
-            data["smtp_user"] = request.form.get("smtp_user", current.get("smtp_user"))
-            data["smtp_pass"] = request.form.get("smtp_pass", current.get("smtp_pass"))
-            data["smtp_from"] = request.form.get("smtp_from", current.get("smtp_from"))
+            data["smtp_host"] = (request.form.get("smtp_host", current.get("smtp_host")) or "").strip()
+            data["smtp_port"] = (request.form.get("smtp_port", current.get("smtp_port")) or "").strip()
+            data["smtp_user"] = (request.form.get("smtp_user", current.get("smtp_user")) or "").strip()
+            _raw_pass = request.form.get("smtp_pass", current.get("smtp_pass")) or ""
+            data["smtp_pass"] = "".join(_raw_pass.split())
+            data["smtp_from"] = (request.form.get("smtp_from", current.get("smtp_from")) or "").strip()
 
         save_settings(data)
         return jsonify({"status": "saved"})
     return jsonify(load_settings())
 
 # ---------- Metadata Editor ----------
+@app.route("/api/server/netwatch", methods=["GET"])
+def api_server_netwatch_status():
+    """Read-only status of the mg-netwatch timer."""
+    if session.get("role") != "admin":
+        return jsonify({"error": "Admin access required"}), 403
+    import subprocess
+    def _run(cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            return r.stdout.strip()
+        except Exception:
+            return ""
+    def _run_sudo(cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            return r.stdout.strip()
+        except Exception:
+            return ""
+
+    active  = _run(["systemctl", "is-active",  "mg-netwatch.timer"])  == "active"
+    enabled = _run(["systemctl", "is-enabled", "mg-netwatch.timer"])  == "enabled"
+
+    next_run_raw = None
+    next_run_seconds = None
+    try:
+        out = _run(["systemctl", "list-timers", "mg-netwatch.timer", "--no-pager"])
+        for line in out.splitlines():
+            if "mg-netwatch.timer" in line:
+                # Parse LEFT column, e.g. "22s" or "1min 5s" or "1h 2min"
+                parts = line.split()
+                # Find "LEFT" column by scanning for token ending in s/min/h
+                # Simpler: match regex on the whole line
+                import re as _re
+                m = _re.search(r"\b(\d+)s\s+\S+\s+mg-netwatch\.timer", line)
+                if m:
+                    next_run_seconds = int(m.group(1))
+                elif _re.search(r"(\d+)min", line):
+                    mm = _re.search(r"(\d+)min\s+(\d+)s", line)
+                    if mm:
+                        next_run_seconds = int(mm.group(1))*60 + int(mm.group(2))
+                next_run_raw = line.strip()
+                break
+    except Exception:
+        pass
+
+    fails = 0
+    try:
+        with open("/var/lib/mg-netwatch/consecutive_gw_failures") as f:
+            fails = int((f.read() or "0").strip() or 0)
+    except Exception:
+        pass
+
+    recent_log = []
+    try:
+        with open("/var/log/mg-netwatch.log") as f:
+            recent_log = [l.rstrip() for l in f.readlines()[-10:]]
+    except Exception:
+        pass
+
+    last_run_ts = None
+    try:
+        import os as _os
+        if _os.path.exists("/var/log/mg-netwatch.log"):
+            last_run_ts = time.strftime("%Y-%m-%d %H:%M:%S",
+                                        time.localtime(_os.path.getmtime("/var/log/mg-netwatch.log")))
+    except Exception:
+        pass
+
+    return jsonify({
+        "timer_active": active,
+        "timer_enabled": enabled,
+        "next_run_seconds": next_run_seconds,
+        "next_run_raw": next_run_raw,
+        "last_run_ts": last_run_ts,
+        "consecutive_failures": fails,
+        "recent_log": recent_log,
+        "iface": "wlp4s0",
+        "gateway": "192.168.1.1",
+    })
+
+
+@app.route("/api/server/netwatch/action", methods=["POST"])
+def api_server_netwatch_action():
+    """Admin-only actions: run / enable / disable netwatch timer."""
+    if session.get("role") != "admin":
+        return jsonify({"error": "Admin access required"}), 403
+    import subprocess
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "").strip()
+    try:
+        if action == "run":
+            subprocess.Popen(
+                ["sudo", "-n", "/bin/systemctl", "start", "mg-netwatch.service"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return jsonify({"ok": True, "message": "Check triggered"})
+        elif action == "enable":
+            r = subprocess.run(
+                ["sudo", "-n", "/bin/systemctl", "enable", "--now", "mg-netwatch.timer"],
+                capture_output=True, text=True, timeout=10
+            )
+            if r.returncode != 0:
+                return jsonify({"ok": False, "error": r.stderr or "systemctl failed"}), 500
+            return jsonify({"ok": True, "message": "Timer enabled"})
+        elif action == "disable":
+            r = subprocess.run(
+                ["sudo", "-n", "/bin/systemctl", "disable", "--now", "mg-netwatch.timer"],
+                capture_output=True, text=True, timeout=10
+            )
+            if r.returncode != 0:
+                return jsonify({"ok": False, "error": r.stderr or "systemctl failed"}), 500
+            return jsonify({"ok": True, "message": "Timer disabled"})
+        elif action == "restart_mediagrabber":
+            # Fire-and-forget: restarting this service kills the request handler,
+            # so don't wait for the subprocess to complete.
+            subprocess.Popen(
+                ["sudo", "-n", "/bin/systemctl", "restart", "mediagrabber.service"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return jsonify({"ok": True, "message": "Restart triggered (connection will drop briefly)"})
+        else:
+            return jsonify({"ok": False, "error": f"Unknown action: {action}"}), 400
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "systemctl timed out"}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/metadata/editor/scan", methods=["POST"])
 def metadata_editor_scan():
     data = request.get_json()
@@ -1956,6 +2231,70 @@ def get_storage():
 
 
 
+THUMBS_CACHE_PATH = "/opt/mediagrabber/thumbs.json"
+
+def _load_thumbs():
+    try:
+        if os.path.exists(THUMBS_CACHE_PATH):
+            with open(THUMBS_CACHE_PATH, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_thumbs(cache):
+    try:
+        tmp = THUMBS_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, THUMBS_CACHE_PATH)
+    except Exception as e:
+        print(f"thumbs cache save error: {e}", file=sys.stderr)
+
+def resolve_thumbnail(url, source_type, cache):
+    """Return (title, thumb_url) for an archive URL, using & updating cache[url]."""
+    key = url
+    if key in cache and isinstance(cache[key], dict):
+        return cache[key].get("title") or "Archived Entry", cache[key].get("thumb") or ""
+
+    title, thumb = "Archived Entry", ""
+
+    if source_type in ("youtube", "ytmusic"):
+        try:
+            # Use the explicit path to avoid PATH issues in systemd, and increase timeout
+            ytdlp_bin = os.path.expanduser("~/.local/bin/yt-dlp")
+            if not os.path.exists(ytdlp_bin):
+                ytdlp_bin = "yt-dlp"
+            
+            res = subprocess.run(
+                [ytdlp_bin, "--dump-json", "--skip-download", "--no-warnings", url],
+                capture_output=True, text=True, timeout=30)
+            if res.returncode == 0:
+                info = json.loads(res.stdout)
+                title = info.get("title", title)
+                thumb = info.get("thumbnail", "")
+            else:
+                print(f"yt-dlp failed for {url}: {res.stderr}", file=sys.stderr)
+        except Exception as e:
+            print(f"yt-dlp exception for {url}: {e}", file=sys.stderr)
+
+    elif source_type == "spotify":
+        try:
+            import urllib.request
+            oembed = "https://open.spotify.com/oembed?url=" + urllib.parse.quote(url, safe="")
+            req = urllib.request.Request(oembed, headers={"User-Agent": "MediaGrabber/2.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                thumb = data.get("thumbnail_url", "") or ""
+                title = data.get("title", title) or title
+        except Exception:
+            pass
+
+    # Gallery: leave empty (auth-required for IG/TikTok previews)
+
+    cache[key] = {"title": title, "thumb": thumb}
+    return title, thumb
+
 @app.route("/api/history", methods=["GET"])
 def get_history():
     history_items = []
@@ -1992,6 +2331,9 @@ def get_history():
     except Exception:
         archive_lines = []
 
+    _thumbs = _load_thumbs()
+    _thumbs_dirty = False
+    _thumbs_before = dict(_thumbs)
     for line in archive_lines:
         source_type, url = parse_archive_line(line)
         if source_type is None:
@@ -2001,18 +2343,7 @@ def get_history():
             continue
         seen_ids.add(url)
         seen_ids.add(vid)
-        title, thumb = "Archived Entry", ""
-        if source_type in ("youtube", "ytmusic"):
-            try:
-                res = subprocess.run(
-                    ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", url],
-                    capture_output=True, text=True, timeout=10)
-                if res.returncode == 0:
-                    info = json.loads(res.stdout)
-                    title = info.get("title", title)
-                    thumb = info.get("thumbnail", "")
-            except Exception:
-                pass
+        title, thumb = resolve_thumbnail(url, source_type, _thumbs)
         history_items.append({
             "url": url,
             "title": title,
@@ -2020,15 +2351,34 @@ def get_history():
             "timestamp": "Unknown",
             "source": source_type,
         })
+    if _thumbs != _thumbs_before:
+        _save_thumbs(_thumbs)
 
     return jsonify(history_items)
 
 @app.route("/api/history/clear", methods=["POST"])
 def clear_history():
-    conn = sqlite3.connect(USER_DB_PATH)
-    conn.execute("DELETE FROM history")
-    conn.commit()
-    conn.close()
+    # 1. Clear DB history
+    try:
+        conn = sqlite3.connect(USER_DB_PATH)
+        conn.execute("DELETE FROM history")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error clearing DB: {e}", file=sys.stderr)
+    
+    # 2. Clear archive.txt (with safety backup)
+    try:
+        if os.path.exists(ARCHIVE_FILE):
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            shutil.copy2(ARCHIVE_FILE, f"{ARCHIVE_FILE}.bak.{ts}")
+            # Truncate the file
+            with open(ARCHIVE_FILE, "w") as f:
+                pass
+    except Exception as e:
+        print(f"Error clearing archive: {e}", file=sys.stderr)
+        return jsonify({"error": "Failed to clear archive"}), 500
+
     return jsonify({"status": "cleared"})
 
 
@@ -2080,6 +2430,15 @@ def home():
             const text = await navigator.clipboard.readText();
             if (text) document.getElementById('url').value = text;
         } catch(e) { alert("Please allow clipboard access in your browser."); }
+    }
+
+    // PWA service worker registration
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/service-worker.js')
+                .then(function(reg) { console.log('[PWA] Service worker registered, scope:', reg.scope); })
+                .catch(function(err) { console.error('[PWA] SW registration failed:', err); });
+        });
     }
     
     async function loadStorage() {
@@ -2355,8 +2714,11 @@ def home():
             object-fit: cover;
             display: block;
         }
-        .thumb-yt img { aspect-ratio: 16/9; }
-        .thumb-spotify img { aspect-ratio: 1/1; }
+        .thumb-yt img { width: 120px; height: auto; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+        .thumb-spotify img { width: 120px; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+        .thumb-yt div, .thumb-spotify div, .thumb-gallery div { width: 120px; background: var(--border); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; color: var(--text-muted); }
+        .thumb-yt div { aspect-ratio: 16/9; }
+        .thumb-spotify div { aspect-ratio: 1/1; }
         .thumb-gallery img {
             aspect-ratio: 9/16;
             object-fit: contain;
@@ -2811,6 +3173,11 @@ def home():
             display: none !important;
         }
 </style>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f0f11">
 </head>
 <body class="{theme} {role_class}">
 <div class="sidebar">
@@ -2829,12 +3196,13 @@ def home():
     <button data-view="settings">⚙️ Settings</button>
     <button data-view="utilities">🔧 Utilities</button>
     <button data-view="history">🕰️ History</button>
+    <button data-view="server">🖥️ Server</button>
     
     <div id="storageWidget" style="margin: 10px 16px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 8px;">
         <h4 style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase;">Storage Space</h4>
         <div id="storageBars"></div>
     </div>
-<div class="version">v1.9</div>
+<div class="version">v1.9.4</div>
     
         </div>
     </div>
@@ -2972,7 +3340,7 @@ def home():
 <div class="main">
     <div class="top-header">
         <h1>📡 MediaGrabber</h1>
-        <span class="subtitle">v1.9</span>
+        <span class="subtitle">v1.9.4</span>
     </div>
     <!-- Queue -->
     <div id="view-queue" class="view active">
@@ -2990,6 +3358,7 @@ def home():
         </div>
         <div class="queue-title">
             <span>Queue</span>
+            <button id="enablePush" onclick="subscribePush()" style="margin-left: 15px; background: #4CAF50; color: white; font-size: 16px; padding: 10px; border-radius: 5px; cursor: pointer;">🔔 Enable Notifications</button>
             <button class="clear-btn" onclick="clearCompleted()">🗑️ Clear Completed</button>
         </div>
         <div id="queue"><div class="empty">No jobs yet</div></div>
@@ -3095,6 +3464,11 @@ def home():
                 <input type="password" id="smtp_pass" name="smtp_pass" placeholder="••••••••">
                 <label for="smtp_from">From Address</label>
                 <input type="text" id="smtp_from" name="smtp_from" placeholder="MediaGrabber <noreply@yourdomain.com>">
+                <div style="margin-top:12px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <button type="button" id="smtpTestBtn" onclick="smtpTest()" style="background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:0.9rem;">Send Test Email</button>
+                    <span id="smtpTestStatus" style="font-size:0.85rem;"></span>
+                </div>
+                <div class="hint" style="margin-top:6px;">Click "Save Settings" below first, then test.</div>
             </div>
             <div class="settings-group">
                 <h3>Extra Arguments</h3>
@@ -3132,6 +3506,63 @@ def home():
 
         <div id="historyList" style="display:flex; flex-direction:column; gap:10px;">Loading...</div>
     </div>
+
+<div id="view-server" class="view">
+    <div style="padding: 16px; max-width: 900px;">
+        <h2 style="margin-bottom: 16px; color: var(--text);">🖥️ Server Manager</h2>
+
+        <!-- Netwatch card -->
+        <div class="settings-group" style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                <h3 style="margin: 0; color: var(--text);">🌐 Network Watchdog</h3>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span id="netwatchStatusDot" style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #888;"></span>
+                    <span id="netwatchStatusText" style="font-size: 0.9rem; color: var(--text-muted);">Loading…</span>
+                </div>
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px;">
+                <div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Next Check</div>
+                    <div id="netwatchNextIn" style="font-size: 1.4rem; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums;">—:—</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Last Run</div>
+                    <div id="netwatchLastRun" style="font-size: 0.9rem; color: var(--text);">—</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Consecutive Failures</div>
+                    <div id="netwatchFails" style="font-size: 1.4rem; font-weight: 600; color: var(--text);">0</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Interface / Gateway</div>
+                    <div id="netwatchIfaceGw" style="font-size: 0.9rem; color: var(--text);">—</div>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px;">
+                <button type="button" id="netwatchRunBtn" onclick="netwatchAction('run')" style="background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">▶ Run Check Now</button>
+                <button type="button" id="netwatchToggleBtn" onclick="netwatchToggle()" style="background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">Disable Timer</button>
+                <button type="button" id="netwatchRefreshBtn" onclick="loadServerManager(true)" style="background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">🔄 Refresh</button>
+            </div>
+
+            <div id="netwatchStatusMsg" style="font-size: 0.85rem; min-height: 1.2em; margin-bottom: 8px;"></div>
+
+            <details style="border-top: 1px solid var(--border); padding-top: 10px;">
+                <summary style="cursor: pointer; color: var(--text-muted); font-size: 0.85rem;">Recent log (last 10 lines)</summary>
+                <pre id="netwatchLog" style="background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 10px; margin-top: 8px; font-size: 0.75rem; color: var(--text-muted); max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">(no log entries)</pre>
+            </details>
+        </div>
+
+        <!-- Service card -->
+        <div class="settings-group" style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px;">
+            <h3 style="margin: 0 0 12px 0; color: var(--text);">🔄 MediaGrabber Service</h3>
+            <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px;">Restart the Flask app. Connection will drop briefly, then reconnect automatically.</p>
+            <button type="button" id="restartMGBtn" onclick="restartMediaGrabber()" style="background: #d9534f; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">🔄 Restart MediaGrabber</button>
+            <span id="restartMGStatus" style="font-size: 0.85rem; margin-left: 12px;"></span>
+        </div>
+    </div>
+</div>
 
 <div id="view-utilities" class="view">
         <h2>🔧 Utilities</h2>
@@ -4231,7 +4662,46 @@ def home():
         } catch (_) {}
     }
 
-    document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+    function smtpTest() {
+    var btn = document.getElementById('smtpTestBtn');
+    var statusEl = document.getElementById('smtpTestStatus');
+    function setStatus(color, text) {
+        if (statusEl) { statusEl.style.color = color; statusEl.textContent = text; }
+        else { console.log('[smtpTest] ' + text); }
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+    setStatus('', '');
+    fetch('/api/settings/email/test', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+        credentials: 'same-origin',
+        body: '{}'
+    })
+    .then(function(r) {
+        var ct = r.headers.get('content-type') || '';
+        if (ct.indexOf('application/json') === -1) {
+            return r.text().then(function(t) {
+                throw new Error('Non-JSON response (' + r.status + ' ' + ct + '): ' + t.substring(0, 200));
+            });
+        }
+        return r.json().then(function(j) { return {status: r.status, body: j}; });
+    })
+    .then(function(res) {
+        if (res.body && res.body.ok) {
+            setStatus('#6fcf97', 'OK: ' + res.body.message);
+        } else {
+            setStatus('#ff6b6b', 'FAIL: ' + ((res.body && res.body.error) || 'Unknown error'));
+        }
+    })
+    .catch(function(err) {
+        setStatus('#ff6b6b', 'Error: ' + (err && err.message ? err.message : String(err)));
+    })
+    .then(function() {
+        if (btn) { btn.disabled = false; btn.textContent = 'Send Test Email'; }
+    });
+}
+
+document.getElementById('settingsForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         const data = new FormData(e.target);
         const res = await fetch('/settings', { method: 'POST', body: data });
@@ -4434,15 +4904,20 @@ document.getElementById('accountAvatarFile').addEventListener('change', function
 
         let html = '';
         for (const item of filtered) {
+            let thumbClass = 'thumb-yt';
+            if (item.source === 'spotify') thumbClass = 'thumb-spotify';
+            else if (item.source === 'gallery') thumbClass = 'thumb-gallery';
+            else if (item.source === 'ytmusic') thumbClass = 'thumb-yt'; // YT Music still uses 16:9
+
             const img = item.thumbnail 
-                ? `<img src="${escapeHTML(item.thumbnail)}" style="width:120px; height:68px; object-fit:cover; border-radius:6px; border:1px solid var(--border);">` 
-                : `<div style="width:120px; height:68px; background:var(--border); border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:0.7rem; color:var(--text-muted);">No Image</div>`;
+                ? `<img src="${escapeHTML(item.thumbnail)}">` 
+                : `<div>No Image</div>`;
             
             const sourceBadge = `<span style="font-size:0.7rem; text-transform:uppercase; background:var(--border); padding:2px 6px; border-radius:4px; margin-left:8px;">${item.source}</span>`;
             
             html += `
             <div class="card" style="display:flex; gap:16px; align-items:center; padding:12px; margin-bottom:8px;">
-                <div style="flex-shrink:0;">${img}</div>
+                <div class="${thumbClass}" style="flex-shrink:0;">${img}</div>
                 <div style="flex:1; overflow:hidden;">
                     <div style="font-weight:bold; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
                         ${escapeHTML(item.title)} ${sourceBadge}
@@ -4463,6 +4938,196 @@ document.getElementById('accountAvatarFile').addEventListener('change', function
     }
     // Load history when the tab is clicked
     document.querySelector('button[data-view="history"]').addEventListener('click', loadHistory);
+document.querySelector('button[data-view="server"]').addEventListener('click', function() {
+    if (typeof loadServerManager === 'function') loadServerManager();
+});
+// ========== Server Manager ==========
+let _netwatchState = { pollTimer: null, countdownTimer: null, nextRunAt: null, visible: false };
+let _netwatchLoadedOnce = false;
+
+function _formatCountdown(secs) {
+    if (secs < 0) secs = 0;
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m + ':' + String(s).padStart(2, '0');
+}
+
+function _setNetwatchMsg(text, kind) {
+    const el = document.getElementById('netwatchStatusMsg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = kind === 'error' ? '#ff6b6b' : (kind === 'ok' ? '#6fcf97' : 'var(--text-muted)');
+}
+
+function _startCountdown() {
+    if (_netwatchState.countdownTimer) clearInterval(_netwatchState.countdownTimer);
+    _netwatchState.countdownTimer = setInterval(function() {
+        const el = document.getElementById('netwatchNextIn');
+        if (!el || !_netwatchState.nextRunAt) return;
+        const secs = Math.max(0, Math.floor((_netwatchState.nextRunAt - Date.now()) / 1000));
+        el.textContent = _formatCountdown(secs);
+    }, 1000);
+}
+
+function loadServerManager(force) {
+    if (!force && _netwatchLoadedOnce) {
+        // already loaded once; ensure countdown running and return
+        if (!_netwatchState.countdownTimer) _startCountdown();
+        return;
+    }
+    _netwatchLoadedOnce = true;
+    fetch('/api/server/netwatch', { credentials: 'same-origin' })
+        .then(function(r) { return r.json().then(function(j) { return {ok: r.ok, body: j}; }); })
+        .then(function(res) {
+            const d = res.body || {};
+            const dot = document.getElementById('netwatchStatusDot');
+            const txt = document.getElementById('netwatchStatusText');
+            const toggleBtn = document.getElementById('netwatchToggleBtn');
+
+            if (d.timer_active && d.timer_enabled) {
+                dot.style.background = '#6fcf97';
+                txt.textContent = 'Active';
+                txt.style.color = '#6fcf97';
+                if (toggleBtn) toggleBtn.textContent = 'Disable Timer';
+            } else if (d.timer_enabled) {
+                dot.style.background = '#f0c24a';
+                txt.textContent = 'Enabled (idle)';
+                txt.style.color = '#f0c24a';
+                if (toggleBtn) toggleBtn.textContent = 'Disable Timer';
+            } else {
+                dot.style.background = '#ff6b6b';
+                txt.textContent = 'Disabled';
+                txt.style.color = '#ff6b6b';
+                if (toggleBtn) toggleBtn.textContent = 'Enable Timer';
+            }
+
+            document.getElementById('netwatchLastRun').textContent = d.last_run_ts || '—';
+            const fails = d.consecutive_failures || 0;
+            const failsEl = document.getElementById('netwatchFails');
+            failsEl.textContent = fails;
+            failsEl.style.color = fails === 0 ? '#6fcf97' : (fails === 1 ? '#f0c24a' : '#ff6b6b');
+            document.getElementById('netwatchIfaceGw').textContent = (d.iface || '?') + ' → ' + (d.gateway || '?');
+
+            // Countdown
+            if (typeof d.next_run_seconds === 'number') {
+                _netwatchState.nextRunAt = Date.now() + d.next_run_seconds * 1000;
+            } else {
+                _netwatchState.nextRunAt = null;
+            }
+            _startCountdown();
+
+            // Log
+            const logEl = document.getElementById('netwatchLog');
+            if (d.recent_log && d.recent_log.length) {
+                logEl.textContent = d.recent_log.join('\n');
+            } else {
+                logEl.textContent = '(no log entries — network healthy)';
+            }
+
+            _setNetwatchMsg('', null);
+        })
+        .catch(function(err) {
+            _setNetwatchMsg('Failed to load status: ' + err.message, 'error');
+        });
+
+    // Start polling when tab visible
+    if (_netwatchState.pollTimer) clearInterval(_netwatchState.pollTimer);
+    _netwatchState.pollTimer = setInterval(function() {
+        if (document.visibilityState === 'visible') {
+            const view = document.getElementById('view-server');
+            if (view && view.classList.contains('active')) {
+                loadServerManager(true);
+            }
+        }
+    }, 30000);
+}
+
+function netwatchAction(action) {
+    const btn = document.getElementById('netwatchRunBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Running…'; }
+    _setNetwatchMsg('', null);
+    fetch('/api/server/netwatch/action', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({action: action})
+    })
+    .then(function(r) { return r.json().then(function(j) { return {ok: r.ok, body: j}; }); })
+    .then(function(res) {
+        if (res.ok && res.body.ok) {
+            _setNetwatchMsg(res.body.message || 'Done', 'ok');
+            setTimeout(function() { loadServerManager(true); }, 2000);
+        } else {
+            _setNetwatchMsg('Error: ' + (res.body.error || 'unknown'), 'error');
+        }
+    })
+    .catch(function(err) {
+        _setNetwatchMsg('Network error: ' + err.message, 'error');
+    })
+    .finally(function() {
+        if (btn) { btn.disabled = false; btn.textContent = '▶ Run Check Now'; }
+    });
+}
+
+function netwatchToggle() {
+    const btn = document.getElementById('netwatchToggleBtn');
+    const isDisable = btn && btn.textContent.indexOf('Disable') >= 0;
+    const action = isDisable ? 'disable' : 'enable';
+    if (isDisable && !confirm('Disable the network watchdog? The server will no longer auto-recover from Wi-Fi issues.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Working…'; }
+    _setNetwatchMsg('', null);
+    fetch('/api/server/netwatch/action', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({action: action})
+    })
+    .then(function(r) { return r.json().then(function(j) { return {ok: r.ok, body: j}; }); })
+    .then(function(res) {
+        if (res.ok && res.body.ok) {
+            _setNetwatchMsg(res.body.message || 'Done', 'ok');
+            setTimeout(function() { loadServerManager(true); }, 1000);
+        } else {
+            _setNetwatchMsg('Error: ' + (res.body.error || 'unknown'), 'error');
+        }
+    })
+    .catch(function(err) {
+        _setNetwatchMsg('Network error: ' + err.message, 'error');
+    })
+    .finally(function() {
+        if (btn) btn.disabled = false;
+    });
+}
+
+function restartMediaGrabber() {
+    if (!confirm('Restart the MediaGrabber service? The page will lose connection briefly.')) return;
+    const btn = document.getElementById('restartMGBtn');
+    const status = document.getElementById('restartMGStatus');
+    if (btn) btn.disabled = true;
+    if (status) { status.textContent = '⏳ Restarting…'; status.style.color = 'var(--text-muted)'; }
+    fetch('/api/server/netwatch/action', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({action: 'restart_mediagrabber'})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        if (j.ok) {
+            if (status) { status.textContent = '✅ Restart triggered. Reconnecting in ~5s…'; status.style.color = '#6fcf97'; }
+            setTimeout(function() { location.reload(); }, 8000);
+        } else {
+            if (status) { status.textContent = '❌ ' + (j.error || 'failed'); status.style.color = '#ff6b6b'; }
+            if (btn) btn.disabled = false;
+        }
+    })
+    .catch(function(err) {
+        if (status) { status.textContent = '❌ ' + err.message; status.style.color = '#ff6b6b'; }
+        if (btn) btn.disabled = false;
+    });
+}
+
+
 
     // ---------- Polling ----------
     setInterval(loadQueue, 1500);
@@ -4661,7 +5326,143 @@ document.getElementById('accountAvatarFile').addEventListener('change', function
                     <button onclick="saveTheme()" style="background:var(--accent); border:none; color:white; padding:6px 12px; border-radius:4px; cursor:pointer;">Save</button>
                 </div>
             </div>
-<script src="/static/features.js"></script>
+<script src="/static/features.js">
+    <script>
+    const VAPID_PUBLIC_KEY = 'BJbqUsBMzUesydfhhcSzvp2l8RisGON2tP4vGfQDlb28-Bt2Im2TutXuhrwjIQZb9E87j9yw7gH_mbldH3nk6Lw';
+
+    function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) {
+            outputArray[i] = rawData.charCodeAt(i);
+        }
+        return outputArray;
+    }
+
+    async function subscribePush() {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+            alert("Push not supported.");
+            return;
+        }
+        try {
+            // Explicitly register the SW before subscribing
+            const registration = await navigator.serviceWorker.register('/static/service-worker.js');
+            
+            // Wait for it to be ready
+            const readyReg = await navigator.serviceWorker.ready;
+            
+            const permission = await Notification.requestPermission();
+            if (permission !== 'granted') {
+                alert("Permission denied.");
+                return;
+            }
+
+            const subscription = await readyReg.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+            });
+
+            const response = await fetch('/api/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(subscription)
+            });
+            
+            if (response.ok) {
+                document.getElementById('enablePush').style.display = 'none';
+                alert("Success! Notifications are enabled.");
+            } else {
+                alert("Failed to save subscription on server.");
+            }
+        } catch (error) {
+            alert("ERROR: " + error.message);
+        }
+    }
+
+    async function checkSubscription() {
+        if ('serviceWorker' in navigator) {
+            try {
+                const reg = await navigator.serviceWorker.register('/static/service-worker.js');
+                const readyReg = await navigator.serviceWorker.ready;
+                const sub = await readyReg.pushManager.getSubscription();
+                if (sub) {
+                    const btn = document.getElementById('enablePush');
+                    if (btn) btn.style.display = 'none';
+                }
+            } catch (e) {
+                console.log("SW not ready yet", e);
+            }
+        }
+    }
+    window.addEventListener('load', checkSubscription);
+    </script>
+</script>
+
+    <script>
+    const VAPID_PUBLIC_KEY = 'BJbqUsBMzUesydfhhcSzvp2l8RisGON2tP4vGfQDlb28-Bt2Im2TutXuhrwjIQZb9E87j9yw7gH_mbldH3nk6Lw';
+
+    function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) {
+            outputArray[i] = rawData.charCodeAt(i);
+        }
+        return outputArray;
+    }
+
+    async function subscribePush() {
+        alert("1. Button clicked!");
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+            alert("2. Push not supported.");
+            return;
+        }
+        try {
+            alert("3. Waiting for Service Worker...");
+            const registration = await navigator.serviceWorker.ready;
+            alert("4. Service Worker is ready!");
+            
+            const permission = await Notification.requestPermission();
+            alert("5. Permission: " + permission);
+            if (permission !== 'granted') return;
+
+            alert("6. Subscribing...");
+            const subscription = await registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+            });
+            alert("7. Sending to server...");
+
+            const response = await fetch('/api/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(subscription)
+            });
+            
+            alert("8. Server response: " + response.status);
+            if (response.ok) {
+                document.getElementById('enablePush').style.display = 'none';
+            }
+        } catch (error) {
+            alert("ERROR: " + error.message);
+        }
+    }
+
+    async function checkSubscription() {
+        if ('serviceWorker' in navigator) {
+            const reg = await navigator.serviceWorker.ready;
+            const sub = await reg.pushManager.getSubscription();
+            if (sub) {
+                const btn = document.getElementById('enablePush');
+                if (btn) btn.style.display = 'none';
+            }
+        }
+    }
+    window.addEventListener('load', checkSubscription);
+    </script>
 </body>
 </html>
     '''.replace('{theme}', theme)
