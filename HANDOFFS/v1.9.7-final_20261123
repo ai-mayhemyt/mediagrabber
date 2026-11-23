@@ -52,4 +52,4 @@ Restore instructions
 
 If anything breaks, roll back locally: sudo cp /opt/mediagrabber/web/app.py.bak.v1.9.7-final /opt/mediagrabber/web/app.py sudo systemctl restart mediagrabber
 
-Or from git: git checkout v1.9.6 -- web/app.py
+Or from git: git checkout v1.9.6 -- web/app.py 
