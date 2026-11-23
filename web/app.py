@@ -291,11 +291,13 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
         <input id="username" name="username" autocomplete="username" required autofocus>
         <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="current-password" required>
-      
-      
-      <button type="submit">{% if require_2fa %}Verify{% else %}Sign in</button>
+      {% endif %}
+      <button type="submit">{% if require_2fa %}Verify{% else %}Sign in{% endif %}</button>
     </form>
-    {% if error %}<div class="error">{{ error }}</div>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <div style="margin-top: 15px; text-align: center;">
+      <a href="/register" style="color: var(--accent); text-decoration: none; font-size: 14px;">Don't have an account? Register</a>
+    </div>
   </div>
 
 <!-- Theme Modal -->
@@ -428,7 +430,7 @@ def _enforce_auth():
     if request.path.startswith("/api/utilities"): return None
     if request.path in ("/manifest.json", "/service-worker.js"): return None
     if request.path in ("/manifest.json", "/service-worker.js"): return None
-    if request.endpoint in ("login_page", "login_submit", "static", "_pwa_manifest", "_pwa_sw"):
+    if request.endpoint in ("login_page", "login_submit", "register_page", "register_submit", "static", "_pwa_manifest", "_pwa_sw"):
         return None
     if request.path == "/manifest.json" or request.path == "/service-worker.js" or request.path.startswith("/static/"):
         return None
@@ -1446,6 +1448,80 @@ def api_subscribe():
         return {"status": "success", "message": "Already subscribed"}, 200
     except Exception as e:
         return {"status": "error", "message": str(e)}, 500
+
+
+REGISTER_TEMPLATE = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Register</title>
+<style>
+body{background:#0e1116;color:#e6e6e6;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.card{background:#171b22;border:1px solid #2a3038;border-radius:12px;padding:28px;width:340px}
+h2{margin:0 0 18px}
+label{display:block;margin:12px 0 4px;font-size:13px;color:#9aa4b2}
+input{width:100%;padding:10px;border-radius:8px;border:1px solid #2a3038;background:#0e1116;color:#e6e6e6;box-sizing:border-box}
+button{margin-top:18px;width:100%;padding:10px;border-radius:8px;border:0;background:#3b82f6;color:#fff;font-weight:600;cursor:pointer}
+.error{background:#3a1115;color:#fca5a5;padding:10px;border-radius:8px;margin-top:14px;font-size:13px}
+a{color:#60a5fa;font-size:13px}
+</style></head><body>
+<div class="card">
+  <h2>Create Account</h2>
+  <form method="POST" action="/register" autocomplete="off">
+    <label for="username">Username</label>
+    <input id="username" name="username" required autofocus autocomplete="username" value="{{ username or '' }}">
+    <label for="password">Password (min 8 chars)</label>
+    <input id="password" name="password" type="password" required minlength="8" autocomplete="new-password">
+    <label for="password2">Confirm Password</label>
+    <input id="password2" name="password2" type="password" required minlength="8" autocomplete="new-password">
+    <button type="submit">Register</button>
+  </form>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <p style="margin-top:14px;text-align:center"><a href="/login">Already have an account? Sign in</a></p>
+</div>
+</body></html>
+"""
+
+@app.route("/register", methods=["GET"])
+def register_page():
+    if session.get("user_id"):
+        return redirect("/")
+    return render_template_string(REGISTER_TEMPLATE, error=None, username="")
+
+@app.route("/register", methods=["POST"])
+def register_submit():
+    username = (request.form.get("username") or "").strip()
+    password = request.form.get("password") or ""
+    password2 = request.form.get("password2") or ""
+
+    if not username or not password:
+        return render_template_string(REGISTER_TEMPLATE, error="Username and password required.", username=username), 400
+    if len(username) < 3 or len(username) > 32:
+        return render_template_string(REGISTER_TEMPLATE, error="Username must be 3-32 characters.", username=username), 400
+    if len(password) < 8:
+        return render_template_string(REGISTER_TEMPLATE, error="Password must be at least 8 characters.", username=username), 400
+    if password != password2:
+        return render_template_string(REGISTER_TEMPLATE, error="Passwords do not match.", username=username), 400
+
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        conn.execute(
+            "INSERT INTO users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)",
+            (username, generate_password_hash(password), username, "user")
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return render_template_string(REGISTER_TEMPLATE, error="Username already exists.", username=username), 400
+    finally:
+        try: conn.close()
+        except: pass
+
+    user = get_user(username)
+    session.clear()
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    session["role"] = user["role"]
+    session.permanent = True
+    return redirect("/")
+
 
 @app.route("/login", methods=["GET"])
 def login_page():
