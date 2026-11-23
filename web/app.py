@@ -3977,7 +3977,9 @@ def home():
                 <button type="button" class="tab-btn" onclick="switchAccountTab('profile', this)" style="background:transparent; border:none; color:var(--accent); border-bottom:2px solid var(--accent); font-weight:bold; cursor:pointer; padding:10px; font-size:1rem; margin-bottom:-1px;">Profile</button>
                 <button type="button" class="tab-btn" onclick="switchAccountTab('security', this)" style="background:transparent; border:none; color:var(--text-muted); font-weight:bold; cursor:pointer; padding:10px; font-size:1rem;">Security</button>
                 
-                <button type="button" class="tab-btn" onclick="switchAccountTab('tokens', this)" style="background:transparent; border:none; color:var(--text-muted); font-weight:bold; cursor:pointer; padding:10px; font-size:1rem;">🔑 API Tokens</button>
+                {% if session.role == 'admin' %}
+<button class="account-tab-btn" onclick="switchAccountTab('tokens', this)">🔑 API Tokens</button>
+{% endif %}
                 
                 
             </div>
@@ -4042,7 +4044,8 @@ def home():
 
             
             <!-- Tab 3: API Tokens (Admin Only) -->
-            <div id="tab-tokens" class="account-tab-content" style="display:none;">
+            {% if session.role == 'admin' %}
+<div id="tab-tokens" class="account-tab-content" style="display:none;">
                 <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:15px;">
                     API tokens allow external scripts and apps to authenticate as you.
                     <strong style="color:var(--accent);">The full token is shown only once at creation.</strong>
@@ -4073,6 +4076,7 @@ def home():
 
             <!-- Action Buttons -->
             <div class="modal-actions" style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px;">
+        {% endif %}
                 <button class="save-btn" type="submit">💾 Save Changes</button>
                 <button class="cancel-btn" type="button" onclick="closeAccountModal()">Cancel</button>
                 <a href="/logout" style="text-decoration:none; padding:8px 16px; border-radius:6px; background:#3a1a1a; color:#cf6f6f; font-weight:600; margin-left:auto;">🚪 Logout</a>
@@ -5920,7 +5924,8 @@ function restartMediaGrabber() {
 
     admin_style = "" if session.get("role") == "admin" else "display:none;"
     role_class = "role-admin" if session.get("role") == "admin" else "role-user"
-    return html.replace('{admin_style}', admin_style).replace('{role_class}', role_class).replace('{theme_colors}', (user.get('theme_colors') or '{}'))
+    rendered = html.replace('{admin_style}', admin_style).replace('{role_class}', role_class).replace('{theme_colors}', (user.get('theme_colors') or '{}'))
+    return render_template_string(rendered)
 
 
 
