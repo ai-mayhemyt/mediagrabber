@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 import secrets
+import hashlib
 import sys
 import base64
 import smtplib
@@ -188,11 +189,11 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
 <title>Sign in \u2014 MediaGrabber v1.0</title>
 <style>
   :root{
-      --sidebar: #141418;--bg:#0f0f11;--card:#1a1a20;--border:#2c2c36;--accent:#5b7cfa;--accent-hover:#6f8cff;--text:#eaeef2;--text-muted:#8899aa;}
+      --sidebar: #281F3D;--bg:#281F3D;--card:#1D2523;--border:#7489C1;--accent:#7489C1;--accent-hover:#93a7df;--text:#ACD5BA;--text-muted:#8899aa;}
   *{box-sizing:border-box;margin:0;padding:0;}
   body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px;}
   .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:32px;width:100%;max-width:380px;box-shadow:0 8px 24px rgba(0,0,0,0.6);}
-  h1{font-size:1.4rem;margin-bottom:8px;background:linear-gradient(135deg,#a0b4ff,#5b7cfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+  h1{font-size:1.4rem;margin-bottom:8px;background:linear-gradient(135deg,#93a7df,#7489C1);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
   p.sub{color:var(--text-muted);font-size:0.9rem;margin-bottom:20px;}
   label{display:block;margin:12px 0 6px;font-weight:500;font-size:0.9rem;}
   input{width:100%;padding:12px 14px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:1rem;outline:none;transition:border-color .2s;}
@@ -291,10 +292,12 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
         <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="current-password" required>
       {% endif %}
-      
       <button type="submit">{% if require_2fa %}Verify{% else %}Sign in{% endif %}</button>
     </form>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <div style="margin-top: 15px; text-align: center;">
+      <a href="/register" style="color: var(--accent); text-decoration: none; font-size: 14px;">Don't have an account? Register</a>
+    </div>
   </div>
 
 <!-- Theme Modal -->
@@ -378,6 +381,34 @@ LOGIN_TEMPLATE = """<!DOCTYPE html>
 """
 
 app = Flask(__name__)
+
+def send_push(title, body):
+    try:
+        from pywebpush import webpush, WebPushException
+        import json
+        SUB_FILE = "/opt/mediagrabber/web/subscriptions.json"
+        VAPID_PRIVATE_KEY = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgq08f9ePKxlNY3ATOvN_s1HHwnt4Tu6wd1GuXjXwSO1ihRANCAASW6lLATM1HrMnX4YXEs76dpfEYrBjjdrT-Lxn0A5W9vPgbdiJtk7rV7oa8IyEGW_RPO4_csO4B_5m5XR955Oi8"
+        VAPID_CLAIM_EMAIL = "mailto:admin@example.com"
+        
+        if not os.path.exists(SUB_FILE):
+            return
+        with open(SUB_FILE, "r") as f:
+            subs = json.load(f)
+            
+        for sub in subs:
+            try:
+                webpush(
+                    subscription_info=sub,
+                    data=json.dumps({"title": title, "body": body}),
+                    vapid_private_key=VAPID_PRIVATE_KEY,
+                    vapid_claims={"sub": VAPID_CLAIM_EMAIL}
+                )
+            except WebPushException as ex:
+                pass # Ignore failed ones
+    except Exception as e:
+        print(f"Push error: {e}")
+
+
 from api_features import features_bp
 app.register_blueprint(features_bp)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_prefix=1)
@@ -399,7 +430,7 @@ def _enforce_auth():
     if request.path.startswith("/api/utilities"): return None
     if request.path in ("/manifest.json", "/service-worker.js"): return None
     if request.path in ("/manifest.json", "/service-worker.js"): return None
-    if request.endpoint in ("login_page", "login_submit", "static", "_pwa_manifest", "_pwa_sw"):
+    if request.endpoint in ("login_page", "login_submit", "register_page", "register_submit", "static", "_pwa_manifest", "_pwa_sw"):
         return None
     if request.path == "/manifest.json" or request.path == "/service-worker.js" or request.path.startswith("/static/"):
         return None
@@ -574,6 +605,54 @@ def remove_from_archive(url_or_id):
     with open(ARCHIVE_FILE, "w") as f:
         f.writelines(new_lines)
 
+def append_to_archive(source, url_or_id):
+    """Append a source-tagged archive line. Idempotent; matches parse_archive_line's contract.
+    source: 'youtube' | 'ytmusic' | 'spotify' | 'instagram' | 'tiktok'
+    """
+    try:
+        source = (source or "").strip().lower()
+        raw = (url_or_id or "").strip()
+        if not raw or source not in ("youtube", "ytmusic", "spotify", "instagram", "tiktok"):
+            return False
+        if source in ("youtube", "ytmusic"):
+            m = re.search(r'(?:v=|youtu\.be/|video_id=|/shorts/)([a-zA-Z0-9_-]{11})', raw)
+            key = m.group(1) if m else raw
+        elif source == "spotify":
+            # Caller may hand us a bare 22-char base62 track ID. Expand to canonical URL.
+            if raw.startswith("http"):
+                key = raw
+            elif re.fullmatch(r'[A-Za-z0-9]{22}', raw):
+                key = "https://open.spotify.com/track/" + raw
+            else:
+                print(f"append_to_archive: refusing non-URL spotify value: {raw!r}", file=sys.stderr)
+                return False
+        elif source in ("instagram", "tiktok"):
+            if not raw.startswith("http"):
+                print(f"append_to_archive: refusing non-URL {source} value: {raw!r}", file=sys.stderr)
+                return False
+            key = raw
+        else:
+            key = raw
+        new_line = f"{source} {key}\n"
+        existing = []
+        if os.path.exists(ARCHIVE_FILE):
+            with open(ARCHIVE_FILE, "r") as f:
+                existing = f.readlines()
+        norm = new_line.strip().lower()
+        for line in existing:
+            if line.strip().lower() == norm:
+                return False
+        os.makedirs(os.path.dirname(ARCHIVE_FILE), exist_ok=True)
+        with open(ARCHIVE_FILE, "a") as f:
+            f.write(new_line)
+        return True
+    except Exception as e:
+        try:
+            print(f"append_to_archive error: {e}", file=sys.stderr)
+        except Exception:
+            pass
+        return False
+
 def get_archive_contents():
     if not os.path.exists(ARCHIVE_FILE):
         return []
@@ -746,9 +825,11 @@ def delete_archive_entry():
 
 # ---------- Grab endpoint ----------
 @app.route("/grab", methods=["POST"])
-def grab():
-    url = request.form["url"]
-    mode = request.form.get("mode", "video")
+def grab(form_data=None):
+    if form_data is None:
+        form_data = request.form
+    url = form_data["url"]
+    mode = form_data.get("mode", "video")
     job_id = str(uuid.uuid4())
     with LOCK:
         QUEUE[job_id] = {
@@ -764,6 +845,13 @@ def grab():
     def run():
         update(job_id, "status", "running")
         job = QUEUE[job_id]
+        # Ensure the output directory exists and is writable before handing to grab
+        try:
+            out_dir = job.get("output_dir") or os.path.join("/tmp/mediagrabber", job_id)
+            os.makedirs(out_dir, exist_ok=True)
+            job["output_dir"] = out_dir
+        except Exception as e:
+            append_log(job_id, f"Failed to create output dir: {e}")
         job["output_dir"] = f"/tmp/mediagrabber/{job_id}"
         os.makedirs(job["output_dir"], exist_ok=True)
 
@@ -879,16 +967,53 @@ def grab():
         if QUEUE[job_id].get("file"):
             update(job_id, "status", "done")
             update(job_id, "progress", 100)
+            # Archive Spotify + Gallery (YouTube/YT Music already written by the
+            # `grab` wrapper's `yt-dlp --download-archive`; appending here would dupe).
+            try:
+                job_url = (job.get("url") or "").strip()
+                if engine == "SPOTIFY" and job_url:
+                    append_to_archive("spotify", job_url)
+                elif engine == "GALLERY" and job_url:
+                    if "instagram.com" in job_url:
+                        append_to_archive("instagram", job_url)
+                    elif "tiktok.com" in job_url:
+                        append_to_archive("tiktok", job_url)
+            except Exception as _e:
+                append_log(job_id, f"archive append failed: {_e}")
             refresh_library(os.path.dirname(QUEUE[job_id]["file"]))
+            try:
+                _fname = os.path.basename(QUEUE[job_id]["file"])
+                print(f"[PUSH] sending success push for {job_id}: {_fname}", flush=True)
+                send_push("MediaGrabber", "Download complete: " + _fname)
+                print(f"[PUSH] success push sent for {job_id}", flush=True)
+            except Exception as _pe:
+                print(f"[PUSH-FAIL] success push {job_id}: {type(_pe).__name__}: {_pe}", flush=True)
         else:
             if proc.returncode != 0:
                 update(job_id, "status", "failed")
                 update(job_id, "progress", 0)
+                try:
+                    print(f"[PUSH] sending failure push for {job_id}", flush=True)
+                    send_push("MediaGrabber", "Download failed: " + (job.get("url") or ""))
+                    print(f"[PUSH] failure push sent for {job_id}", flush=True)
+                except Exception as _pe:
+                    print(f"[PUSH-FAIL] failure push {job_id}: {type(_pe).__name__}: {_pe}", flush=True)
             else:
                 update(job_id, "status", "done")
                 update(job_id, "progress", 100)
+                # Success but file unknown — still notify, but flag it.
+                _fname = os.path.basename(QUEUE[job_id].get("file", "Unknown file"))
+                try:
+                    print(f"[PUSH] sending success(no-file) push for {job_id}: {_fname}", flush=True)
+                    send_push("MediaGrabber", "Download complete: " + _fname)
+                    print(f"[PUSH] success(no-file) push sent for {job_id}", flush=True)
+                except Exception as _pe:
+                    print(f"[PUSH-FAIL] success(no-file) push {job_id}: {type(_pe).__name__}: {_pe}", flush=True)
 
-    threading.Thread(target=run, daemon=True).start()
+    def _run_with_ctx():
+        with app.app_context():
+            run()
+    threading.Thread(target=_run_with_ctx, daemon=True).start()
     return jsonify({"job_id": job_id})
 
 # ---------- Retry endpoint ----------
@@ -1299,6 +1424,105 @@ def radio_setdb():
     return jsonify({"status": "success", "message": f"Database path set to {db_path}"})
 
 # ---------- Auth routes ----------
+
+import json
+import os
+
+SUB_FILE = "/opt/mediagrabber/web/subscriptions.json"
+
+@app.route("/api/subscribe", methods=["POST"])
+def api_subscribe():
+    try:
+        sub = request.get_json()
+        subs = []
+        if os.path.exists(SUB_FILE):
+            with open(SUB_FILE, "r") as f:
+                subs = json.load(f)
+        
+        # Check if already exists
+        if not any(s.get("endpoint") == sub.get("endpoint") for s in subs):
+            subs.append(sub)
+            with open(SUB_FILE, "w") as f:
+                json.dump(subs, f)
+            return {"status": "success", "message": "Subscribed"}, 201
+        return {"status": "success", "message": "Already subscribed"}, 200
+    except Exception as e:
+        return {"status": "error", "message": str(e)}, 500
+
+
+REGISTER_TEMPLATE = """<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Register</title>
+<style>
+body{background:#0e1116;color:#e6e6e6;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.card{background:#171b22;border:1px solid #2a3038;border-radius:12px;padding:28px;width:340px}
+h2{margin:0 0 18px}
+label{display:block;margin:12px 0 4px;font-size:13px;color:#9aa4b2}
+input{width:100%;padding:10px;border-radius:8px;border:1px solid #2a3038;background:#0e1116;color:#e6e6e6;box-sizing:border-box}
+button{margin-top:18px;width:100%;padding:10px;border-radius:8px;border:0;background:#3b82f6;color:#fff;font-weight:600;cursor:pointer}
+.error{background:#3a1115;color:#fca5a5;padding:10px;border-radius:8px;margin-top:14px;font-size:13px}
+a{color:#60a5fa;font-size:13px}
+</style></head><body>
+<div class="card">
+  <h2>Create Account</h2>
+  <form method="POST" action="/register" autocomplete="off">
+    <label for="username">Username</label>
+    <input id="username" name="username" required autofocus autocomplete="username" value="{{ username or '' }}">
+    <label for="password">Password (min 8 chars)</label>
+    <input id="password" name="password" type="password" required minlength="8" autocomplete="new-password">
+    <label for="password2">Confirm Password</label>
+    <input id="password2" name="password2" type="password" required minlength="8" autocomplete="new-password">
+    <button type="submit">Register</button>
+  </form>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <p style="margin-top:14px;text-align:center"><a href="/login">Already have an account? Sign in</a></p>
+</div>
+</body></html>
+"""
+
+@app.route("/register", methods=["GET"])
+def register_page():
+    if session.get("user_id"):
+        return redirect("/")
+    return render_template_string(REGISTER_TEMPLATE, error=None, username="")
+
+@app.route("/register", methods=["POST"])
+def register_submit():
+    username = (request.form.get("username") or "").strip()
+    password = request.form.get("password") or ""
+    password2 = request.form.get("password2") or ""
+
+    if not username or not password:
+        return render_template_string(REGISTER_TEMPLATE, error="Username and password required.", username=username), 400
+    if len(username) < 3 or len(username) > 32:
+        return render_template_string(REGISTER_TEMPLATE, error="Username must be 3-32 characters.", username=username), 400
+    if len(password) < 8:
+        return render_template_string(REGISTER_TEMPLATE, error="Password must be at least 8 characters.", username=username), 400
+    if password != password2:
+        return render_template_string(REGISTER_TEMPLATE, error="Passwords do not match.", username=username), 400
+
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        conn.execute(
+            "INSERT INTO users (username, password_hash, display_name, role) VALUES (?, ?, ?, ?)",
+            (username, generate_password_hash(password), username, "user")
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return render_template_string(REGISTER_TEMPLATE, error="Username already exists.", username=username), 400
+    finally:
+        try: conn.close()
+        except: pass
+
+    user = get_user(username)
+    session.clear()
+    session["user_id"] = user["id"]
+    session["username"] = user["username"]
+    session["role"] = user["role"]
+    session.permanent = True
+    return redirect("/")
+
+
 @app.route("/login", methods=["GET"])
 def login_page():
     if session.get("user_id"):
@@ -1436,79 +1660,33 @@ def api_me_update():
 
 def send_reset_email(to_email, reset_url):
     settings = load_settings()
-    host = settings.get("smtp_host", "").strip()
+    host = (settings.get("smtp_host") or "").strip()
     if not host:
         return False, "SMTP is not configured by the administrator."
 
-    port = int(settings.get("smtp_port", 587))
-    user = settings.get("smtp_user", "").strip()
-    password = settings.get("smtp_pass", "").strip()
-    from_addr = settings.get("smtp_from", "").strip() or user or "noreply@mediagrabber.local"
+    try:
+        port = int((settings.get("smtp_port") or "587").strip())
+    except ValueError:
+        return False, "SMTP port is invalid."
+    user = (settings.get("smtp_user") or "").strip()
+    password = "".join((settings.get("smtp_pass") or "").split())
+    from_addr = (settings.get("smtp_from") or "").strip() or user or "noreply@mediagrabber.local"
 
     msg = MIMEMultipart()
-    msg['From'] = from_addr
-    msg['To'] = to_email
-    msg['Subject'] = "MediaGrabber Password Reset"
+    msg["From"] = from_addr
+    msg["To"] = to_email
+    msg["Subject"] = "MediaGrabber Password Reset"
 
-    body = f"""
-    <html>
+    body = f"""<html>
     <body style="font-family: sans-serif; background: #0f0f11; color: #eaeef2; padding: 20px;">
         <h2 style="color: #5b7cfa;">MediaGrabber Password Reset</h2>
         <p>A password reset was requested for your account.</p>
         <p>Click the button below to reset your password. This link expires in 1 hour.</p>
         <a href="{reset_url}" style="display: inline-block; padding: 12px 24px; background: #5b7cfa; color: #fff; text-decoration: none; border-radius: 6px; margin-top: 10px; font-weight: bold;">Reset Password</a>
         <p style="margin-top: 20px; font-size: 0.8rem; color: #8899aa;">If you did not request this, you can safely ignore this email.</p>
-    
-<!-- Theme Modal -->
-    <div id="themeModal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:9999; align-items:center; justify-content:center;">
-        <div style="background:var(--card); padding:20px; border-radius:12px; width:360px; border:1px solid var(--border); max-height: 90vh; overflow-y: auto;">
-            <h3 style="margin-bottom:10px; color:var(--text);">🎨 Customize Theme</h3>
-            
-            <select id="themePreset" onchange="loadPreset()" style="width:100%; margin-bottom:15px; padding:8px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.9rem;">
-                <option value="custom">-- Custom / Manual --</option>
-                <option value="default">Default Dark</option>
-                <option value="light">Light Mode</option>
-                <option value="cyberpunk">Cyberpunk (Neon)</option>
-                <option value="christmas">Christmas 🎄</option>
-                <option value="halloween">Halloween 🎃</option>
-                <option value="birthday">Birthday 🎂</option>
-                <option value="midnight">Midnight Blue</option>
-                <option value="forest">Forest Green</option>
-                <option value="sunset">Sunset Orange</option>
-                <option value="matrix">Matrix</option>
-            </select>
-
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:15px;">
-                <label style="color:var(--text); font-size:0.85rem;">Background<input type="color" id="theme-bg" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Sidebar<input type="color" id="theme-sidebar" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Card<input type="color" id="theme-card" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Border<input type="color" id="theme-border" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Text<input type="color" id="theme-text" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-                <label style="color:var(--text); font-size:0.85rem;">Accent<input type="color" id="theme-accent" style="width:100%; height:30px; border:none; background:none; cursor:pointer;"></label>
-            </div>
-
-            <!-- Custom Theme Saving -->
-            <div style="margin-bottom:15px; border-top:1px solid var(--border); padding-top:10px;">
-                <div style="display:flex; gap:5px;">
-                    <input type="text" id="customThemeName" placeholder="My Custom Theme" style="flex:1; padding:6px; border-radius:4px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.85rem;">
-                    <button onclick="saveCustomPreset()" style="background:var(--border); border:none; color:var(--text); padding:6px 10px; border-radius:4px; cursor:pointer; font-size:0.85rem;">Save</button>
-                </div>
-                <select id="customPresetsList" onchange="loadCustomPreset()" style="width:100%; margin-top:8px; padding:6px; border-radius:4px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:0.85rem;">
-                    <option value="">-- Load Custom Theme --</option>
-                </select>
-            </div>
-
-            <div style="display:flex; gap:10px; justify-content:space-between;">
-                <button onclick="resetTheme()" style="background:transparent; border:1px solid #ff4444; color:#ff4444; padding:6px 12px; border-radius:4px; cursor:pointer;">Reset</button>
-                <div style="display:flex; gap:10px;">
-                    <button onclick="document.getElementById('themeModal').style.display='none'" style="background:transparent; border:1px solid var(--border); color:var(--text); padding:6px 12px; border-radius:4px; cursor:pointer;">Cancel</button>
-                    <button onclick="saveTheme()" style="background:var(--accent); border:none; color:white; padding:6px 12px; border-radius:4px; cursor:pointer;">Save</button>
-                </div>
-            </div>
-</body>
-    </html>
-    """
-    msg.attach(MIMEText(body, 'html'))
+    </body>
+    </html>"""
+    msg.attach(MIMEText(body, "html"))
 
     try:
         if port == 465:
@@ -1516,16 +1694,62 @@ def send_reset_email(to_email, reset_url):
         else:
             server = smtplib.SMTP(host, port, timeout=10)
             server.starttls()
-        
         if user and password:
             server.login(user, password)
-        
         server.send_message(msg)
         server.quit()
         return True, "Email sent successfully."
     except Exception as e:
-        print(f"SMTP Error: {e}")
+        print(f"SMTP Error: {e}", file=sys.stderr)
         return False, f"Failed to send email: {str(e)}"
+
+@app.route("/api/settings/email/test", methods=["POST"])
+def api_settings_email_test():
+    if session.get("role") != "admin":
+        return jsonify({"ok": False, "error": "Admin access required"}), 403
+    data = request.get_json(silent=True) or {}
+    s = load_settings()
+    host = (s.get("smtp_host") or "").strip()
+    port_raw = (s.get("smtp_port") or "").strip()
+    user = (s.get("smtp_user") or "").strip()
+    password = "".join((s.get("smtp_pass") or "").split())
+    from_addr = (s.get("smtp_from") or "").strip() or user or "noreply@mediagrabber.local"
+    to_addr = (data.get("to") or user or "").strip()
+    if not host or not port_raw:
+        return jsonify({"ok": False, "error": "SMTP host and port are not configured. Save Settings first."}), 400
+    if not to_addr:
+        return jsonify({"ok": False, "error": "No recipient. Enter a 'to' address or configure SMTP Username."}), 400
+    try:
+        port = int(port_raw)
+    except ValueError:
+        return jsonify({"ok": False, "error": f"Invalid SMTP port: {port_raw!r}"}), 400
+    msg = MIMEMultipart()
+    msg["From"] = from_addr
+    msg["To"] = to_addr
+    msg["Subject"] = "MediaGrabber - SMTP Test"
+    body = (
+        "<html><body style='font-family:sans-serif;background:#0f0f11;color:#eaeef2;padding:20px;'>"
+        "<h2 style='color:#5b7cfa;'>&#x2705; SMTP is working</h2>"
+        "<p>This is a test email from your MediaGrabber instance.</p>"
+        f"<p style='color:#8899aa;font-size:0.85rem;'>Host: {host}:{port} &middot; From: {from_addr}</p>"
+        "</body></html>"
+    )
+    msg.attach(MIMEText(body, "html"))
+    try:
+        if port == 465:
+            server = smtplib.SMTP_SSL(host, port, timeout=10)
+        else:
+            server = smtplib.SMTP(host, port, timeout=10)
+            server.starttls()
+        if user and password:
+            server.login(user, password)
+        server.send_message(msg)
+        server.quit()
+        return jsonify({"ok": True, "message": f"Test email sent to {to_addr}"})
+    except Exception as e:
+        print(f"SMTP test error: {e}", file=sys.stderr)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
 
 @app.route("/api/me/reset-request", methods=["POST"])
 def api_me_reset_request():
@@ -1537,8 +1761,12 @@ def api_me_reset_request():
     conn.execute("UPDATE users SET reset_token = ?, reset_expires = ? WHERE id = ?", (token, time.time() + 3600, user["id"]))
     conn.commit()
     conn.close()
-    print(f"\n\U0001F511 PASSWORD RESET LINK: {url_for('reset_password', token=token, _external=True)}\n")
-    return jsonify({"status": "success", "message": "Reset link printed to server log."})
+    reset_url = url_for("reset_password", token=token, _external=True)
+    ok, err = send_reset_email(user["email"], reset_url)
+    if ok:
+        return jsonify({"status": "success", "message": f"Reset link sent to {user['email']}."})
+    print(f"\n\U0001F511 PASSWORD RESET LINK (SMTP FAILED): {reset_url}\n")
+    return jsonify({"status": "partial", "message": "Email failed, link printed to server log.", "smtp_error": err}), 500
 
 @app.route("/avatars/<filename>")
 def serve_avatar(filename):
@@ -1799,17 +2027,290 @@ def settings_page():
             data["ytdlp_extra"] = request.form.get("ytdlp_extra", current.get("ytdlp_extra"))
             data["spotdl_extra"] = request.form.get("spotdl_extra", current.get("spotdl_extra"))
             data["gallerydl_extra"] = request.form.get("gallerydl_extra", current.get("gallerydl_extra"))
-            data["smtp_host"] = request.form.get("smtp_host", current.get("smtp_host"))
-            data["smtp_port"] = request.form.get("smtp_port", current.get("smtp_port"))
-            data["smtp_user"] = request.form.get("smtp_user", current.get("smtp_user"))
-            data["smtp_pass"] = request.form.get("smtp_pass", current.get("smtp_pass"))
-            data["smtp_from"] = request.form.get("smtp_from", current.get("smtp_from"))
+            data["smtp_host"] = (request.form.get("smtp_host", current.get("smtp_host")) or "").strip()
+            data["smtp_port"] = (request.form.get("smtp_port", current.get("smtp_port")) or "").strip()
+            data["smtp_user"] = (request.form.get("smtp_user", current.get("smtp_user")) or "").strip()
+            _raw_pass = request.form.get("smtp_pass", current.get("smtp_pass")) or ""
+            data["smtp_pass"] = "".join(_raw_pass.split())
+            data["smtp_from"] = (request.form.get("smtp_from", current.get("smtp_from")) or "").strip()
 
         save_settings(data)
         return jsonify({"status": "saved"})
     return jsonify(load_settings())
 
+# ---------- API Tokens (v1.9.7) ----------
+def _require_admin():
+    return session.get("role") == "admin"
+
+@app.route("/api/tokens", methods=["GET"])
+def api_tokens_list():
+    if not _require_admin():
+        return jsonify({"error": "forbidden"}), 403
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        rows = conn.execute(
+            "SELECT id, name, token_prefix, scope, created_by, created_at, last_used_at, revoked "
+            "FROM api_tokens ORDER BY id DESC"
+        ).fetchall()
+    finally:
+        conn.close()
+    tokens = [{
+        "id": r[0], "name": r[1], "prefix": r[2], "scope": r[3],
+        "created_by": r[4], "created_at": r[5],
+        "last_used_at": r[6], "revoked": bool(r[7])
+    } for r in rows]
+    return jsonify({"tokens": tokens})
+
+@app.route("/api/tokens", methods=["POST"])
+def api_tokens_create():
+    if not _require_admin():
+        return jsonify({"error": "forbidden"}), 403
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    scope = (data.get("scope") or "read").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    if scope not in ("read", "download", "admin"):
+        return jsonify({"error": "invalid scope"}), 400
+    raw = "mg_" + secrets.token_hex(16)
+    token_hash = hashlib.sha256(raw.encode()).hexdigest()
+    token_prefix = raw[:8]
+    created_by = session.get("username", "unknown")
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        conn.execute(
+            "INSERT INTO api_tokens (name, token_hash, token_prefix, scope, created_by) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (name, token_hash, token_prefix, scope, created_by)
+        )
+        conn.commit()
+        new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    finally:
+        conn.close()
+    return jsonify({
+        "id": new_id, "name": name, "scope": scope,
+        "token": raw,
+        "warning": "This token is shown ONCE. Copy it now."
+    })
+
+@app.route("/api/tokens/<int:token_id>/revoke", methods=["POST"])
+def api_tokens_revoke(token_id):
+    if not _require_admin():
+        return jsonify({"error": "forbidden"}), 403
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        cur = conn.execute("UPDATE api_tokens SET revoked = 1 WHERE id = ?", (token_id,))
+        conn.commit()
+        if cur.rowcount == 0:
+            return jsonify({"error": "not found"}), 404
+    finally:
+        conn.close()
+    return jsonify({"status": "revoked"})
+
+@app.route("/api/tokens/<int:token_id>", methods=["DELETE"])
+def api_tokens_delete(token_id):
+    if not _require_admin():
+        return jsonify({"error": "forbidden"}), 403
+    conn = sqlite3.connect(USER_DB_PATH)
+    try:
+        cur = conn.execute("DELETE FROM api_tokens WHERE id = ?", (token_id,))
+        conn.commit()
+        if cur.rowcount == 0:
+            return jsonify({"error": "not found"}), 404
+    finally:
+        conn.close()
+    return jsonify({"status": "deleted"})
+
+@app.route("/api/tokens/me", methods=["GET"])
+def api_tokens_me():
+    # Session-only for now; enforcement wired in v1.9.8
+    if not session.get("username"):
+        return jsonify({"error": "unauthenticated"}), 401
+    return jsonify({
+        "username": session.get("username"),
+        "role": session.get("role"),
+        "auth": "session"
+    })
+
 # ---------- Metadata Editor ----------
+_version_cache = {"data": None, "ts": 0}
+
+@app.route("/api/version/info", methods=["GET"])
+def api_version_info():
+    """Returns current + latest version from GitHub tags (5-min cache)."""
+    import json, time, urllib.request
+    current = "v1.9.7"
+    now = time.time()
+    # Return cache if <5 min old
+    if _version_cache["data"] and (now - _version_cache["ts"]) < 300:
+        return jsonify(_version_cache["data"])
+    latest = current
+    update_available = False
+    error = None
+    try:
+        import subprocess
+        # Use git locally — credentials already configured in ~/.git-credentials
+        result = subprocess.run(
+            ["git", "-C", "/opt/mediagrabber", "ls-remote", "--tags", "origin"],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "git ls-remote failed")
+        names = []
+        for line in result.stdout.splitlines():
+            parts = line.split("refs/tags/")
+            if len(parts) == 2:
+                name = parts[1].strip()
+                if name.startswith("v") and not name.endswith("^{}"):
+                    names.append(name)
+        def _vkey(v):
+            try: return tuple(int(x) for x in v.lstrip("v").split("."))
+            except: return (0,)
+        names.sort(key=_vkey, reverse=True)
+        if names:
+            latest = names[0]
+            update_available = (_vkey(latest) > _vkey(current))
+    except Exception as e:
+        error = str(e)
+    data = {
+        "current": current,
+        "latest": latest,
+        "update_available": update_available,
+        "error": error,
+        "checked_at": time.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    _version_cache["data"] = data
+    _version_cache["ts"] = now
+    return jsonify(data)
+
+@app.route("/api/server/netwatch", methods=["GET"])
+def api_server_netwatch_status():
+    """Read-only status of the mg-netwatch timer."""
+    if session.get("role") != "admin":
+        return jsonify({"error": "Admin access required"}), 403
+    import subprocess
+    def _run(cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            return r.stdout.strip()
+        except Exception:
+            return ""
+    def _run_sudo(cmd):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            return r.stdout.strip()
+        except Exception:
+            return ""
+
+    active  = _run(["systemctl", "is-active",  "mg-netwatch.timer"])  == "active"
+    enabled = _run(["systemctl", "is-enabled", "mg-netwatch.timer"])  == "enabled"
+
+    next_run_raw = None
+    next_run_seconds = None
+    try:
+        out = _run(["systemctl", "list-timers", "mg-netwatch.timer", "--no-pager"])
+        for line in out.splitlines():
+            if "mg-netwatch.timer" in line:
+                # Parse LEFT column, e.g. "22s" or "1min 5s" or "1h 2min"
+                parts = line.split()
+                # Find "LEFT" column by scanning for token ending in s/min/h
+                # Simpler: match regex on the whole line
+                import re as _re
+                m = _re.search(r"\b(\d+)s\s+\S+\s+mg-netwatch\.timer", line)
+                if m:
+                    next_run_seconds = int(m.group(1))
+                elif _re.search(r"(\d+)min", line):
+                    mm = _re.search(r"(\d+)min\s+(\d+)s", line)
+                    if mm:
+                        next_run_seconds = int(mm.group(1))*60 + int(mm.group(2))
+                next_run_raw = line.strip()
+                break
+    except Exception:
+        pass
+
+    fails = 0
+    try:
+        with open("/var/lib/mg-netwatch/consecutive_gw_failures") as f:
+            fails = int((f.read() or "0").strip() or 0)
+    except Exception:
+        pass
+
+    recent_log = []
+    try:
+        with open("/var/log/mg-netwatch.log") as f:
+            recent_log = [l.rstrip() for l in f.readlines()[-10:]]
+    except Exception:
+        pass
+
+    last_run_ts = None
+    try:
+        import os as _os
+        if _os.path.exists("/var/log/mg-netwatch.log"):
+            last_run_ts = time.strftime("%Y-%m-%d %H:%M:%S",
+                                        time.localtime(_os.path.getmtime("/var/log/mg-netwatch.log")))
+    except Exception:
+        pass
+
+    return jsonify({
+        "timer_active": active,
+        "timer_enabled": enabled,
+        "next_run_seconds": next_run_seconds,
+        "next_run_raw": next_run_raw,
+        "last_run_ts": last_run_ts,
+        "consecutive_failures": fails,
+        "recent_log": recent_log,
+        "iface": "wlp4s0",
+        "gateway": "192.168.1.1",
+    })
+
+
+@app.route("/api/server/netwatch/action", methods=["POST"])
+def api_server_netwatch_action():
+    """Admin-only actions: run / enable / disable netwatch timer."""
+    if session.get("role") != "admin":
+        return jsonify({"error": "Admin access required"}), 403
+    import subprocess
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "").strip()
+    try:
+        if action == "run":
+            subprocess.Popen(
+                ["sudo", "-n", "/bin/systemctl", "start", "mg-netwatch.service"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return jsonify({"ok": True, "message": "Check triggered"})
+        elif action == "enable":
+            r = subprocess.run(
+                ["sudo", "-n", "/bin/systemctl", "enable", "--now", "mg-netwatch.timer"],
+                capture_output=True, text=True, timeout=10
+            )
+            if r.returncode != 0:
+                return jsonify({"ok": False, "error": r.stderr or "systemctl failed"}), 500
+            return jsonify({"ok": True, "message": "Timer enabled"})
+        elif action == "disable":
+            r = subprocess.run(
+                ["sudo", "-n", "/bin/systemctl", "disable", "--now", "mg-netwatch.timer"],
+                capture_output=True, text=True, timeout=10
+            )
+            if r.returncode != 0:
+                return jsonify({"ok": False, "error": r.stderr or "systemctl failed"}), 500
+            return jsonify({"ok": True, "message": "Timer disabled"})
+        elif action == "restart_mediagrabber":
+            # Fire-and-forget: restarting this service kills the request handler,
+            # so don't wait for the subprocess to complete.
+            subprocess.Popen(
+                ["sudo", "-n", "/bin/systemctl", "restart", "mediagrabber.service"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return jsonify({"ok": True, "message": "Restart triggered (connection will drop briefly)"})
+        else:
+            return jsonify({"ok": False, "error": f"Unknown action: {action}"}), 400
+    except subprocess.TimeoutExpired:
+        return jsonify({"ok": False, "error": "systemctl timed out"}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/metadata/editor/scan", methods=["POST"])
 def metadata_editor_scan():
     data = request.get_json()
@@ -1956,6 +2457,70 @@ def get_storage():
 
 
 
+THUMBS_CACHE_PATH = "/opt/mediagrabber/thumbs.json"
+
+def _load_thumbs():
+    try:
+        if os.path.exists(THUMBS_CACHE_PATH):
+            with open(THUMBS_CACHE_PATH, "r") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_thumbs(cache):
+    try:
+        tmp = THUMBS_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cache, f)
+        os.replace(tmp, THUMBS_CACHE_PATH)
+    except Exception as e:
+        print(f"thumbs cache save error: {e}", file=sys.stderr)
+
+def resolve_thumbnail(url, source_type, cache):
+    """Return (title, thumb_url) for an archive URL, using & updating cache[url]."""
+    key = url
+    if key in cache and isinstance(cache[key], dict):
+        return cache[key].get("title") or "Archived Entry", cache[key].get("thumb") or ""
+
+    title, thumb = "Archived Entry", ""
+
+    if source_type in ("youtube", "ytmusic"):
+        try:
+            # Use the explicit path to avoid PATH issues in systemd, and increase timeout
+            ytdlp_bin = os.path.expanduser("~/.local/bin/yt-dlp")
+            if not os.path.exists(ytdlp_bin):
+                ytdlp_bin = "yt-dlp"
+            
+            res = subprocess.run(
+                [ytdlp_bin, "--dump-json", "--skip-download", "--no-warnings", url],
+                capture_output=True, text=True, timeout=30)
+            if res.returncode == 0:
+                info = json.loads(res.stdout)
+                title = info.get("title", title)
+                thumb = info.get("thumbnail", "")
+            else:
+                print(f"yt-dlp failed for {url}: {res.stderr}", file=sys.stderr)
+        except Exception as e:
+            print(f"yt-dlp exception for {url}: {e}", file=sys.stderr)
+
+    elif source_type == "spotify":
+        try:
+            import urllib.request
+            oembed = "https://open.spotify.com/oembed?url=" + urllib.parse.quote(url, safe="")
+            req = urllib.request.Request(oembed, headers={"User-Agent": "MediaGrabber/2.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                thumb = data.get("thumbnail_url", "") or ""
+                title = data.get("title", title) or title
+        except Exception:
+            pass
+
+    # Gallery: leave empty (auth-required for IG/TikTok previews)
+
+    cache[key] = {"title": title, "thumb": thumb}
+    return title, thumb
+
 @app.route("/api/history", methods=["GET"])
 def get_history():
     history_items = []
@@ -1992,6 +2557,9 @@ def get_history():
     except Exception:
         archive_lines = []
 
+    _thumbs = _load_thumbs()
+    _thumbs_dirty = False
+    _thumbs_before = dict(_thumbs)
     for line in archive_lines:
         source_type, url = parse_archive_line(line)
         if source_type is None:
@@ -2001,18 +2569,7 @@ def get_history():
             continue
         seen_ids.add(url)
         seen_ids.add(vid)
-        title, thumb = "Archived Entry", ""
-        if source_type in ("youtube", "ytmusic"):
-            try:
-                res = subprocess.run(
-                    ["yt-dlp", "--dump-json", "--skip-download", "--no-warnings", url],
-                    capture_output=True, text=True, timeout=10)
-                if res.returncode == 0:
-                    info = json.loads(res.stdout)
-                    title = info.get("title", title)
-                    thumb = info.get("thumbnail", "")
-            except Exception:
-                pass
+        title, thumb = resolve_thumbnail(url, source_type, _thumbs)
         history_items.append({
             "url": url,
             "title": title,
@@ -2020,15 +2577,34 @@ def get_history():
             "timestamp": "Unknown",
             "source": source_type,
         })
+    if _thumbs != _thumbs_before:
+        _save_thumbs(_thumbs)
 
     return jsonify(history_items)
 
 @app.route("/api/history/clear", methods=["POST"])
 def clear_history():
-    conn = sqlite3.connect(USER_DB_PATH)
-    conn.execute("DELETE FROM history")
-    conn.commit()
-    conn.close()
+    # 1. Clear DB history
+    try:
+        conn = sqlite3.connect(USER_DB_PATH)
+        conn.execute("DELETE FROM history")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error clearing DB: {e}", file=sys.stderr)
+    
+    # 2. Clear archive.txt (with safety backup)
+    try:
+        if os.path.exists(ARCHIVE_FILE):
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            shutil.copy2(ARCHIVE_FILE, f"{ARCHIVE_FILE}.bak.{ts}")
+            # Truncate the file
+            with open(ARCHIVE_FILE, "w") as f:
+                pass
+    except Exception as e:
+        print(f"Error clearing archive: {e}", file=sys.stderr)
+        return jsonify({"error": "Failed to clear archive"}), 500
+
     return jsonify({"status": "cleared"})
 
 
@@ -2081,6 +2657,15 @@ def home():
             if (text) document.getElementById('url').value = text;
         } catch(e) { alert("Please allow clipboard access in your browser."); }
     }
+
+    // PWA service worker registration
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function() {
+            navigator.serviceWorker.register('/service-worker.js')
+                .then(function(reg) { console.log('[PWA] Service worker registered, scope:', reg.scope); })
+                .catch(function(err) { console.error('[PWA] SW registration failed:', err); });
+        });
+    }
     
     async function loadStorage() {
         try {
@@ -2130,16 +2715,16 @@ def home():
 </script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-    <title>MediaGrabber v1.9</title>
+    <title>MediaGrabber v1.9.7</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v=1">
     <style>
         :root {
-            --bg: #0f0f11;
-            --card-bg: #1a1a20;
-            --border: #2c2c36;
-            --accent: #5b7cfa;
-            --accent-hover: #6f8cff;
-            --text: #eaeef2;
+            --bg: #281F3D;
+            --card-bg: #1D2523;
+            --border: #7489C1;
+            --accent: #7489C1;
+            --accent-hover: #93a7df;
+            --text: #ACD5BA;
             --text-muted: #8899aa;
             --radius: 14px;
             --shadow: 0 8px 24px rgba(0,0,0,0.6);
@@ -2147,11 +2732,11 @@ def home():
             --sidebar-width: 200px;
         }
         body.light {
-            --bg: #f5f7fc;
-            --card-bg: #ffffff;
-            --border: #d0d7e6;
-            --text: #1e2230;
-            --text-muted: #4a5268;
+            --bg: #281F3D;
+            --card-bg: #1D2523;
+            --border: #7489C1;
+            --text: #ACD5BA;
+            --text-muted: #8899aa;
             --shadow: 0 8px 24px rgba(0,0,0,0.08);
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2225,7 +2810,7 @@ def home():
         .top-header h1 {
             font-size: 1.8rem;
             font-weight: 700;
-            background: linear-gradient(135deg, #a0b4ff, #5b7cfa);
+            background: linear-gradient(135deg, #93a7df,#7489C1);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
@@ -2355,8 +2940,11 @@ def home():
             object-fit: cover;
             display: block;
         }
-        .thumb-yt img { aspect-ratio: 16/9; }
-        .thumb-spotify img { aspect-ratio: 1/1; }
+        .thumb-yt img { width: 120px; height: auto; aspect-ratio: 16/9; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+        .thumb-spotify img { width: 120px; height: auto; aspect-ratio: 1/1; object-fit: cover; border-radius: 6px; border: 1px solid var(--border); }
+        .thumb-yt div, .thumb-spotify div, .thumb-gallery div { width: 120px; background: var(--border); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; color: var(--text-muted); }
+        .thumb-yt div { aspect-ratio: 16/9; }
+        .thumb-spotify div { aspect-ratio: 1/1; }
         .thumb-gallery img {
             aspect-ratio: 9/16;
             object-fit: contain;
@@ -2805,12 +3393,126 @@ def home():
             .metadata-item { flex-direction: column; align-items: stretch; }
             .metadata-item .actions { justify-content: flex-start; }
         }
+
+        /* ===== v1.9.6 mobile phone fix (< 500px) ===== */
+        @media (max-width: 500px) {
+            /* 1. Setup body as a strict vertical flex container */
+            body {
+                display: flex !important;
+                flex-direction: column !important;
+                padding: 0 !important;
+                margin: 0 !important;
+            }
+
+            /* 2. Flatten the main container so its children can be ordered */
+            .main {
+                display: contents !important;
+            }
+
+            /* 3. Extract the Top Header (Logo) to the very top */
+            .main .top-header {
+                order: 1 !important;
+                display: flex !important;
+                justify-content: space-between !important;
+                align-items: center !important;
+                width: 100% !important;
+                padding: 10px !important;
+                background: var(--card-bg) !important;
+                border-bottom: 1px solid var(--border) !important;
+                box-sizing: border-box !important;
+                margin: 0 !important;
+            }
+            
+            .main .top-header h1 { font-size: 1.2rem !important; margin: 0 !important; }
+
+            /* 4. The Sidebar (Profile, Nav, Storage) comes SECOND */
+            .sidebar {
+                order: 2 !important;
+                width: 100% !important;
+                height: auto !important;
+                position: relative !important;
+                border-right: none !important;
+                border-bottom: 1px solid var(--border) !important;
+                padding: 10px !important;
+                background: transparent !important;
+                display: flex !important;
+                flex-direction: column !important;
+                gap: 10px !important;
+                box-sizing: border-box;
+            }
+
+            .sidebar .user-widget {
+                display: flex !important;
+                width: 100% !important;
+                margin: 0 !important;
+                padding: 12px !important;
+                border: 1px solid var(--border) !important;
+                border-radius: 8px !important;
+                background: rgba(0,0,0,0.2) !important;
+            }
+
+            .sidebar button[data-view] {
+                width: 100% !important;
+                text-align: left !important;
+                padding: 12px 16px !important;
+                border-radius: 8px !important;
+                background: rgba(255,255,255,0.05) !important;
+                margin-bottom: 4px !important;
+            }
+            .sidebar button[data-view].active {
+                background: var(--accent) !important;
+                color: white !important;
+            }
+
+            /* 5. The Main Content (Paste, Grab, Queue) comes THIRD */
+            .main > div:not(.top-header), 
+            .main .view {
+                order: 3 !important;
+                width: 100% !important;
+                padding: 10px !important;
+                box-sizing: border-box !important;
+            }
+
+            /* ===== THE PRECISE FORM FIX ===== */
+            .form-row {
+                flex-wrap: wrap !important;
+                width: 100% !important;
+            }
+
+            .form-row > div {
+                flex: 1 1 100% !important;
+                width: 100% !important;
+                display: flex !important;
+            }
+
+            .form-row textarea#url {
+                width: 100% !important;
+                min-height: 100px !important;
+                padding: 14px 90px 14px 18px !important;
+                font-size: 16px !important;
+                box-sizing: border-box !important;
+            }
+
+            .form-row > button {
+                flex: 1 1 100% !important;
+                width: 100% !important;
+                margin: 10px 0 0 0 !important;
+                padding: 14px !important;
+                font-size: 1rem !important;
+            }
+        }
+        /* ===== end v1.9.6 mobile fix ===== */
     
         .role-user .admin-only-utility,
         .role-user .admin-only-settings {
             display: none !important;
         }
 </style>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f0f11">
 </head>
 <body class="{theme} {role_class}">
 <div class="sidebar">
@@ -2829,12 +3531,13 @@ def home():
     <button data-view="settings">⚙️ Settings</button>
     <button data-view="utilities">🔧 Utilities</button>
     <button data-view="history">🕰️ History</button>
+    <button data-view="server">🖥️ Server</button>
     
     <div id="storageWidget" style="margin: 10px 16px; padding: 12px; background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 8px;">
         <h4 style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase;">Storage Space</h4>
         <div id="storageBars"></div>
     </div>
-<div class="version">v1.9</div>
+<div class="version">v1.9.7</div>
     
         </div>
     </div>
@@ -2972,7 +3675,7 @@ def home():
 <div class="main">
     <div class="top-header">
         <h1>📡 MediaGrabber</h1>
-        <span class="subtitle">v1.9</span>
+        <span class="subtitle">v1.9.7</span>
     </div>
     <!-- Queue -->
     <div id="view-queue" class="view active">
@@ -2990,6 +3693,7 @@ def home():
         </div>
         <div class="queue-title">
             <span>Queue</span>
+            <button id="enablePush" onclick="subscribePush()" style="margin-left: 15px; background: #4CAF50; color: white; font-size: 16px; padding: 10px; border-radius: 5px; cursor: pointer;">🔔 Enable Notifications</button>
             <button class="clear-btn" onclick="clearCompleted()">🗑️ Clear Completed</button>
         </div>
         <div id="queue"><div class="empty">No jobs yet</div></div>
@@ -3095,6 +3799,11 @@ def home():
                 <input type="password" id="smtp_pass" name="smtp_pass" placeholder="••••••••">
                 <label for="smtp_from">From Address</label>
                 <input type="text" id="smtp_from" name="smtp_from" placeholder="MediaGrabber <noreply@yourdomain.com>">
+                <div style="margin-top:12px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                    <button type="button" id="smtpTestBtn" onclick="smtpTest()" style="background:var(--accent); color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:0.9rem;">Send Test Email</button>
+                    <span id="smtpTestStatus" style="font-size:0.85rem;"></span>
+                </div>
+                <div class="hint" style="margin-top:6px;">Click "Save Settings" below first, then test.</div>
             </div>
             <div class="settings-group">
                 <h3>Extra Arguments</h3>
@@ -3132,6 +3841,66 @@ def home():
 
         <div id="historyList" style="display:flex; flex-direction:column; gap:10px;">Loading...</div>
     </div>
+
+<div id="view-server" class="view">
+    <div style="padding: 16px; max-width: 900px;">
+        <h2 style="margin-bottom: 16px; color: var(--text);">🖥️ Server Manager</h2>
+
+        <!-- Netwatch card -->
+        <div class="settings-group" style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
+                <h3 style="margin: 0; color: var(--text);">🌐 Network Watchdog</h3>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span id="netwatchStatusDot" style="display: inline-block; width: 12px; height: 12px; border-radius: 50%; background: #888;"></span>
+                    <span id="netwatchStatusText" style="font-size: 0.9rem; color: var(--text-muted);">Loading…</span>
+                </div>
+            </div>
+
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px;">
+                <div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Next Check</div>
+                    <div id="netwatchNextIn" style="font-size: 1.4rem; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums;">—:—</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Last Run</div>
+                    <div id="netwatchLastRun" style="font-size: 0.9rem; color: var(--text);">—</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Consecutive Failures</div>
+                    <div id="netwatchFails" style="font-size: 1.4rem; font-weight: 600; color: var(--text);">0</div>
+                </div>
+                <div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Interface / Gateway</div>
+                    <div id="netwatchIfaceGw" style="font-size: 0.9rem; color: var(--text);">—</div>
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px;">
+                <button type="button" id="netwatchRunBtn" onclick="netwatchAction('run')" style="background: var(--accent); color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">▶ Run Check Now</button>
+                <button type="button" id="netwatchToggleBtn" onclick="netwatchToggle()" style="background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">Disable Timer</button>
+                <button type="button" id="netwatchRefreshBtn" onclick="loadServerManager(true)" style="background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">🔄 Refresh</button>
+            </div>
+
+            <div id="netwatchStatusMsg" style="font-size: 0.85rem; min-height: 1.2em; margin-bottom: 8px;"></div>
+
+            <details style="border-top: 1px solid var(--border); padding-top: 10px;">
+                <summary style="cursor: pointer; color: var(--text-muted); font-size: 0.85rem;">Recent log (last 10 lines)</summary>
+                <pre id="netwatchLog" style="background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 10px; margin-top: 8px; font-size: 0.75rem; color: var(--text-muted); max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;">(no log entries)</pre>
+            </details>
+        </div>
+
+        <!-- Service card -->
+        <div class="settings-group" style="background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px;">
+            <h3 style="margin: 0 0 12px 0; color: var(--text);">🔄 MediaGrabber Service</h3>
+            <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 12px;">Restart the Flask app. Connection will drop briefly, then reconnect automatically.</p>
+            <button type="button" id="restartMGBtn" onclick="restartMediaGrabber()" style="background: #d9534f; color: #fff; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 0.9rem;">🔄 Restart MediaGrabber</button>
+            <span id="restartMGStatus" style="font-size: 0.85rem; margin-left: 12px;"></span>
+        </div>
+    </div>
+        
+        </div>
+
+</div>
 
 <div id="view-utilities" class="view">
         <h2>🔧 Utilities</h2>
@@ -3284,6 +4053,11 @@ def home():
                 <button type="button" class="tab-btn" onclick="switchAccountTab('profile', this)" style="background:transparent; border:none; color:var(--accent); border-bottom:2px solid var(--accent); font-weight:bold; cursor:pointer; padding:10px; font-size:1rem; margin-bottom:-1px;">Profile</button>
                 <button type="button" class="tab-btn" onclick="switchAccountTab('security', this)" style="background:transparent; border:none; color:var(--text-muted); font-weight:bold; cursor:pointer; padding:10px; font-size:1rem;">Security</button>
                 
+                {% if session.role == 'admin' %}
+<button class="account-tab-btn" onclick="switchAccountTab('tokens', this)">🔑 API Tokens</button>
+{% endif %}
+                
+                
             </div>
 
             <!-- Tab 1: Profile -->
@@ -3344,11 +4118,41 @@ def home():
                 </div>
             </div>
 
-            <!-- Tab 3: SMTP (Admin Only) -->
+            
+            <!-- Tab 3: API Tokens (Admin Only) -->
+            {% if session.role == 'admin' %}
+<div id="tab-tokens" class="account-tab-content" style="display:none;">
+                <p style="color:var(--text-muted); font-size:0.85rem; margin-bottom:15px;">
+                    API tokens allow external scripts and apps to authenticate as you.
+                    <strong style="color:var(--accent);">The full token is shown only once at creation.</strong>
+                </p>
+
+                <div style="background:var(--card-bg); border:1px solid var(--border); border-radius:8px; padding:15px; margin-bottom:15px;">
+                    <h4 style="margin-bottom:10px;">➕ Create New Token</h4>
+                    <label style="font-size:0.85rem;">Name</label>
+                    <input type="text" id="newTokenName" placeholder="e.g. iPad PWA, Home Assistant" style="width:100%; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); margin-bottom:10px;">
+                    <label style="font-size:0.85rem;">Scope</label>
+                    <select id="newTokenScope" style="width:100%; padding:10px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); margin-bottom:10px;">
+                        <option value="read">read — GET endpoints only</option>
+                        <option value="download">download — read + trigger downloads</option>
+                        <option value="admin">admin — full access</option>
+                    </select>
+                    <button type="button" onclick="createToken()" style="background:var(--accent); color:#fff; border:none; padding:10px; border-radius:6px; cursor:pointer; width:100%;">Create Token</button>
+                </div>
+
+                <h4 style="margin-bottom:10px;">🔑 Existing Tokens</h4>
+                <div id="tokens-list" style="margin-bottom:15px;">
+                    <p style="color:var(--text-muted); font-size:0.85rem;">Loading…</p>
+                </div>
+
+                <button type="button" onclick="loadTokens()" style="background:transparent; border:1px solid var(--border); color:var(--text-muted); padding:8px; border-radius:6px; cursor:pointer; width:100%; font-size:0.85rem;">🔄 Refresh</button>
+            </div>
+            
             
 
             <!-- Action Buttons -->
             <div class="modal-actions" style="margin-top:20px; border-top:1px solid var(--border); padding-top:20px;">
+        {% endif %}
                 <button class="save-btn" type="submit">💾 Save Changes</button>
                 <button class="cancel-btn" type="button" onclick="closeAccountModal()">Cancel</button>
                 <a href="/logout" style="text-decoration:none; padding:8px 16px; border-radius:6px; background:#3a1a1a; color:#cf6f6f; font-weight:600; margin-left:auto;">🚪 Logout</a>
@@ -4231,7 +5035,46 @@ def home():
         } catch (_) {}
     }
 
-    document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+    function smtpTest() {
+    var btn = document.getElementById('smtpTestBtn');
+    var statusEl = document.getElementById('smtpTestStatus');
+    function setStatus(color, text) {
+        if (statusEl) { statusEl.style.color = color; statusEl.textContent = text; }
+        else { console.log('[smtpTest] ' + text); }
+    }
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending...'; }
+    setStatus('', '');
+    fetch('/api/settings/email/test', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
+        credentials: 'same-origin',
+        body: '{}'
+    })
+    .then(function(r) {
+        var ct = r.headers.get('content-type') || '';
+        if (ct.indexOf('application/json') === -1) {
+            return r.text().then(function(t) {
+                throw new Error('Non-JSON response (' + r.status + ' ' + ct + '): ' + t.substring(0, 200));
+            });
+        }
+        return r.json().then(function(j) { return {status: r.status, body: j}; });
+    })
+    .then(function(res) {
+        if (res.body && res.body.ok) {
+            setStatus('#6fcf97', 'OK: ' + res.body.message);
+        } else {
+            setStatus('#ff6b6b', 'FAIL: ' + ((res.body && res.body.error) || 'Unknown error'));
+        }
+    })
+    .catch(function(err) {
+        setStatus('#ff6b6b', 'Error: ' + (err && err.message ? err.message : String(err)));
+    })
+    .then(function() {
+        if (btn) { btn.disabled = false; btn.textContent = 'Send Test Email'; }
+    });
+}
+
+document.getElementById('settingsForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         const data = new FormData(e.target);
         const res = await fetch('/settings', { method: 'POST', body: data });
@@ -4293,6 +5136,119 @@ def home():
         btn.style.borderBottom = '2px solid var(--accent)';
         btn.style.marginBottom = '-1px';
     }
+
+
+    // ---------- API Tokens (v1.9.7) ----------
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    async function loadTokens() {
+        const box = document.getElementById('tokens-list');
+        if (!box) return;
+        try {
+            const r = await fetch('/api/tokens');
+            if (!r.ok) { box.innerHTML = '<p style="color:#cf6f6f;">Failed to load (' + r.status + ')</p>'; return; }
+            const data = await r.json();
+            const list = data.tokens || [];
+            if (!list.length) {
+                box.innerHTML = '<p style="color:var(--text-muted); font-size:0.85rem;">No tokens yet. Create one above.</p>';
+                return;
+            }
+            box.innerHTML = list.map(t => {
+                const revokedTag = t.revoked ? ' <span style="color:#cf6f6f;font-size:0.75rem;">[REVOKED]</span>' : '';
+                const lastUsed = t.last_used_at ? esc(t.last_used_at) : 'never';
+                return '<div style="background:var(--card-bg); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:8px;">' +
+                    '<div style="display:flex; justify-content:space-between; align-items:start; gap:8px;">' +
+                    '<div style="flex:1; min-width:0;">' +
+                    '<div style="font-weight:600; margin-bottom:4px;">' + esc(t.name) + revokedTag + '</div>' +
+                    '<div style="font-family:monospace; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">' + esc(t.prefix) + '••••••••</div>' +
+                    '<div style="font-size:0.75rem; color:var(--text-muted);">scope: <strong>' + esc(t.scope) + '</strong> · created by ' + esc(t.created_by) + ' · used: ' + lastUsed + '</div>' +
+                    '</div>' +
+                    '<div style="display:flex; flex-direction:column; gap:6px;">' +
+                    (!t.revoked ? '<button type="button" onclick="revokeToken(' + t.id + ')" style="background:#3a2a1a; color:#cfaa6f; border:none; padding:6px 10px; border-radius:6px; cursor:pointer; font-size:0.75rem;">Revoke</button>' : '') +
+                    '<button type="button" onclick="deleteToken(' + t.id + ')" style="background:#3a1a1a; color:#cf6f6f; border:none; padding:6px 10px; border-radius:6px; cursor:pointer; font-size:0.75rem;">Delete</button>' +
+                    '</div></div></div>';
+            }).join('');
+        } catch (e) {
+            box.innerHTML = '<p style="color:#cf6f6f;">Error: ' + esc(e.message) + '</p>';
+        }
+    }
+
+    async function createToken() {
+        const name = (document.getElementById('newTokenName').value || '').trim();
+        const scope = document.getElementById('newTokenScope').value;
+        if (!name) { alert('Please enter a name.'); return; }
+        try {
+            const r = await fetch('/api/tokens', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({name: name, scope: scope})
+            });
+            const data = await r.json();
+            if (!r.ok) { alert('Failed: ' + (data.error || r.status)); return; }
+            document.getElementById('newTokenName').value = '';
+            showTokenModal(data.token, data.name);
+            loadTokens();
+        } catch (e) {
+            alert('Error: ' + e.message);
+        }
+    }
+
+    async function revokeToken(id) {
+        if (!confirm('Revoke this token? It will stop working immediately.')) return;
+        try {
+            const r = await fetch('/api/tokens/' + id + '/revoke', {method: 'POST'});
+            if (!r.ok) { alert('Failed: ' + r.status); return; }
+            loadTokens();
+        } catch (e) { alert('Error: ' + e.message); }
+    }
+
+    async function deleteToken(id) {
+        if (!confirm('Permanently delete this token? This cannot be undone.')) return;
+        try {
+            const r = await fetch('/api/tokens/' + id, {method: 'DELETE'});
+            if (!r.ok) { alert('Failed: ' + r.status); return; }
+            loadTokens();
+        } catch (e) { alert('Error: ' + e.message); }
+    }
+
+    function showTokenModal(rawToken, name) {
+        const existing = document.getElementById('tokenShowModal');
+        if (existing) existing.remove();
+        const div = document.createElement('div');
+        div.id = 'tokenShowModal';
+        div.className = 'modal';
+        div.style.display = 'block';
+        div.innerHTML = '<div class="modal-content" style="max-width:520px;">' +
+            '<h3>🔑 Token Created: ' + esc(name) + '</h3>' +
+            '<p style="color:#cfaa6f; font-weight:600; margin-bottom:10px;">⚠️ Copy this token NOW. It will never be shown again.</p>' +
+            '<textarea readonly id="tokenRawText" style="width:100%; padding:10px; background:var(--bg); border:1px solid var(--accent); border-radius:6px; color:var(--text); font-family:monospace; font-size:0.9rem; min-height:70px; resize:vertical;">' + esc(rawToken) + '</textarea>' +
+            '<div class="modal-actions" style="margin-top:15px;">' +
+            '<button type="button" onclick="copyTokenValue()" style="background:var(--accent); color:#fff; border:none; padding:10px; border-radius:6px; cursor:pointer;">📋 Copy</button>' +
+            '<button type="button" onclick="document.getElementById(\'tokenShowModal\').remove()" style="background:transparent; border:1px solid var(--border); color:var(--text); padding:10px; border-radius:6px; cursor:pointer;">Close</button>' +
+            '</div></div>';
+        document.body.appendChild(div);
+    }
+
+    function copyTokenValue() {
+        const t = document.getElementById('tokenRawText');
+        if (!t) return;
+        t.select();
+        navigator.clipboard.writeText(t.value).then(() => {
+            alert('Copied to clipboard.');
+        }).catch(() => {
+            document.execCommand('copy');
+            alert('Copied.');
+        });
+    }
+
+    // Auto-load tokens when the tokens tab is opened
+    const _origSwitchAccountTab = switchAccountTab;
+    switchAccountTab = function(tabId, btn) {
+        _origSwitchAccountTab(tabId, btn);
+        if (tabId === 'tokens') { setTimeout(loadTokens, 50); }
+    };
 
 
     // ---------- 2FA ----------
@@ -4434,15 +5390,20 @@ document.getElementById('accountAvatarFile').addEventListener('change', function
 
         let html = '';
         for (const item of filtered) {
+            let thumbClass = 'thumb-yt';
+            if (item.source === 'spotify') thumbClass = 'thumb-spotify';
+            else if (item.source === 'gallery') thumbClass = 'thumb-gallery';
+            else if (item.source === 'ytmusic') thumbClass = 'thumb-yt'; // YT Music still uses 16:9
+
             const img = item.thumbnail 
-                ? `<img src="${escapeHTML(item.thumbnail)}" style="width:120px; height:68px; object-fit:cover; border-radius:6px; border:1px solid var(--border);">` 
-                : `<div style="width:120px; height:68px; background:var(--border); border-radius:6px; display:flex; align-items:center; justify-content:center; font-size:0.7rem; color:var(--text-muted);">No Image</div>`;
+                ? `<img src="${escapeHTML(item.thumbnail)}">` 
+                : `<div>No Image</div>`;
             
             const sourceBadge = `<span style="font-size:0.7rem; text-transform:uppercase; background:var(--border); padding:2px 6px; border-radius:4px; margin-left:8px;">${item.source}</span>`;
             
             html += `
             <div class="card" style="display:flex; gap:16px; align-items:center; padding:12px; margin-bottom:8px;">
-                <div style="flex-shrink:0;">${img}</div>
+                <div class="${thumbClass}" style="flex-shrink:0;">${img}</div>
                 <div style="flex:1; overflow:hidden;">
                     <div style="font-weight:bold; margin-bottom:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
                         ${escapeHTML(item.title)} ${sourceBadge}
@@ -4463,6 +5424,240 @@ document.getElementById('accountAvatarFile').addEventListener('change', function
     }
     // Load history when the tab is clicked
     document.querySelector('button[data-view="history"]').addEventListener('click', loadHistory);
+document.querySelector('button[data-view="server"]').addEventListener('click', function() {
+    if (typeof loadServerManager === 'function') loadServerManager();
+    if (typeof checkVersion === 'function') checkVersion();
+});
+function checkVersion() {
+    const btn = document.getElementById('vmCheckBtn');
+    const msg = document.getElementById('vmStatusMsg');
+    const latestEl = document.getElementById('vmLatest');
+    const currentEl = document.getElementById('vmCurrent');
+    const checkedEl = document.getElementById('vmChecked');
+    const badge = document.getElementById('vmBadge');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = '⏳ Checking…';
+    if (msg) { msg.textContent = 'Querying GitHub for latest tag…'; msg.style.color = 'var(--text-muted)'; }
+    fetch('/api/version/info', { credentials: 'same-origin' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+            if (currentEl) currentEl.textContent = d.current || '?';
+            if (latestEl) {
+                latestEl.textContent = d.latest || '?';
+                latestEl.style.color = d.update_available ? '#f0c24a' : 'var(--text-muted)';
+            }
+            if (checkedEl) checkedEl.textContent = d.checked_at || '—';
+            if (badge) badge.style.display = d.update_available ? 'inline-block' : 'none';
+            if (msg) {
+                if (d.error) {
+                    msg.textContent = '⚠️ GitHub API error: ' + d.error;
+                    msg.style.color = '#ff6b6b';
+                } else if (d.update_available) {
+                    msg.textContent = '🎉 Update available: ' + d.current + ' → ' + d.latest;
+                    msg.style.color = '#f0c24a';
+                } else {
+                    msg.textContent = '✅ You are running the latest version.';
+                    msg.style.color = '#6fcf97';
+                }
+            }
+        })
+        .catch(function(err) {
+            if (msg) { msg.textContent = '❌ Check failed: ' + err.message; msg.style.color = '#ff6b6b'; }
+        })
+        .finally(function() {
+            btn.disabled = false;
+            btn.textContent = '🔄 Check for Update';
+        });
+}
+
+// ========== Server Manager ==========
+let _netwatchState = { pollTimer: null, countdownTimer: null, nextRunAt: null, visible: false };
+let _netwatchLoadedOnce = false;
+
+function _formatCountdown(secs) {
+    if (secs < 0) secs = 0;
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m + ':' + String(s).padStart(2, '0');
+}
+
+function _setNetwatchMsg(text, kind) {
+    const el = document.getElementById('netwatchStatusMsg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = kind === 'error' ? '#ff6b6b' : (kind === 'ok' ? '#6fcf97' : 'var(--text-muted)');
+}
+
+function _startCountdown() {
+    if (_netwatchState.countdownTimer) clearInterval(_netwatchState.countdownTimer);
+    _netwatchState.countdownTimer = setInterval(function() {
+        const el = document.getElementById('netwatchNextIn');
+        if (!el || !_netwatchState.nextRunAt) return;
+        const secs = Math.max(0, Math.floor((_netwatchState.nextRunAt - Date.now()) / 1000));
+        el.textContent = _formatCountdown(secs);
+    }, 1000);
+}
+
+function loadServerManager(force) {
+    if (!force && _netwatchLoadedOnce) {
+        // already loaded once; ensure countdown running and return
+        if (!_netwatchState.countdownTimer) _startCountdown();
+        return;
+    }
+    _netwatchLoadedOnce = true;
+    fetch('/api/server/netwatch', { credentials: 'same-origin' })
+        .then(function(r) { return r.json().then(function(j) { return {ok: r.ok, body: j}; }); })
+        .then(function(res) {
+            const d = res.body || {};
+            const dot = document.getElementById('netwatchStatusDot');
+            const txt = document.getElementById('netwatchStatusText');
+            const toggleBtn = document.getElementById('netwatchToggleBtn');
+
+            if (d.timer_active && d.timer_enabled) {
+                dot.style.background = '#6fcf97';
+                txt.textContent = 'Active';
+                txt.style.color = '#6fcf97';
+                if (toggleBtn) toggleBtn.textContent = 'Disable Timer';
+            } else if (d.timer_enabled) {
+                dot.style.background = '#f0c24a';
+                txt.textContent = 'Enabled (idle)';
+                txt.style.color = '#f0c24a';
+                if (toggleBtn) toggleBtn.textContent = 'Disable Timer';
+            } else {
+                dot.style.background = '#ff6b6b';
+                txt.textContent = 'Disabled';
+                txt.style.color = '#ff6b6b';
+                if (toggleBtn) toggleBtn.textContent = 'Enable Timer';
+            }
+
+            document.getElementById('netwatchLastRun').textContent = d.last_run_ts || '—';
+            const fails = d.consecutive_failures || 0;
+            const failsEl = document.getElementById('netwatchFails');
+            failsEl.textContent = fails;
+            failsEl.style.color = fails === 0 ? '#6fcf97' : (fails === 1 ? '#f0c24a' : '#ff6b6b');
+            document.getElementById('netwatchIfaceGw').textContent = (d.iface || '?') + ' → ' + (d.gateway || '?');
+
+            // Countdown
+            if (typeof d.next_run_seconds === 'number') {
+                _netwatchState.nextRunAt = Date.now() + d.next_run_seconds * 1000;
+            } else {
+                _netwatchState.nextRunAt = null;
+            }
+            _startCountdown();
+
+            // Log
+            const logEl = document.getElementById('netwatchLog');
+            if (d.recent_log && d.recent_log.length) {
+                logEl.textContent = d.recent_log.join('\n');
+            } else {
+                logEl.textContent = '(no log entries — network healthy)';
+            }
+
+            _setNetwatchMsg('', null);
+        })
+        .catch(function(err) {
+            _setNetwatchMsg('Failed to load status: ' + err.message, 'error');
+        });
+
+    // Start polling when tab visible
+    if (_netwatchState.pollTimer) clearInterval(_netwatchState.pollTimer);
+    _netwatchState.pollTimer = setInterval(function() {
+        if (document.visibilityState === 'visible') {
+            const view = document.getElementById('view-server');
+            if (view && view.classList.contains('active')) {
+                loadServerManager(true);
+            }
+        }
+    }, 30000);
+}
+
+function netwatchAction(action) {
+    const btn = document.getElementById('netwatchRunBtn');
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Running…'; }
+    _setNetwatchMsg('', null);
+    fetch('/api/server/netwatch/action', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({action: action})
+    })
+    .then(function(r) { return r.json().then(function(j) { return {ok: r.ok, body: j}; }); })
+    .then(function(res) {
+        if (res.ok && res.body.ok) {
+            _setNetwatchMsg(res.body.message || 'Done', 'ok');
+            setTimeout(function() { loadServerManager(true); }, 2000);
+        } else {
+            _setNetwatchMsg('Error: ' + (res.body.error || 'unknown'), 'error');
+        }
+    })
+    .catch(function(err) {
+        _setNetwatchMsg('Network error: ' + err.message, 'error');
+    })
+    .finally(function() {
+        if (btn) { btn.disabled = false; btn.textContent = '▶ Run Check Now'; }
+    });
+}
+
+function netwatchToggle() {
+    const btn = document.getElementById('netwatchToggleBtn');
+    const isDisable = btn && btn.textContent.indexOf('Disable') >= 0;
+    const action = isDisable ? 'disable' : 'enable';
+    if (isDisable && !confirm('Disable the network watchdog? The server will no longer auto-recover from Wi-Fi issues.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Working…'; }
+    _setNetwatchMsg('', null);
+    fetch('/api/server/netwatch/action', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({action: action})
+    })
+    .then(function(r) { return r.json().then(function(j) { return {ok: r.ok, body: j}; }); })
+    .then(function(res) {
+        if (res.ok && res.body.ok) {
+            _setNetwatchMsg(res.body.message || 'Done', 'ok');
+            setTimeout(function() { loadServerManager(true); }, 1000);
+        } else {
+            _setNetwatchMsg('Error: ' + (res.body.error || 'unknown'), 'error');
+        }
+    })
+    .catch(function(err) {
+        _setNetwatchMsg('Network error: ' + err.message, 'error');
+    })
+    .finally(function() {
+        if (btn) btn.disabled = false;
+    });
+}
+
+function restartMediaGrabber() {
+    if (!confirm('Restart the MediaGrabber service? The page will lose connection briefly.')) return;
+    const btn = document.getElementById('restartMGBtn');
+    const status = document.getElementById('restartMGStatus');
+    if (btn) btn.disabled = true;
+    if (status) { status.textContent = '⏳ Restarting…'; status.style.color = 'var(--text-muted)'; }
+    fetch('/api/server/netwatch/action', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        credentials: 'same-origin',
+        body: JSON.stringify({action: 'restart_mediagrabber'})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(j) {
+        if (j.ok) {
+            if (status) { status.textContent = '✅ Restart triggered. Reconnecting in ~5s…'; status.style.color = '#6fcf97'; }
+            setTimeout(function() { location.reload(); }, 8000);
+        } else {
+            if (status) { status.textContent = '❌ ' + (j.error || 'failed'); status.style.color = '#ff6b6b'; }
+            if (btn) btn.disabled = false;
+        }
+    })
+    .catch(function(err) {
+        if (status) { status.textContent = '❌ ' + err.message; status.style.color = '#ff6b6b'; }
+        if (btn) btn.disabled = false;
+    });
+}
+
+
 
     // ---------- Polling ----------
     setInterval(loadQueue, 1500);
@@ -4661,7 +5856,143 @@ document.getElementById('accountAvatarFile').addEventListener('change', function
                     <button onclick="saveTheme()" style="background:var(--accent); border:none; color:white; padding:6px 12px; border-radius:4px; cursor:pointer;">Save</button>
                 </div>
             </div>
-<script src="/static/features.js"></script>
+<script src="/static/features.js">
+    <script>
+    const VAPID_PUBLIC_KEY = 'BJbqUsBMzUesydfhhcSzvp2l8RisGON2tP4vGfQDlb28-Bt2Im2TutXuhrwjIQZb9E87j9yw7gH_mbldH3nk6Lw';
+
+    function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) {
+            outputArray[i] = rawData.charCodeAt(i);
+        }
+        return outputArray;
+    }
+
+    async function subscribePush() {
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+            alert("Push not supported.");
+            return;
+        }
+        try {
+            // Explicitly register the SW before subscribing
+            const registration = await navigator.serviceWorker.register('/static/service-worker.js');
+            
+            // Wait for it to be ready
+            const readyReg = await navigator.serviceWorker.ready;
+            
+            const permission = await Notification.requestPermission();
+            if (permission !== 'granted') {
+                alert("Permission denied.");
+                return;
+            }
+
+            const subscription = await readyReg.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+            });
+
+            const response = await fetch('/api/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(subscription)
+            });
+            
+            if (response.ok) {
+                document.getElementById('enablePush').style.display = 'none';
+                alert("Success! Notifications are enabled.");
+            } else {
+                alert("Failed to save subscription on server.");
+            }
+        } catch (error) {
+            alert("ERROR: " + error.message);
+        }
+    }
+
+    async function checkSubscription() {
+        if ('serviceWorker' in navigator) {
+            try {
+                const reg = await navigator.serviceWorker.register('/static/service-worker.js');
+                const readyReg = await navigator.serviceWorker.ready;
+                const sub = await readyReg.pushManager.getSubscription();
+                if (sub) {
+                    const btn = document.getElementById('enablePush');
+                    if (btn) btn.style.display = 'none';
+                }
+            } catch (e) {
+                console.log("SW not ready yet", e);
+            }
+        }
+    }
+    window.addEventListener('load', checkSubscription);
+    </script>
+</script>
+
+    <script>
+    const VAPID_PUBLIC_KEY = 'BJbqUsBMzUesydfhhcSzvp2l8RisGON2tP4vGfQDlb28-Bt2Im2TutXuhrwjIQZb9E87j9yw7gH_mbldH3nk6Lw';
+
+    function urlBase64ToUint8Array(base64String) {
+        const padding = '='.repeat((4 - base64String.length % 4) % 4);
+        const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+        const rawData = window.atob(base64);
+        const outputArray = new Uint8Array(rawData.length);
+        for (let i = 0; i < rawData.length; ++i) {
+            outputArray[i] = rawData.charCodeAt(i);
+        }
+        return outputArray;
+    }
+
+    async function subscribePush() {
+        alert("1. Button clicked!");
+        if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+            alert("2. Push not supported.");
+            return;
+        }
+        try {
+            alert("3. Waiting for Service Worker...");
+            const registration = await navigator.serviceWorker.ready;
+            alert("4. Service Worker is ready!");
+            
+            const permission = await Notification.requestPermission();
+            alert("5. Permission: " + permission);
+            if (permission !== 'granted') return;
+
+            alert("6. Subscribing...");
+            const subscription = await registration.pushManager.subscribe({
+                userVisibleOnly: true,
+                applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+            });
+            alert("7. Sending to server...");
+
+            const response = await fetch('/api/subscribe', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(subscription)
+            });
+            
+            alert("8. Server response: " + response.status);
+            if (response.ok) {
+                document.getElementById('enablePush').style.display = 'none';
+            }
+        } catch (error) {
+            alert("ERROR: " + error.message);
+        }
+    }
+
+    async function checkSubscription() {
+        if ('serviceWorker' in navigator) {
+            const reg = await navigator.serviceWorker.ready;
+            const sub = await reg.pushManager.getSubscription();
+            if (sub) {
+                const btn = document.getElementById('enablePush');
+                if (btn) btn.style.display = 'none';
+            }
+        }
+    }
+    window.addEventListener('load', checkSubscription);
+    </script>
 </body>
 </html>
     '''.replace('{theme}', theme)
@@ -4669,7 +6000,8 @@ document.getElementById('accountAvatarFile').addEventListener('change', function
 
     admin_style = "" if session.get("role") == "admin" else "display:none;"
     role_class = "role-admin" if session.get("role") == "admin" else "role-user"
-    return html.replace('{admin_style}', admin_style).replace('{role_class}', role_class).replace('{theme_colors}', (user.get('theme_colors') or '{}'))
+    rendered = html.replace('{admin_style}', admin_style).replace('{role_class}', role_class).replace('{theme_colors}', (user.get('theme_colors') or '{}'))
+    return render_template_string(rendered)
 
 
 
@@ -4684,6 +6016,110 @@ def _pwa_sw():
     resp = send_from_directory("static", "service-worker.js", mimetype="application/javascript")
     resp.headers["Service-Worker-Allowed"] = "/"
     return resp
+
+
+# ========== SCHEDULED DOWNLOADS (v1.9.6) ==========
+import datetime as _sched_dt
+
+def _init_scheduled_db():
+    conn = sqlite3.connect(USER_DB_PATH)
+    conn.execute("""CREATE TABLE IF NOT EXISTS scheduled_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT NOT NULL,
+        mode TEXT DEFAULT 'video',
+        scheduled_time TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        fired_at TEXT,
+        job_id TEXT
+    )""")
+    conn.commit()
+    conn.close()
+
+_init_scheduled_db()
+
+def _scheduler_loop():
+    """Background thread: every 30s, check for due jobs and fire them."""
+    import time
+    # Small startup delay so Flask finishes booting before we touch its context
+    time.sleep(5)
+    while True:
+        try:
+            now = _sched_dt.datetime.now().strftime("%Y-%m-%dT%H:%M")
+            conn = sqlite3.connect(USER_DB_PATH)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE status='pending' AND scheduled_time <= ?",
+                (now,)
+            ).fetchall()
+            for row in rows:
+                try:
+                    # Run grab() inside a Flask app context so request/url_for work
+                    with app.app_context():
+                        grab(form_data={"url": row["url"], "mode": row["mode"] or "video"})
+                    conn.execute(
+                        "UPDATE scheduled_jobs SET status='fired', fired_at=? WHERE id=?",
+                        (_sched_dt.datetime.now().isoformat(timespec='seconds'), row["id"])
+                    )
+                    conn.commit()
+                    print(f"[scheduler] fired job {row['id']}: {row['url']}")
+                except Exception as e:
+                    import traceback
+                    traceback.print_exc()
+                    print(f"[scheduler] failed to fire job {row['id']}: {e}")
+                    # Mark as failed so we don't loop forever on the same job
+                    conn.execute(
+                        "UPDATE scheduled_jobs SET status='failed', fired_at=? WHERE id=?",
+                        (_sched_dt.datetime.now().isoformat(timespec='seconds'), row["id"])
+                    )
+                    conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"[scheduler] loop error: {e}")
+        time.sleep(30)
+
+# Start the scheduler thread once (guard against Flask debug reloader double-start)
+if not os.environ.get("_MG_SCHEDULER_STARTED"):
+    os.environ["_MG_SCHEDULER_STARTED"] = "1"
+    threading.Thread(target=_scheduler_loop, daemon=True, name="scheduled-jobs").start()
+
+@app.route("/api/schedule", methods=["GET"])
+def api_schedule_list():
+    conn = sqlite3.connect(USER_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM scheduled_jobs ORDER BY scheduled_time ASC"
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route("/api/schedule", methods=["POST"])
+def api_schedule_add():
+    data = request.get_json(force=True)
+    url = (data.get("url") or "").strip()
+    mode = data.get("mode", "video")
+    scheduled_time = (data.get("scheduled_time") or "").strip()
+    if not url or not scheduled_time:
+        return jsonify({"error": "url and scheduled_time required"}), 400
+    conn = sqlite3.connect(USER_DB_PATH)
+    cur = conn.execute(
+        "INSERT INTO scheduled_jobs (url, mode, scheduled_time) VALUES (?,?,?)",
+        (url, mode, scheduled_time)
+    )
+    conn.commit()
+    new_id = cur.lastrowid
+    conn.close()
+    return jsonify({"id": new_id, "status": "pending"}), 201
+
+@app.route("/api/schedule/<int:job_id>", methods=["DELETE"])
+def api_schedule_delete(job_id):
+    conn = sqlite3.connect(USER_DB_PATH)
+    conn.execute("DELETE FROM scheduled_jobs WHERE id=?", (job_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({"deleted": job_id})
+
+# ========== END SCHEDULED DOWNLOADS ==========
 
 if __name__ == "__main__":
     if len(sys.argv) >= 2 and sys.argv[1] == "set-password":

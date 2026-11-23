@@ -1,14 +1,22 @@
-const CACHE = 'mg-v2';
-self.addEventListener('install', e => {
+const CACHE_NAME = 'mediagrab-v1';
+
+self.addEventListener('install', (event) => {
   self.skipWaiting();
 });
-self.addEventListener('activate', e => {
-  e.waitUntil(self.clients.claim());
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(clients.claim());
 });
-self.addEventListener('fetch', e => {
-  // Network first for HTML, cache for static
-  if (e.request.method !== 'GET') return;
-  e.respondWith(
-    fetch(e.request).catch(() => caches.match(e.request))
-  );
+
+self.addEventListener('push', (event) => {
+  let data = { title: 'MediaGrabber', body: 'New notification' };
+  if (event.data) {
+    try { data = event.data.json(); } catch(e) { data.body = event.data.text(); }
+  }
+  const options = {
+    body: data.body,
+    icon: '/static/icons/icon-192.png',
+    badge: '/static/icons/icon-192.png'
+  };
+  event.waitUntil(self.registration.showNotification(data.title, options));
 });

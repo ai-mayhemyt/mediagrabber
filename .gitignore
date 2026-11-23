@@ -19,3 +19,11 @@ archive.txt
 # Backups
 *.tar.gz
 *.bak.*
+
+# Push notification subscriptions (device-specific auth)
+web/subscriptions.json
+
+# Thumbnail cache (regeneratable)
+thumbs.json
+*.bak
+*.working
