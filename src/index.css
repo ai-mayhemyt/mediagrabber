@@ -1,0 +1,63 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --mg-bg: #f5f6f8;
+  --mg-sidebar: #eceef2;
+  --mg-card: #ffffff;
+  --mg-border: #d8dde6;
+  --mg-text: #111827;
+  --mg-muted: #5b6474;
+  --mg-accent: #3b5bdb;
+  --mg-accent-hover: #2f4bc4;
+}
+
+.dark {
+  --mg-bg: #0c0e13;
+  --mg-sidebar: #11141b;
+  --mg-card: #161a23;
+  --mg-border: #252b38;
+  --mg-text: #edf1f7;
+  --mg-muted: #8b96a9;
+  --mg-accent: #5b7cfa;
+  --mg-accent-hover: #708dfc;
+}
+
+@layer base {
+  html,
+  body {
+    background-color: var(--mg-bg);
+    color: var(--mg-text);
+    font-family: "DM Sans", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4,
+  .font-display {
+    font-family: "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  }
+
+  code,
+  pre,
+  .font-mono {
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
