@@ -1,9 +1,10 @@
 import express from 'express';
 import http from 'http';
+import os from 'os';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { execFile } from 'child_process';
+import { execFile, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import multer from 'multer';
 import dotenv from 'dotenv';
@@ -69,46 +70,6 @@ function verifyPassword(password: string, stored: string): boolean {
   if (!salt || !hash) return false;
   const derived = crypto.scryptSync(password, salt, 32).toString('hex');
   return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(derived, 'hex'));
-}
-
-const BLOCKED_SYSTEM_ROOTS = new Set([
-  '/', '/bin', '/boot', '/dev', '/etc', '/lib', '/lib64',
-  '/proc', '/root', '/run', '/sbin', '/sys', '/usr',
-]);
-
-function isSafeLibraryBasePath(dirPath: unknown): string | null {
-  if (typeof dirPath !== 'string') return null;
-  const trimmed = dirPath.trim();
-  if (!trimmed) return null;
-  const resolved = path.resolve(trimmed);
-  if (BLOCKED_SYSTEM_ROOTS.has(resolved)) return null;
-  for (const blocked of BLOCKED_SYSTEM_ROOTS) {
-    if (blocked !== '/' && (resolved === blocked || resolved.startsWith(blocked + path.sep))) {
-      return null;
-    }
-  }
-  return resolved;
-}
-
-function resolveJobBaseDir(engine: string, settings: any): string {
-  if (engine === 'SPOTIFY' || engine === 'YT MUSIC') {
-    return isSafeLibraryBasePath(settings?.music_base_path) || MUSIC_DIR;
-  }
-  if (engine === 'GALLERY') {
-    return isSafeLibraryBasePath(settings?.gallery_base_path) || GALLERY_DIR;
-  }
-  return isSafeLibraryBasePath(settings?.yt_base_path) || YT_DIR;
-}
-
-function getAllowedLibraryRoots(settings?: any): string[] {
-  const s = settings || readJson<any>(SETTINGS_FILE, {});
-  const candidates = [
-    WORKSPACE_ROOT,
-    isSafeLibraryBasePath(s?.yt_base_path) || YT_DIR,
-    isSafeLibraryBasePath(s?.music_base_path) || MUSIC_DIR,
-    isSafeLibraryBasePath(s?.gallery_base_path) || GALLERY_DIR,
-  ];
-  return Array.from(new Set(candidates.map((p) => path.resolve(p))));
 }
 
 const BLOCKED_SYSTEM_ROOTS = new Set([
@@ -586,6 +547,7 @@ async function startServer() {
 
   // In-memory state
   const queue = new Map<string, JobRecord>();
+  const activeProcesses = new Map<string, ChildProcess>();
   const cancelledJobs = new Set<string>();
   let currentUserId: string | null = 'usr-admin-1';
   let radioDbPath = '/var/lib/navidrome/navidrome.db';
@@ -692,113 +654,267 @@ async function startServer() {
     fs.writeFileSync(ARCHIVE_FILE, filtered.length ? filtered.join('\n') + '\n' : '');
   }
 
+  const _mgMediaExts = new Set(['.mp4', '.webm', '.mkv', '.mp3', '.flac', '.m4a', '.opus']);
+
+  function _mgWalkFiles(dir: string): string[] {
+    if (!fs.existsSync(dir)) return [];
+    const out: string[] = [];
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) out.push(..._mgWalkFiles(full));
+      else out.push(full);
+    }
+    return out;
+  }
+
+  function _mgBuildToolEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+    const localBin = path.join(os.homedir(), '.local', 'bin');
+    const basePath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
+    return {
+      ...process.env,
+      PATH: [localBin, '/usr/local/bin', basePath].filter(Boolean).join(':'),
+      ...(extra || {}),
+    };
+  }
+
+  function _mgResolveExec(name: string, extraPaths: string[] = []): string | null {
+    const candidates = [
+      ...extraPaths,
+      path.join(os.homedir(), '.local', 'bin', name),
+      path.join('/usr/local/bin', name),
+      path.join('/usr/bin', name),
+      path.join('/bin', name),
+    ];
+    for (const c of candidates) {
+      if (!c) continue;
+      try {
+        fs.accessSync(c, fs.constants.X_OK);
+        return c;
+      } catch {}
+    }
+    for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+      const full = path.join(dir, name);
+      try {
+        fs.accessSync(full, fs.constants.X_OK);
+        return full;
+      } catch {}
+    }
+    return null;
+  }
+
+  function _mgResolveGrab(): { bin: string; prefixArgs: string[]; scriptPath: string } | null {
+    const candidates = [
+      process.env.MEDIAGRABBER_GRAB_BIN || '',
+      '/usr/local/bin/grab',
+      path.join(process.cwd(), 'grab'),
+      '/opt/mediagrabber/grab',
+    ].filter(Boolean);
+    for (const c of candidates) {
+      if (!fs.existsSync(c)) continue;
+      try {
+        if (fs.statSync(c).isDirectory()) continue;
+        fs.accessSync(c, fs.constants.X_OK);
+        return { bin: c, prefixArgs: [], scriptPath: c };
+      } catch {
+        const bashBin = _mgResolveExec('bash', ['/bin/bash', '/usr/bin/bash']);
+        if (bashBin) return { bin: bashBin, prefixArgs: [c], scriptPath: c };
+      }
+    }
+    const inPath = _mgResolveExec('grab');
+    return inPath ? { bin: inPath, prefixArgs: [], scriptPath: inPath } : null;
+  }
+
+  function _mgRunStreaming(
+    jobId: string,
+    cmd: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    onLine: (line: string) => void
+  ): Promise<number> {
+    return new Promise((resolve) => {
+      const child = spawn(cmd, args, { env });
+      activeProcesses.set(jobId, child);
+      let buf = '';
+      const handleChunk = (chunk: Buffer) => {
+        buf += chunk.toString('utf-8');
+        const parts = buf.split(/[\r\n]+/);
+        buf = parts.pop() || '';
+        for (const raw of parts) {
+          const line = raw.trim();
+          if (line) onLine(line);
+        }
+      };
+      child.stdout?.on('data', handleChunk);
+      child.stderr?.on('data', handleChunk);
+      child.on('error', (err) => {
+        onLine(`[mediagrabber] Process error: ${err.message}`);
+        activeProcesses.delete(jobId);
+        resolve(1);
+      });
+      child.on('close', (code) => {
+        if (buf.trim()) onLine(buf.trim());
+        activeProcesses.delete(jobId);
+        resolve(typeof code === 'number' ? code : 1);
+      });
+    });
+  }
+
   async function processJob(jobId: string) {
     const job = queue.get(jobId);
     if (!job) return;
-    job.status = 'running';
-    job.progress = 5;
-    job.log.push(`[mediagrabber] Job ${jobId.slice(0, 8)} started`);
-    job.log.push(`[mediagrabber] Engine → ${job.engine}`);
+    try {
+      job.status = 'running';
+      job.progress = 2;
+      job.log.push(`[mediagrabber] Job ${jobId.slice(0, 8)} started`);
 
-    const settings = readJson<any>(SETTINGS_FILE, {});
-    const meta = await resolveRemoteMetadata(job.url, job.engine);
-    job.title = meta.title;
-    job.uploader = meta.uploader;
-    job.thumbnail = meta.thumbnail;
+      const settings = readJson<any>(SETTINGS_FILE, {});
+      const meta = await resolveRemoteMetadata(job.url, job.engine);
+      job.title = meta.title;
+      job.uploader = meta.uploader;
+      job.thumbnail = meta.thumbnail;
 
-    if (cancelledJobs.has(jobId)) {
-      job.status = 'cancelled';
-      job.log.push('[mediagrabber] Job cancelled by user.');
-      return;
-    }
-
-    job.log.push(`[extractor] Title: ${meta.title}`);
-    job.log.push(`[extractor] Uploader: ${meta.uploader}`);
-    job.progress = 25;
-
-    await new Promise((r) => setTimeout(r, 350));
-    if (cancelledJobs.has(jobId)) {
-      job.status = 'cancelled';
-      job.log.push('[mediagrabber] Job cancelled by user.');
-      return;
-    }
-
-    const isAudio = job.mode === 'audio' || job.engine === 'SPOTIFY' || job.engine === 'YT MUSIC';
-    const ext = isAudio ? `.${settings.audio_format || 'mp3'}` : `.${settings.container || 'mp4'}`;
-    const year = String(new Date().getFullYear());
-    const safeUploader = sanitizeSegment(meta.uploader, 'Unknown');
-    const safeTitle = sanitizeSegment(meta.title, `Media_${jobId.slice(0, 6)}`);
-
-    const safeBase = resolveJobBaseDir(job.engine, settings);
-
-    const targetDir =
-      settings.folder_structure === 'flat'
-        ? safeBase
-        : path.join(safeBase, safeUploader, year);
-
-    fs.mkdirSync(targetDir, { recursive: true });
-    job.output_dir = targetDir;
-
-    job.progress = 58;
-    job.log.push(
-      `[download] 58.0% — Writing ${isAudio ? `${settings.audio_bitrate || '320k'} ${ext.slice(1).toUpperCase()}` : `${settings.video_res || '1080'}p ${ext.slice(1).toUpperCase()}`}`
-    );
-
-    const outFile = path.join(targetDir, `${safeTitle}${ext}`);
-    await createSampleMediaFile(outFile, meta.title, meta.uploader, isAudio);
-
-    if (cancelledJobs.has(jobId)) {
-      try {
-        if (fs.existsSync(outFile)) fs.unlinkSync(outFile);
-      } catch {
-        // ignore
+      if (cancelledJobs.has(jobId)) {
+        job.status = 'cancelled';
+        job.log.push('[mediagrabber] Job cancelled by user.');
+        return;
       }
-      job.status = 'cancelled';
-      job.log.push('[mediagrabber] Job cancelled by user.');
-      return;
+
+      const ytDir = String(settings.yt_base_path || '').trim() || YT_DIR;
+      const musicDir = String(settings.music_base_path || '').trim() || MUSIC_DIR;
+      const galleryDir = String(settings.gallery_base_path || '').trim() || GALLERY_DIR;
+      const grabCmd = _mgResolveGrab();
+
+      if (grabCmd) {
+        let tempJobDir = job.output_dir || path.join('/tmp/mediagrabber', jobId);
+        try {
+          fs.mkdirSync(tempJobDir, { recursive: true });
+          fs.accessSync(tempJobDir, fs.constants.W_OK);
+        } catch {
+          tempJobDir = path.join(TMP_DIR, jobId);
+          fs.mkdirSync(tempJobDir, { recursive: true });
+        }
+        job.output_dir = tempJobDir;
+
+        let extraYt = String(settings.ytdlp_extra || '').trim();
+        if (job.mode !== 'audio' && !extraYt.includes('-S vcodec:') && !extraYt.includes('--format-sort')) {
+          extraYt = `${extraYt} -S vcodec:h264,res,br`.trim();
+        }
+
+        const env = _mgBuildToolEnv({
+          MEDIAGRABBER_JOB_ID: jobId,
+          GRAB_OUTPUT_DIR: tempJobDir,
+          GRAB_YT_DIR: ytDir,
+          GRAB_MUSIC_DIR: musicDir,
+          GRAB_GALLERY_DIR: galleryDir,
+          GRAB_COOKIES_YOUTUBE: String(settings.cookies_youtube_path || ''),
+          GRAB_COOKIES_GALLERY: String(settings.cookies_gallery_path || ''),
+          GRAB_VIDEO_RES: String(settings.video_res || '1080'),
+          GRAB_AUDIO_FORMAT: String(settings.audio_format || 'mp3'),
+          GRAB_AUDIO_BITRATE: String(settings.audio_bitrate || '320k'),
+          GRAB_CONTAINER: String(settings.container || 'mp4'),
+          GRAB_GENERATE_LRC: settings.generate_lrc ? 'true' : 'false',
+          GRAB_AUDIO_ONLY: job.mode === 'audio' ? 'true' : 'false',
+          ...(extraYt ? { GRAB_EXTRA_YT: extraYt } : {}),
+          ...(settings.spotdl_extra ? { GRAB_EXTRA_SPOTIFY: String(settings.spotdl_extra) } : {}),
+          ...(settings.gallerydl_extra ? { GRAB_EXTRA_GALLERY: String(settings.gallerydl_extra) } : {}),
+        });
+
+        job.log.push(`[mediagrabber] Launching ${grabCmd.scriptPath} (${job.mode})`);
+        let lastProgress = 2;
+        const exitCode = await _mgRunStreaming(jobId, grabCmd.bin, [...grabCmd.prefixArgs, job.url], env, (line) => {
+          job.log.push(line);
+          if (job.log.length > 500) job.log.shift();
+          if (line.includes('Engine → SPOTIFY')) job.engine = 'SPOTIFY';
+          else if (line.includes('Engine → YT MUSIC')) job.engine = 'YT MUSIC';
+          else if (line.includes('Engine → GALLERY')) job.engine = 'GALLERY';
+          else if (line.includes('Engine → YOUTUBE')) job.engine = 'YOUTUBE';
+          if (line.includes('[download]') && line.includes('%')) {
+            const m = line.match(/(\d{1,3}(?:\.\d+)?)%/);
+            if (m) {
+              const v = parseFloat(m[1]);
+              if (!Number.isNaN(v) && v >= lastProgress) {
+                lastProgress = Math.min(99, v);
+                job.progress = lastProgress;
+              }
+            }
+          }
+          if (line.includes('PROGRESS:')) {
+            const m = line.match(/PROGRESS:\s*(\d+)\/(\d+)\s*(?:\((\d+)%\))?/);
+            if (m) {
+              const pct = m[3] ? parseInt(m[3], 10) : Math.round((parseInt(m[1], 10) / Math.max(1, parseInt(m[2], 10))) * 100);
+              if (pct >= lastProgress) {
+                lastProgress = Math.min(99, pct);
+                job.progress = lastProgress;
+              }
+            }
+          }
+          if (line.includes('FINAL_FILE:')) {
+            job.file = line.split('FINAL_FILE:', 2)[1].trim();
+          }
+          if (line.includes('FINAL_THUMB:')) {
+            const t = line.split('FINAL_THUMB:', 2)[1].trim();
+            if (t.startsWith('http')) job.thumbnail = t;
+            else if (fs.existsSync(t)) job.thumbnail = `/api/media-cover?path=${encodeURIComponent(t)}`;
+          }
+        });
+
+        if (cancelledJobs.has(jobId)) {
+          job.status = 'cancelled';
+          job.log.push('[mediagrabber] Job cancelled by user.');
+          return;
+        }
+
+        if (!job.file && fs.existsSync(tempJobDir)) {
+          const found = _mgWalkFiles(tempJobDir)
+            .filter((f) => _mgMediaExts.has(path.extname(f).toLowerCase()))
+            .sort((a, b) => fs.statSync(b).ctimeMs - fs.statSync(a).ctimeMs);
+          if (found.length > 0) job.file = found[0];
+        }
+
+        if (job.file) {
+          const infoFile = job.file.replace(/\.[^.]+$/, '.info.json');
+          if (fs.existsSync(infoFile)) {
+            const info = readJson<any>(infoFile, {});
+            if (info.title) job.title = info.title;
+            if (info.uploader || info.artist) job.uploader = info.uploader || info.artist;
+          } else {
+            job.title = path.basename(job.file, path.extname(job.file));
+          }
+        }
+
+        if (job.file || exitCode === 0) {
+          job.status = 'done';
+          job.progress = 100;
+          if (job.engine === 'SPOTIFY') appendArchiveEntry('spotify', job.url);
+          else if (job.engine === 'GALLERY') appendArchiveEntry(job.url.includes('tiktok.com') ? 'tiktok' : 'instagram', job.url);
+          const history = readJson<any[]>(HISTORY_FILE, []);
+          history.unshift({
+            id: `hist-${Date.now()}-${jobId.slice(0, 4)}`,
+            url: job.url,
+            title: job.title || path.basename(job.file || job.url),
+            thumbnail: job.thumbnail,
+            timestamp: new Date().toISOString(),
+            source: engineToHistorySource(job.engine, job.url),
+            file: job.file,
+          });
+          writeJson(HISTORY_FILE, history.slice(0, 200));
+          job.log.push('[mediagrabber] Completed successfully.');
+        } else {
+          job.status = 'failed';
+          job.progress = 0;
+          job.log.push(`[mediagrabber] Download failed (exit code ${exitCode}).`);
+        }
+        return;
+      }
+
+      job.status = 'failed';
+      job.progress = 0;
+      job.log.push('[mediagrabber] ERROR: /usr/local/bin/grab not found or not executable.');
+    } catch (err: any) {
+      job.status = 'failed';
+      job.progress = 0;
+      job.log.push(`[mediagrabber] Unexpected job error: ${err?.message || String(err)}`);
     }
-
-    job.progress = 88;
-    job.log.push('[postprocess] Writing .info.json metadata sidecar');
-
-    const infoFile = outFile.replace(/\.[^.]+$/, '.info.json');
-    fs.writeFileSync(
-      infoFile,
-      JSON.stringify(
-        {
-          title: meta.title,
-          uploader: meta.uploader,
-          album: job.engine === 'SPOTIFY' ? 'Single' : year,
-          upload_date: new Date().toISOString().slice(0, 10).replace(/-/g, ''),
-          description: `Captured via MediaGrabber (${job.engine})`,
-          cover_url: meta.thumbnail,
-          webpage_url: job.url,
-          engine: job.engine,
-        },
-        null,
-        2
-      )
-    );
-
-    appendArchiveEntry(job.engine, job.url);
-
-    const history = readJson<any[]>(HISTORY_FILE, []);
-    history.unshift({
-      id: `hist-${Date.now()}-${jobId.slice(0, 4)}`,
-      url: job.url,
-      title: meta.title,
-      thumbnail: meta.thumbnail,
-      timestamp: new Date().toISOString(),
-      source: engineToHistorySource(job.engine, job.url),
-      file: outFile,
-    });
-    writeJson(HISTORY_FILE, history.slice(0, 200));
-
-    job.file = outFile;
-    job.progress = 100;
-    job.status = 'done';
-    job.log.push(`FINAL_FILE: ${outFile}`);
-    job.log.push('[mediagrabber] Completed successfully.');
   }
 
   // ---- Auth & Account Routes ----
@@ -1039,6 +1155,30 @@ async function startServer() {
     }
 
     res.json({ job_id: jobIds[0], job_ids: jobIds, count: jobIds.length });
+  });
+
+
+  app.post('/api/grab/notify', (req, res) => {
+    const jobId = String(req.body?.job_id || '').trim();
+    const rawUrl = String(req.body?.url || '').trim();
+    const message = String(req.body?.message || '').trim();
+    const file = String(req.body?.file || '').trim();
+    const progressNum = Number(req.body?.progress);
+    const job = queue.get(jobId);
+    if (!job && rawUrl && jobId) {
+      queue.set(jobId, {
+        job_id: jobId, url: rawUrl, mode: 'video', engine: detectEngine(rawUrl),
+        status: 'running', progress: Number.isFinite(progressNum) ? progressNum : 2,
+        file: file || null, thumbnail: DEFAULT_YT_THUMB,
+        output_dir: file ? path.dirname(file) : null,
+        log: message ? [message] : [], created_at: new Date().toISOString(),
+      });
+    } else if (job && jobId.startsWith('cli-')) {
+      if (Number.isFinite(progressNum) && progressNum >= job.progress) job.progress = Math.min(100, progressNum);
+      if (message) job.log.push(message);
+      if (file) job.file = file;
+    }
+    res.json({ ok: true });
   });
 
   app.get('/api/log/:jobId', (req, res) => {
@@ -1922,8 +2062,8 @@ async function startServer() {
       return res.json(versionCache.data);
     }
 
-    const current = 'v2.0-v1 (v1.9.7-final_20261123)';
-    let latest = 'v1.9.7-final_20261123';
+    const current = 'v2.0-pre2';
+    let latest = 'v2.0-pre2';
     let tags: string[] = [];
     let error: string | null = null;
 
@@ -1939,7 +2079,9 @@ async function startServer() {
         .filter(Boolean) as string[];
       if (tags.length > 0) {
         const latestTag = tags[tags.length - 1];
-        if (!current.includes(latestTag)) {
+        if (tags.includes(current)) {
+          latest = current;
+        } else {
           latest = latestTag;
         }
       }
@@ -1950,7 +2092,7 @@ async function startServer() {
     const data = {
       current,
       latest,
-      update_available: Boolean(tags.length && !current.includes(latest)),
+      update_available: Boolean(tags.length && latest !== current),
       checked_at: new Date().toISOString(),
       tags: tags.slice(-6).reverse(),
       error,

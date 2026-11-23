@@ -172,7 +172,7 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.current) {
-          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-v1';
+          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre2';
           setAppVersion(shortVer);
         }
       })

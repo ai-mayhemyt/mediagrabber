@@ -1,0 +1,258 @@
+#!/bin/bash
+# =====================================================
+# MediaGrabber v2.0-pre2 – Standalone Grab Wrapper Script
+# =====================================================
+
+export HOME="${HOME:-/home/christopher}"
+export XDG_CACHE_HOME="/tmp/mediagrabber-cache"
+export PYTHONUNBUFFERED=1
+export LANG=en_US.UTF-8
+
+if [ -d "$HOME/.deno/bin" ]; then
+    export PATH="$HOME/.deno/bin:$PATH"
+fi
+
+CONFIG_DIR="$HOME/.mediagrabber"
+ARCHIVE_FILE="$CONFIG_DIR/archive.txt"
+
+YT_DIR="${GRAB_YT_DIR:-/media/YouTube}"
+MUSIC_DIR="${GRAB_MUSIC_DIR:-/opt/navidrome/music/navidrome/music}"
+GALLERY_DIR="${GRAB_GALLERY_DIR:-/media/Gallery}"
+COOKIES_YOUTUBE="${GRAB_COOKIES_YOUTUBE:-}"
+COOKIES_GALLERY="${GRAB_COOKIES_GALLERY:-}"
+
+TEMP_DIR="${GRAB_OUTPUT_DIR:-/tmp/mediagrabber/$$}"
+mkdir -p "$TEMP_DIR"
+
+URL="$1"
+CLEAN_URL="$(printf "%s" "$URL" | tr -d '\r\n\t' | sed -e 's/[[:space:]]//g' -e 's/[^[:print:]]//g')"
+
+SERVICE_URL="${MEDIAGRABBER_SERVICE_URL:-http://127.0.0.1:3000}"
+JOB_ID="${MEDIAGRABBER_JOB_ID:-cli-$(date +%s)}"
+
+notify_service() {
+    local status="$1"
+    local progress="$2"
+    local message="$3"
+    local file="$4"
+    if command -v curl >/dev/null 2>&1; then
+        curl -s -X POST "$SERVICE_URL/api/grab/notify" \
+             -H "Content-Type: application/json" \
+             -d "{\"job_id\":\"$JOB_ID\",\"status\":\"$status\",\"progress\":$progress,\"message\":\"$message\",\"file\":\"$file\",\"url\":\"$CLEAN_URL\"}" >/dev/null 2>&1 || true
+    fi
+}
+
+log() {
+    local msg="[$(date +%H:%M:%S)] $1"
+    echo "$msg"
+    notify_service "running" "2" "$1" ""
+}
+
+# ---------- Tool resolution ----------
+YT_DLP="$(command -v yt-dlp 2>/dev/null || true)"
+[ -z "$YT_DLP" ] && [ -x "$HOME/.local/bin/yt-dlp" ] && YT_DLP="$HOME/.local/bin/yt-dlp"
+[ -z "$YT_DLP" ] && YT_DLP="yt-dlp"
+
+SPOTDL="$(command -v spotdl 2>/dev/null || true)"
+[ -z "$SPOTDL" ] && [ -x "$HOME/.local/bin/spotdl" ] && SPOTDL="$HOME/.local/bin/spotdl"
+[ -z "$SPOTDL" ] && SPOTDL="spotdl"
+
+GALLERY="$(command -v gallery-dl 2>/dev/null || true)"
+[ -z "$GALLERY" ] && [ -x "$HOME/.local/bin/gallery-dl" ] && GALLERY="$HOME/.local/bin/gallery-dl"
+[ -z "$GALLERY" ] && GALLERY="gallery-dl"
+
+if command -v deno >/dev/null; then
+    DENO_PATH=$(which deno)
+else
+    DENO_PATH="/home/christopher/.deno/bin/deno"
+fi
+
+# ---------- Permissions ----------
+mkdir -p "$CONFIG_DIR" "$YT_DIR" "$MUSIC_DIR" "$GALLERY_DIR"
+touch "$ARCHIVE_FILE"
+
+# ---------- Engine detection ----------
+detect_engine() {
+    echo "$CLEAN_URL" | grep -qi "spotify.com" && echo "SPOTIFY" && return
+    echo "$CLEAN_URL" | grep -qiE "instagram\.com|tiktok\.com|twitter\.com|x\.com|reddit\.com|pinterest\.com" && echo "GALLERY" && return
+    echo "YOUTUBE"
+}
+ENGINE=$(detect_engine)
+log "🧠 Engine → $ENGINE"
+log "🔗 URL → $CLEAN_URL"
+
+# ---------- Settings ----------
+VIDEO_RES="${GRAB_VIDEO_RES:-1080}"
+AUDIO_FORMAT="${GRAB_AUDIO_FORMAT:-mp3}"
+AUDIO_BITRATE="${GRAB_AUDIO_BITRATE:-320k}"
+CONTAINER="${GRAB_CONTAINER:-mp4}"
+GENERATE_LRC="${GRAB_GENERATE_LRC:-false}"
+AUDIO_ONLY="${GRAB_AUDIO_ONLY:-false}"
+
+log "⚙️  Video max: ${VIDEO_RES}p, Audio: $AUDIO_FORMAT ($AUDIO_BITRATE), Container: $CONTAINER, Audio-Only: $AUDIO_ONLY"
+
+# ---------- SPOTIFY PIPELINE ----------
+if [ "$ENGINE" = "SPOTIFY" ]; then
+    log "🎧 Spotify → spotdl"
+    [ -z "$SPOTDL" ] && log "❌ spotdl not found" && notify_service "failed" "100" "❌ spotdl not found" "" && exit 1
+    mkdir -p "$MUSIC_DIR"
+    OUTPUT_TEMPLATE="$MUSIC_DIR/{artist}/{album}/{title}.{ext}"
+    CMD=("$SPOTDL" "$CLEAN_URL" --output "$OUTPUT_TEMPLATE" --format "$AUDIO_FORMAT" --simple-tui)
+    [ "$AUDIO_FORMAT" = "mp3" ] && CMD+=("--bitrate" "$AUDIO_BITRATE")
+    [ "$GENERATE_LRC" = "true" ] && CMD+=("--generate-lrc")
+    CMD+=("--max-retries" "5")
+    [ -n "$GRAB_EXTRA_SPOTIFY" ] && IFS=' ' read -ra EXTRA <<< "$GRAB_EXTRA_SPOTIFY" && CMD+=("${EXTRA[@]}")
+
+    log "▶️ Running: ${CMD[*]}"
+    total_tracks=0; downloaded=0
+    while IFS= read -r line; do
+        echo "$line"
+        if [[ "$line" =~ Downloading[[:space:]]+track[[:space:]]+([0-9]+)[[:space:]]+of[[:space:]]+([0-9]+) ]]; then
+            downloaded="${BASH_REMATCH[1]}"; total_tracks="${BASH_REMATCH[2]}"
+            pct=0; [ $total_tracks -gt 0 ] && pct=$((downloaded*100/total_tracks))
+            [ $total_tracks -gt 0 ] && log "PROGRESS: $downloaded/$total_tracks ($pct%)" && notify_service "running" "$pct" "Downloading track $downloaded of $total_tracks" ""
+        fi
+    done < <("${CMD[@]}" 2>&1)
+    EXIT_CODE=$?
+
+    if [ $EXIT_CODE -eq 0 ]; then
+        latest_file=$(find "$MUSIC_DIR" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" \) -mmin -2 2>/dev/null | head -1)
+        [ -n "$latest_file" ] && log "FINAL_FILE: $latest_file" && notify_service "done" "100" "Completed successfully" "$latest_file"
+    else
+        notify_service "failed" "100" "Spotify download failed" ""
+    fi
+    exit $EXIT_CODE
+fi
+
+# ---------- GALLERY PIPELINE ----------
+if [ "$ENGINE" = "GALLERY" ]; then
+    log "🖼 Gallery → gallery-dl"
+    [ -z "$GALLERY" ] && log "❌ gallery-dl not found" && notify_service "failed" "100" "❌ gallery-dl not found" "" && exit 1
+    cd "$TEMP_DIR" || exit 1
+    CMD=("$GALLERY" "$CLEAN_URL" --directory "./" --filename "%(title).100s-%(id)s.%(ext)s")
+    [ -n "$COOKIES_GALLERY" ] && [ -f "$COOKIES_GALLERY" ] && CMD+=("--cookies" "$COOKIES_GALLERY")
+    [ -n "$GRAB_EXTRA_GALLERY" ] && IFS=' ' read -ra EXTRA <<< "$GRAB_EXTRA_GALLERY" && CMD+=("${EXTRA[@]}")
+
+    log "▶️ Running: ${CMD[*]}"
+    "${CMD[@]}"
+    EXIT_CODE=$?
+
+    if [ $EXIT_CODE -eq 0 ]; then
+        latest_file=$(find . -maxdepth 1 -type f -mmin -2 2>/dev/null | head -1)
+        if [ -n "$latest_file" ]; then
+            final_dir="$GALLERY_DIR/Unsorted"
+            mkdir -p "$final_dir"
+            filename=$(basename "$latest_file")
+            if mv "$latest_file" "$final_dir/$filename"; then
+                log "FINAL_FILE: $final_dir/$filename"
+                notify_service "done" "100" "Completed successfully" "$final_dir/$filename"
+            fi
+        fi
+    else
+        notify_service "failed" "100" "Gallery download failed" ""
+    fi
+    exit $EXIT_CODE
+fi
+
+# ---------- YOUTUBE PIPELINE ----------
+log "📺 YouTube → yt-dlp"
+cd "$TEMP_DIR" || exit 1
+[ -z "$YT_DLP" ] && log "❌ yt-dlp not found" && notify_service "failed" "100" "❌ yt-dlp not found" "" && exit 1
+
+if [ "$AUDIO_ONLY" = "true" ]; then
+    USE_MUSIC_DIR=true
+    OUTPUT_BASE="$MUSIC_DIR"
+else
+    USE_MUSIC_DIR=false
+    OUTPUT_BASE="$YT_DIR"
+    CONTAINER="mp4"
+fi
+
+CMD=(
+    "$YT_DLP" --no-mtime --no-part --ignore-errors --continue --no-overwrites
+    --download-archive "$ARCHIVE_FILE"
+    --write-info-json --write-thumbnail --embed-metadata
+    --concurrent-fragments 4 --geo-bypass
+    --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    --extractor-args "youtube:skip=hls,dash"
+    --retries 10 --fragment-retries 10
+)
+
+if [ -n "$COOKIES_YOUTUBE" ] && [ -f "$COOKIES_YOUTUBE" ]; then
+    CMD+=("--cookies" "$COOKIES_YOUTUBE")
+fi
+
+if [ -x "$DENO_PATH" ]; then
+    CMD+=("--js-runtimes" "deno:$DENO_PATH" "--remote-components" "ejs:github")
+fi
+
+if [ "$AUDIO_ONLY" = "true" ]; then
+    CMD+=("--extract-audio" "--audio-format" "$AUDIO_FORMAT" "--audio-quality" "0")
+    CMD+=("-o" "./%(title).150s.%(ext)s")
+else
+    CMD+=("-f" "bv*[height<=${VIDEO_RES}]+ba/b[height<=${VIDEO_RES}]")
+    CMD+=("--merge-output-format" "mp4")
+    CMD+=("-o" "./%(title).150s.%(ext)s")
+fi
+
+[ -n "$GRAB_EXTRA_YT" ] && IFS=' ' read -ra EXTRA <<< "$GRAB_EXTRA_YT" && CMD+=("${EXTRA[@]}")
+CMD+=("$CLEAN_URL")
+
+log "▶️ Running: ${CMD[*]}"
+"${CMD[@]}"
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -eq 0 ]; then
+    log "✅ Download complete, processing..."
+    VIDEO_FILE=""
+    if [ "$AUDIO_ONLY" = "true" ]; then
+        for ext in mp3 flac m4a; do
+            found=$(find . -maxdepth 1 -name "*.$ext" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2- | sed 's/^\.\///')
+            [ -n "$found" ] && VIDEO_FILE="$found" && break
+        done
+    else
+        for ext in mp4 mkv webm; do
+            found=$(find . -maxdepth 1 -name "*.$ext" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2- | sed 's/^\.\///')
+            [ -n "$found" ] && VIDEO_FILE="$found" && break
+        done
+    fi
+
+    if [ -n "$VIDEO_FILE" ]; then
+        INFO_FILE="$(basename "$VIDEO_FILE" | sed 's/\.[^.]*$/.info.json/')"
+        if [ -f "$INFO_FILE" ]; then
+            uploader=$(jq -r '.uploader' "$INFO_FILE" 2>/dev/null)
+            upload_date=$(jq -r '.upload_date' "$INFO_FILE" 2>/dev/null)
+        else
+            uploader=""; upload_date=""
+        fi
+
+        [ -z "$uploader" ] && uploader="Unknown Uploader"
+        [ -z "$upload_date" ] && upload_date=$(date +%Y%m%d)
+        year="${upload_date:0:4}"; [ -z "$year" ] && year=$(date +%Y)
+        uploader_safe=$(echo "$uploader" | tr -cd '[:alnum:][:space:]._-' | sed 's/^[._-]*//')
+        [ -z "$uploader_safe" ] && uploader_safe="Unknown Uploader"
+
+        if [ "$USE_MUSIC_DIR" = true ]; then
+            final_dir="$MUSIC_DIR/$uploader_safe/$year"
+        else
+            final_dir="$YT_DIR/$uploader_safe/$year"
+        fi
+        mkdir -p "$final_dir"
+
+        if mv "$VIDEO_FILE" "$final_dir/"; then
+            log "FINAL_FILE: $final_dir/$VIDEO_FILE"
+            for ext in webp jpg png; do
+                thumb_file="$(basename "$VIDEO_FILE" | sed 's/\.[^.]*$/.'"$ext"'/')"
+                [ -f "$thumb_file" ] && mv "$thumb_file" "$final_dir/" && log "FINAL_THUMB: $final_dir/$thumb_file"
+            done
+            [ -f "$INFO_FILE" ] && mv "$INFO_FILE" "$final_dir/"
+            log "✅ Moved to $final_dir"
+            notify_service "done" "100" "Completed successfully" "$final_dir/$VIDEO_FILE"
+        fi
+        exit 0
+    fi
+else
+    notify_service "failed" "100" "YouTube download failed" ""
+fi
+
+exit $EXIT_CODE
