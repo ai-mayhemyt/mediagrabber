@@ -15,6 +15,7 @@ interface TopBarProps {
   onToggleTheme: () => void;
   onOpenTheme: () => void;
   onOpenQuickStart: () => void;
+  onOpenChangelog?: () => void;
   onShareQr: () => void;
   onLogout: () => void;
   onPwaInstalled?: () => void;
@@ -30,7 +31,7 @@ const VIEW_LABELS: Record<ActiveView, string> = {
 export const TopBar: React.FC<TopBarProps> = ({
   activeView,
   themeMode,
-  version = 'v2.0-pre5',
+  version = 'v2.0-pre6',
   searchQuery,
   notificationsEnabled,
   notificationsBusy = false,
@@ -39,6 +40,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onToggleTheme,
   onOpenTheme,
   onOpenQuickStart,
+  onOpenChangelog,
   onShareQr,
   onLogout,
   onPwaInstalled,
@@ -69,8 +71,12 @@ export const TopBar: React.FC<TopBarProps> = ({
         <span style={{ color: 'var(--mg-muted)' }} className="whitespace-nowrap shrink-0">
           MediaGrabber
         </span>
-        <span
-          className="font-mono text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0"
+        <button
+          type="button"
+          onClick={onOpenChangelog}
+          title={`View what's new in ${version}`}
+          aria-label={`View changelog for ${version}`}
+          className="font-mono text-[11px] px-1.5 py-0.5 rounded border whitespace-nowrap shrink-0 cursor-pointer transition-colors hover:border-[var(--mg-accent)] hover:text-[var(--mg-text)]"
           style={{
             backgroundColor: 'var(--mg-card)',
             borderColor: 'var(--mg-border)',
@@ -78,7 +84,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           }}
         >
           {version}
-        </span>
+        </button>
         <span aria-hidden="true" style={{ color: 'var(--mg-muted)' }}>
           /
         </span>

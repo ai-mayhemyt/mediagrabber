@@ -57,6 +57,7 @@ export interface MediaGrabberSettings {
   webhook_url?: string;
   stale_timeout_minutes?: number;
   quick_start_completed?: boolean;
+  update_channel?: 'stable' | 'nightly';
 }
 
 export interface StorageMount {
@@ -154,6 +155,7 @@ export interface VersionInfo {
   current: string;
   latest: string;
   channel?: 'nightly' | 'stable';
+  selected_channel?: 'nightly' | 'stable';
   is_prerelease?: boolean;
   update_available: boolean;
   release_zip_url?: string | null;

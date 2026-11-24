@@ -241,17 +241,23 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
     }
   };
 
-  const checkForVersionUpdate = async () => {
+  const [switchingChannel, setSwitchingChannel] = useState(false);
+
+  const checkForVersionUpdate = async (overrideChannel?: 'stable' | 'nightly') => {
     setCheckingVersion(true);
     try {
-      const res = await fetch('/api/version/info?force=1');
+      const ch = overrideChannel || versionInfo?.selected_channel || 'nightly';
+      const res = await fetch(`/api/version/info?force=1&channel=${encodeURIComponent(ch)}`);
       if (res.ok) {
         const info = (await res.json()) as VersionInfo;
         setVersionInfo(info);
         if (info.update_available) {
           onNotify('success', `New release ${info.latest} available on GitHub.`);
         } else {
-          onNotify('info', `Up to date (${info.current}).`);
+          onNotify(
+            'info',
+            `Up to date on ${ch === 'stable' ? 'Full Releases' : 'Nightly Pre-Releases'} (${info.current}).`
+          );
         }
       }
     } finally {
@@ -259,15 +265,45 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
     }
   };
 
+  const handleChangeReleaseChannel = async (channel: 'stable' | 'nightly') => {
+    setSwitchingChannel(true);
+    try {
+      const res = await fetch('/api/version/channel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        onNotify('error', data.error || 'Could not switch release channel.');
+        return;
+      }
+      if (data.info) setVersionInfo(data.info as VersionInfo);
+      onNotify(
+        'success',
+        `Update channel set to ${channel === 'stable' ? 'Full Releases (Stable)' : 'Nightly Pre-Releases'}.`
+      );
+    } catch {
+      onNotify('error', 'Failed to save release channel.');
+    } finally {
+      setSwitchingChannel(false);
+    }
+  };
+
   const installVersionUpdate = () => {
     const target = versionInfo?.latest || 'latest release';
+    const selectedChannel = versionInfo?.selected_channel || 'nightly';
     onConfirm(
       'Install MediaGrabber Update',
-      `Download ${target}, rebuild the server, and restart MediaGrabber?`,
+      `Download ${target} (${selectedChannel} channel), rebuild the server, and restart MediaGrabber?`,
       async () => {
         setInstallingUpdate(true);
         try {
-          const res = await fetch('/api/version/update', { method: 'POST' });
+          const res = await fetch('/api/version/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ channel: selectedChannel }),
+          });
           const data = await res.json().catch(() => ({}));
           if (!res.ok || !data.ok) {
             onNotify('error', data.error || 'Auto-update failed.');
@@ -1681,12 +1717,12 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                 <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
                   Compare running build against upstream{' '}
                   <a
-                    href="https://github.com/ai-mayhemyt/mediagrabber/tree/v2.0"
+                    href="https://github.com/ai-mayhemyt/mediagrabber/tree/2.0-app"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="underline hover:opacity-80"
                   >
-                    v2.0 branch
+                    2.0-app branch
                   </a>{' '}
                   releases on GitHub.
                 </p>
@@ -1694,7 +1730,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <a
                   href="/api/server/export-bundle?format=zip"
-                  download="mediagrabber-v2.0-pre5.zip"
+                  download="mediagrabber-v2.0-pre6.zip"
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                   style={{
                     backgroundColor: 'var(--mg-bg)',
@@ -1719,7 +1755,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                 <button
                   type="button"
                   disabled={checkingVersion}
-                  onClick={checkForVersionUpdate}
+                  onClick={() => void checkForVersionUpdate()}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0 disabled:opacity-50"
                   style={{ backgroundColor: 'var(--mg-accent)' }}
                 >
@@ -1729,14 +1765,66 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               </div>
             </div>
 
+            <div
+              className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-lg border"
+              style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+            >
+              <div>
+                <div className="text-xs font-semibold">Auto-Updater Release Channel</div>
+                <p className="text-[11px] mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+                  Choose whether the auto-installer tracks stable full releases only or includes nightly pre-releases.
+                </p>
+              </div>
+              <div
+                className="inline-flex rounded-lg border p-0.5 shrink-0"
+                style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+              >
+                <button
+                  type="button"
+                  disabled={switchingChannel}
+                  onClick={() => void handleChangeReleaseChannel('stable')}
+                  className="px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-colors"
+                  style={{
+                    backgroundColor:
+                      versionInfo?.selected_channel === 'stable' ? 'var(--mg-accent)' : 'transparent',
+                    color: versionInfo?.selected_channel === 'stable' ? '#ffffff' : 'var(--mg-muted)',
+                  }}
+                >
+                  Full Releases
+                </button>
+                <button
+                  type="button"
+                  disabled={switchingChannel}
+                  onClick={() => void handleChangeReleaseChannel('nightly')}
+                  className="px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-colors"
+                  style={{
+                    backgroundColor:
+                      (versionInfo?.selected_channel ?? 'nightly') === 'nightly'
+                        ? 'var(--mg-accent)'
+                        : 'transparent',
+                    color:
+                      (versionInfo?.selected_channel ?? 'nightly') === 'nightly'
+                        ? '#ffffff'
+                        : 'var(--mg-muted)',
+                  }}
+                >
+                  Nightly Pre-Releases
+                </button>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
-                <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Current Build ({versionInfo?.channel === 'nightly' ? 'Nightly' : 'Release'})</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre5'}</div>
+                <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+                  Current Build ({versionInfo?.channel === 'nightly' ? 'Nightly' : 'Release'})
+                </div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre6'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
-                <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Latest {versionInfo?.is_prerelease ? 'Nightly Pre-Release' : 'Release'}</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre5'}</div>
+                <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+                  Latest {(versionInfo?.selected_channel ?? 'nightly') === 'stable' ? 'Full Release' : 'Nightly Pre-Release'}
+                </div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre6'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Last Checked</div>

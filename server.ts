@@ -444,6 +444,8 @@ async function seedWorkspace() {
       webhook_url: '',
       stale_timeout_minutes: 120,
       quick_start_completed: false,
+      update_channel:
+        process.env.MEDIAGRABBER_UPDATE_CHANNEL === 'stable' ? 'stable' : 'nightly',
       ...(importedLegacy || {}),
     };
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(defaultSettings, null, 2));
@@ -2159,6 +2161,9 @@ async function startServer() {
         ? Math.max(5, Math.min(1440, Math.round(mins)))
         : 120;
     }
+    if ('update_channel' in incoming) {
+      incoming.update_channel = incoming.update_channel === 'stable' ? 'stable' : 'nightly';
+    }
 
     const updated = { ...current, ...incoming };
     writeJson(SETTINGS_FILE, updated);
@@ -3141,8 +3146,12 @@ async function startServer() {
     res.json({ deleted: id });
   });
 
-  // ---- v2.0 Version Manager (GitHub Nightly Releases + Tags) ----
-  let versionCache: { data: any; ts: number } = { data: null, ts: 0 };
+  // ---- v2.0 Version Manager (GitHub Full & Nightly Releases + Tags) ----
+  const CURRENT_APP_VERSION = 'v2.0-pre6';
+  const versionCacheByChannel: Record<'nightly' | 'stable', { data: any; ts: number }> = {
+    nightly: { data: null, ts: 0 },
+    stable: { data: null, ts: 0 },
+  };
 
   const parseVer = (raw: string): [number, number, number, number, number, number] => {
     const clean = raw.trim().replace(/^[vV]/, '');
@@ -3186,18 +3195,25 @@ async function startServer() {
     return 0;
   };
 
-  app.get('/api/version/info', async (req, res) => {
-    const force = req.query.force === '1';
+  const isNightlyReleaseTag = (tag: string, rel?: any): boolean =>
+    Boolean(rel?.prerelease || /pre|nightly|rc|alpha|beta|dev/i.test(tag));
+
+  async function resolveVersionInfo(
+    selectedChannel: 'nightly' | 'stable',
+    force = false
+  ): Promise<any> {
     const now = Date.now();
-    if (!force && versionCache.data && now - versionCache.ts < 300_000) {
-      return res.json(versionCache.data);
+    const cached = versionCacheByChannel[selectedChannel];
+    if (!force && cached.data && now - cached.ts < 300_000) {
+      return cached.data;
     }
 
-    const current = 'v2.0-pre5';
-    let latest = current;
-    let tags: string[] = [];
+    const current = CURRENT_APP_VERSION;
+    let latest = selectedChannel === 'stable' ? '' : current;
+    const candidateTags: string[] = [];
+    const allTags: string[] = [];
     let releaseZipUrl: string | null = null;
-    let isPrerelease = /pre|nightly|rc|alpha|beta/i.test(current);
+    let isPrerelease = isNightlyReleaseTag(current);
     let error: string | null = null;
 
     try {
@@ -3211,13 +3227,19 @@ async function startServer() {
       if (ghRes.ok) {
         const releases = (await ghRes.json()) as any[];
         if (Array.isArray(releases)) {
-          for (const rel of releases) {
-            if (rel?.draft) continue;
-            const tag = String(rel?.tag_name || '').trim();
-            if (tag && !tags.some((x) => x.toLowerCase() === tag.toLowerCase())) tags.push(tag);
-          }
           const published = releases.filter((r) => !r?.draft && r?.tag_name);
-          const sortedRels = [...published].sort((a, b) => {
+          for (const rel of published) {
+            const tag = String(rel.tag_name).trim();
+            if (tag && !allTags.some((x) => x.toLowerCase() === tag.toLowerCase())) {
+              allTags.push(tag);
+            }
+          }
+          const matching = published.filter((rel) =>
+            selectedChannel === 'nightly'
+              ? true
+              : !isNightlyReleaseTag(String(rel.tag_name).trim(), rel)
+          );
+          const sortedRels = [...matching].sort((a, b) => {
             const cmp = cmpVer(String(b?.tag_name || ''), String(a?.tag_name || ''));
             if (cmp !== 0) return cmp;
             return (
@@ -3228,10 +3250,8 @@ async function startServer() {
           const top = sortedRels[0];
           if (top?.tag_name) {
             const topTag = String(top.tag_name).trim();
-            if (cmpVer(topTag, current) >= 0) {
-              latest = topTag;
-              isPrerelease = Boolean(top.prerelease || /pre|nightly|rc|alpha|beta/i.test(topTag));
-            }
+            latest = topTag;
+            isPrerelease = isNightlyReleaseTag(topTag, top);
             const assets = Array.isArray(top.assets) ? top.assets : [];
             const zipAsset = assets.find((a: any) => String(a?.name || '').endsWith('.zip'));
             if (zipAsset?.browser_download_url && cmpVer(topTag, current) > 0) {
@@ -3255,61 +3275,112 @@ async function startServer() {
         .map((line) => line.split('refs/tags/')[1]?.trim())
         .filter(Boolean) as string[];
       for (const t of gitTags) {
-        if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+        if (!allTags.some((x) => x.toLowerCase() === t.toLowerCase())) allTags.push(t);
+        const matches =
+          selectedChannel === 'nightly' ? true : !isNightlyReleaseTag(t);
+        if (matches && !candidateTags.some((x) => x.toLowerCase() === t.toLowerCase())) {
+          candidateTags.push(t);
+        }
       }
-      if (tags.length > 0) {
-        tags.sort((a, b) => cmpVer(b, a));
-        const newestTag = tags[0];
-        if (cmpVer(newestTag, latest) > 0) {
+      if (candidateTags.length > 0) {
+        candidateTags.sort((a, b) => cmpVer(b, a));
+        const newestTag = candidateTags[0];
+        if (!latest || cmpVer(newestTag, latest) > 0) {
           latest = newestTag;
-          isPrerelease = /pre|nightly|rc|alpha|beta/i.test(newestTag);
+          isPrerelease = isNightlyReleaseTag(newestTag);
         }
       }
     } catch (err: any) {
-      if (tags.length === 0) {
+      if (allTags.length === 0) {
         error = err?.message || 'Unable to reach GitHub tags';
       }
     }
 
-    const updateAvailable = cmpVer(latest, current) > 0;
+    allTags.sort((a, b) => cmpVer(b, a));
+    if (!latest) {
+      latest = selectedChannel === 'stable' ? 'None published' : current;
+    }
+    const updateAvailable =
+      latest !== 'None published' && cmpVer(latest, current) > 0;
+
     const data = {
       current,
       latest,
-      channel: isPrerelease ? 'nightly' : 'stable',
+      channel: isNightlyReleaseTag(current) ? 'nightly' : 'stable',
+      selected_channel: selectedChannel,
       is_prerelease: isPrerelease,
       update_available: updateAvailable,
       release_zip_url: releaseZipUrl,
       checked_at: new Date().toISOString(),
-      tags: tags.slice(0, 8),
+      tags: (candidateTags.length > 0 ? candidateTags : allTags).slice(0, 8),
       error,
     };
 
-    if (updateAvailable && versionCache.data?.latest !== latest) {
+    if (updateAvailable && cached.data?.latest !== latest) {
       void sendPushNotification({
-        title: 'MediaGrabber Nightly Update Available',
+        title: isPrerelease
+          ? 'MediaGrabber Nightly Update Available'
+          : 'MediaGrabber Update Available',
         body: `Release ${latest} is available (currently on ${current}).`,
         tag: `version-${latest}`,
         url: '/',
       });
     }
 
-    versionCache = { data, ts: now };
+    versionCacheByChannel[selectedChannel] = { data, ts: now };
+    return data;
+  }
+
+  app.get('/api/version/info', async (req, res) => {
+    const force = req.query.force === '1';
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const reqChannel =
+      req.query.channel === 'stable' || req.query.channel === 'nightly'
+        ? req.query.channel
+        : settings?.update_channel === 'stable'
+        ? 'stable'
+        : 'nightly';
+    const data = await resolveVersionInfo(reqChannel, force);
     res.json(data);
   });
 
-  app.post('/api/version/update', async (_req, res) => {
+  app.post('/api/version/channel', async (req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const channel: 'stable' | 'nightly' =
+      req.body?.channel === 'stable' ? 'stable' : 'nightly';
+    const currentSettings = readJson<any>(SETTINGS_FILE, {});
+    writeJson(SETTINGS_FILE, { ...currentSettings, update_channel: channel });
+    versionCacheByChannel.stable = { data: null, ts: 0 };
+    versionCacheByChannel.nightly = { data: null, ts: 0 };
+    const info = await resolveVersionInfo(channel, true);
+    res.json({ ok: true, channel, info });
+  });
+
+  app.post('/api/version/update', async (req, res) => {
     const active = getActiveUser();
     if (!active || active.role !== 'admin') {
       return res.status(403).json({ error: 'Administrator privileges required.' });
     }
 
     try {
-      versionCache = { data: null, ts: 0 };
+      const settings = readJson<any>(SETTINGS_FILE, {});
+      const selectedChannel: 'stable' | 'nightly' =
+        req.body?.channel === 'stable' || req.body?.channel === 'nightly'
+          ? req.body.channel
+          : settings?.update_channel === 'stable'
+          ? 'stable'
+          : 'nightly';
+
+      versionCacheByChannel.stable = { data: null, ts: 0 };
+      versionCacheByChannel.nightly = { data: null, ts: 0 };
       const cwd = process.cwd();
-      const current = 'v2.0-pre5';
+      const current = CURRENT_APP_VERSION;
 
       let zipUrl = '';
-      let targetTag = 'v2.0-app';
+      let targetTag = selectedChannel === 'stable' ? 'latest stable' : '2.0-app';
       try {
         const ghRes = await fetch(
           'https://api.github.com/repos/ai-mayhemyt/mediagrabber/releases?per_page=30',
@@ -3322,7 +3393,12 @@ async function startServer() {
           const releases = (await ghRes.json()) as any[];
           if (Array.isArray(releases) && releases.length > 0) {
             const published = releases.filter((r) => !r?.draft && r?.tag_name);
-            const sorted = [...published].sort((a, b) =>
+            const matching = published.filter((r) =>
+              selectedChannel === 'nightly'
+                ? true
+                : !isNightlyReleaseTag(String(r.tag_name).trim(), r)
+            );
+            const sorted = [...matching].sort((a, b) =>
               cmpVer(String(b?.tag_name || ''), String(a?.tag_name || ''))
             );
             const top = sorted[0];
@@ -3353,20 +3429,40 @@ async function startServer() {
         try { fs.unlinkSync(tmpZip); } catch {}
       } else {
         await execFileAsync('git', ['fetch', '--all', '--tags'], { cwd, timeout: 20000 });
-        let branch = 'v2.0';
-        try {
-          const { stdout: bOut } = await execFileAsync(
-            'git',
-            ['rev-parse', '--abbrev-ref', 'HEAD'],
-            { cwd, timeout: 5000 }
-          );
-          const trimmed = bOut.trim();
-          if (trimmed && trimmed !== 'HEAD') branch = trimmed;
-        } catch {}
-        try {
-          await execFileAsync('git', ['pull', '--ff-only', 'origin', branch], { cwd, timeout: 20000 });
-        } catch {
-          await execFileAsync('git', ['pull', '--ff-only', 'origin', 'v2.0-app'], { cwd, timeout: 20000 });
+        if (selectedChannel === 'stable') {
+          const info = await resolveVersionInfo('stable', true);
+          if (info.update_available && info.latest && info.latest !== 'None published') {
+            targetTag = info.latest;
+            await execFileAsync('git', ['checkout', targetTag], { cwd, timeout: 20000 });
+          } else {
+            return res.status(400).json({
+              ok: false,
+              error: `No newer full release is available above ${current}.`,
+            });
+          }
+        } else {
+          let currentBranch = '';
+          try {
+            const { stdout: bOut } = await execFileAsync(
+              'git',
+              ['rev-parse', '--abbrev-ref', 'HEAD'],
+              { cwd, timeout: 5000 }
+            );
+            const trimmed = bOut.trim();
+            if (trimmed && trimmed !== 'HEAD') currentBranch = trimmed;
+          } catch {}
+          const candidates = [currentBranch, '2.0-app', 'v2.0-app', 'v2.0', 'main'].filter(Boolean);
+          let pulled = false;
+          for (const br of candidates) {
+            try {
+              await execFileAsync('git', ['pull', '--ff-only', 'origin', br], { cwd, timeout: 20000 });
+              pulled = true;
+              break;
+            } catch {}
+          }
+          if (!pulled) {
+            throw new Error('Could not pull latest commits from 2.0-app / v2.0-app.');
+          }
         }
       }
 
@@ -3379,7 +3475,7 @@ async function startServer() {
 
       res.json({
         ok: true,
-        message: `Updated to ${targetTag}. Restarting MediaGrabber service...`,
+        message: `Updated to ${targetTag} (${selectedChannel} channel). Restarting MediaGrabber service...`,
       });
       setTimeout(() => process.exit(0), 750);
     } catch (err: any) {
@@ -3392,7 +3488,7 @@ async function startServer() {
     const jobs = Array.from(queue.values());
     res.json({
       status: 'ok',
-      version: 'v2.0-pre5',
+      version: CURRENT_APP_VERSION,
       uptime_seconds: Math.round(process.uptime()),
       queue: {
         total: jobs.length,
@@ -3776,7 +3872,7 @@ async function startServer() {
 
     try {
       if (format === 'tar.gz') {
-        const outTar = '/tmp/mediagrabber-v2.0-pre5.tar.gz';
+        const outTar = `/tmp/mediagrabber-${CURRENT_APP_VERSION}.tar.gz`;
         await execFileAsync(
           'tar',
           [
@@ -3790,10 +3886,10 @@ async function startServer() {
           ],
           { cwd: process.cwd(), timeout: 15000 }
         );
-        return res.download(outTar, 'mediagrabber-v2.0-pre5.tar.gz');
+        return res.download(outTar, `mediagrabber-${CURRENT_APP_VERSION}.tar.gz`);
       }
 
-      const outZip = '/tmp/mediagrabber-v2.0-pre5.zip';
+      const outZip = `/tmp/mediagrabber-${CURRENT_APP_VERSION}.zip`;
       const pyScript = `
 import os, sys, zipfile
 out_zip = sys.argv[1]
@@ -3818,7 +3914,7 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
         timeout: 15000,
       });
       res.setHeader('Content-Type', 'application/zip');
-      return res.download(outZip, 'mediagrabber-v2.0-pre5.zip');
+      return res.download(outZip, `mediagrabber-${CURRENT_APP_VERSION}.zip`);
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to package source bundle' });
     }

@@ -33,6 +33,7 @@ import {
   ThemeModal,
   ToastContainer,
 } from './components/Modals';
+import { ChangelogModal } from './components/ChangelogModal';
 
 export default function App() {
   const [activeView, setActiveView] = useState<ActiveView>('queue');
@@ -42,7 +43,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [storage, setStorage] = useState<StorageMap>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [appVersion, setAppVersion] = useState('v2.0-pre5');
+  const [appVersion, setAppVersion] = useState('v2.0-pre6');
 
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
   const [themeColors, setThemeColors] = useState<ThemeColors>(THEME_PRESETS.default.colors);
@@ -54,6 +55,7 @@ export default function App() {
   const [accountOpen, setAccountOpen] = useState(false);
   const [accountInitialTab, setAccountInitialTab] = useState<'profile' | 'security' | 'tokens' | 'register'>('profile');
   const [quickStartOpen, setQuickStartOpen] = useState(false);
+  const [changelogOpen, setChangelogOpen] = useState(false);
   const [quickStartSettings, setQuickStartSettings] = useState<MediaGrabberSettings | null>(null);
   const [settingsRefreshKey, setSettingsRefreshKey] = useState(0);
   const [themeOpen, setThemeOpen] = useState(false);
@@ -210,7 +212,7 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.current) {
-          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre5';
+          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre6';
           setAppVersion(shortVer);
         }
         if (
@@ -509,6 +511,7 @@ export default function App() {
           onToggleTheme={handleToggleTheme}
           onOpenTheme={() => setThemeOpen(true)}
           onOpenQuickStart={() => setQuickStartOpen(true)}
+          onOpenChangelog={() => setChangelogOpen(true)}
           onShareQr={() => setQrUrl(window.location.href)}
           onLogout={handleLogout}
           onPwaInstalled={() => notify('success', 'MediaGrabber installed as an app.')}
@@ -593,6 +596,12 @@ export default function App() {
       <JobLogModal job={logJob} onClose={() => setLogJob(null)} />
       <QrModal url={qrUrl} onClose={() => setQrUrl(null)} />
       <MediaPlayerModal media={previewMedia} onClose={() => setPreviewMedia(null)} />
+      <ChangelogModal
+        open={changelogOpen}
+        currentVersion={appVersion}
+        onClose={() => setChangelogOpen(false)}
+        onOpenQuickStart={() => setQuickStartOpen(true)}
+      />
       <QuickStartModal
         open={quickStartOpen}
         user={user}

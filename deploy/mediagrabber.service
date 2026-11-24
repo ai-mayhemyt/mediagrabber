@@ -1,5 +1,5 @@
 [Unit]
-Description=MediaGrabber v2.0-v1 Console
+Description=MediaGrabber v2.0 Console
 After=network-online.target
 Wants=network-online.target
 
