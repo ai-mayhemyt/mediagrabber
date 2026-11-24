@@ -1,6 +1,10 @@
+<p align="center">
+  <img src="logo.png" alt="MediaGrabber — Jellyfin Edition" width="128" />
+</p>
+
 # MediaGrabber — Jellyfin Edition
 
-Official Jellyfin plugin that connects your Jellyfin server directly to **MediaGrabber**, letting you queue YouTube, YouTube Music, Spotify, and gallery downloads from inside Jellyfin without opening the MediaGrabber web UI.
+Official Jellyfin plugin that connects your Jellyfin server directly to **MediaGrabber**. Queue single or bulk YouTube, YouTube Music, Spotify, Instagram, and TikTok downloads, choose Video or Audio format, watch live queue progress, and cancel or retry jobs from inside Jellyfin without opening the MediaGrabber web UI.
 
 > **Required:** You must generate a MediaGrabber API key with **`download`** or **`admin`** scope (in MediaGrabber → **Account → API Tokens**) and enter it in the plugin settings before the downloader will function.
 

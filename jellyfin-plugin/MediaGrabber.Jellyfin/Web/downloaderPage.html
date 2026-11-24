@@ -9,9 +9,12 @@
     <div data-role="content">
       <div class="content-primary" style="max-width: 960px;">
         <div style="display: flex; align-items: center; justify-content: space-between; gap: 1em; flex-wrap: wrap; margin-bottom: 1em;">
-          <div>
-            <h2 style="margin: 0;">MediaGrabber Downloader</h2>
-            <p class="fieldDescription" style="margin: 0.25em 0 0;">Queue YouTube, YouTube Music, Spotify, and social media URLs directly from Jellyfin.</p>
+          <div style="display: flex; align-items: center; gap: 0.85em;">
+            <img id="mgDownloaderLogo" alt="MediaGrabber Logo" style="width: 44px; height: 44px; border-radius: 8px; object-fit: cover; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.18);" />
+            <div>
+              <h2 style="margin: 0;">MediaGrabber Downloader</h2>
+              <p class="fieldDescription" style="margin: 0.25em 0 0;">Queue YouTube, YouTube Music, Spotify, and social media URLs directly from Jellyfin.</p>
+            </div>
           </div>
           <span id="mgConnBadge" style="font-size: 0.85em; padding: 0.35em 0.7em; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);">Checking API key...</span>
         </div>
@@ -191,6 +194,8 @@
         var pageEl = document.querySelector('#MediaGrabberDownloaderPage');
         pageEl.addEventListener('pageshow', function () {
           var self = this;
+          var logo = self.querySelector('#mgDownloaderLogo');
+          if (logo) logo.src = ApiClient.getUrl('MediaGrabber/Logo');
           updateStatus(self).then(function (ready) {
             if (ready) loadQueue(self);
           });

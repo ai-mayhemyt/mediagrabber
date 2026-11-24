@@ -47,19 +47,21 @@ jobs:
       - name: Package Jellyfin Plugin Zip
         run: |
           mkdir -p artifacts
+          cp logo.png out/${{ matrix.series }}/thumb.png
           cat > out/${{ matrix.series }}/meta.json <<EOF
           {
             "guid": "c7f3a1e4-9b2d-4c6f-a810-4e92d3b17c50",
             "name": "MediaGrabber",
-            "overview": "Download YouTube, Music, Spotify & Gallery media directly from Jellyfin.",
-            "description": "Connects Jellyfin to MediaGrabber with required API key auth.",
+            "overview": "Queue YouTube, YT Music, Spotify & gallery downloads directly from Jellyfin.",
+            "description": "MediaGrabber - Jellyfin Edition connects your Jellyfin dashboard directly to MediaGrabber with required download-scoped API key authentication.",
             "owner": "ai-mayhemyt",
             "category": "General",
+            "imagePath": "thumb.png",
             "version": "${{ matrix.version }}",
             "targetAbi": "${{ matrix.abi }}"
           }
           EOF
-          (cd out/${{ matrix.series }} && zip -r ../../artifacts/mediagrabber-jellyfin-${{ matrix.series }}.zip MediaGrabber.Jellyfin.dll meta.json)
+          (cd out/${{ matrix.series }} && zip -r ../../artifacts/mediagrabber-jellyfin-${{ matrix.series }}.zip MediaGrabber.Jellyfin.dll meta.json thumb.png)
 
       - uses: actions/upload-artifact@v4
         with:

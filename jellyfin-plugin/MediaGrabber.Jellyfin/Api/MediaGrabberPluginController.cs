@@ -78,6 +78,24 @@ public class MediaGrabberPluginController : ControllerBase
     }
 
     /// <summary>
+    /// Serves the embedded MediaGrabber plugin logo image.
+    /// </summary>
+    [HttpGet("Logo")]
+    [AllowAnonymous]
+    [Produces("image/png")]
+    public IActionResult GetLogo()
+    {
+        var assembly = typeof(Plugin).Assembly;
+        var resourceName = $"{typeof(Plugin).Namespace}.Web.logo.png";
+        var stream = assembly.GetManifestResourceStream(resourceName);
+        if (stream is null)
+        {
+            return NotFound();
+        }
+        return File(stream, "image/png");
+    }
+
+    /// <summary>
     /// Verifies configured MediaGrabber URL and API key.
     /// </summary>
     [HttpGet("Status")]

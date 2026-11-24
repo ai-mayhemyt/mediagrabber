@@ -655,6 +655,7 @@ function readJson<T>(file: string, fallback: T): T {
 }
 
 function writeJson(file: string, data: unknown) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
@@ -3100,48 +3101,71 @@ async function startServer() {
     writeJson(TOKENS_FILE, []);
   }
 
+  function readTokenStore(): any[] {
+    const raw = readJson<any>(TOKENS_FILE, []);
+    return Array.isArray(raw) ? raw : [];
+  }
+
   app.get('/api/tokens', (_req, res) => {
-    const tokens = readJson<any[]>(TOKENS_FILE, []);
+    const activeUser = getActiveUser();
+    if (!activeUser || activeUser.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const tokens = readTokenStore();
+    res.setHeader('Cache-Control', 'no-store');
     res.json({
       tokens: tokens.map(({ token_hash: _h, ...rest }) => rest),
     });
   });
 
   app.post('/api/tokens', (req, res) => {
-    const name = String(req.body?.name || '').trim();
-    const scope = ['read', 'download', 'admin'].includes(req.body?.scope) ? req.body.scope : 'read';
-    if (!name) {
-      return res.status(400).json({ error: 'Token name is required.' });
+    try {
+      const activeUser = getActiveUser();
+      if (!activeUser || activeUser.role !== 'admin') {
+        return res.status(403).json({ error: 'Administrator privileges required to create API tokens.' });
+      }
+      const name = String(req.body?.name || '').trim();
+      const scope = ['read', 'download', 'admin'].includes(req.body?.scope) ? req.body.scope : 'read';
+      if (!name) {
+        return res.status(400).json({ error: 'Token name is required.' });
+      }
+      const raw = `mg_${crypto.randomBytes(16).toString('hex')}`;
+      const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+      const tokens = readTokenStore();
+      const nextId = tokens.reduce((max, t) => Math.max(max, Number(t?.id) || 0), 0) + 1;
+      const record = {
+        id: nextId,
+        name,
+        token_hash: tokenHash,
+        token_prefix: raw.slice(0, 8),
+        scope,
+        created_by: activeUser.username || 'christopher',
+        created_at: new Date().toISOString(),
+        last_used_at: null,
+        revoked: false,
+      };
+      tokens.unshift(record);
+      writeJson(TOKENS_FILE, tokens);
+      const { token_hash: _h, ...safeRecord } = record;
+      res.status(201).json({
+        id: record.id,
+        token: raw,
+        record: safeRecord,
+        warning: 'This token is shown once. Copy it now.',
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to persist API token.' });
     }
-    const raw = `mg_${crypto.randomBytes(16).toString('hex')}`;
-    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
-    const tokens = readJson<any[]>(TOKENS_FILE, []);
-    const nextId = tokens.reduce((max, t) => Math.max(max, Number(t.id) || 0), 0) + 1;
-    const activeUser = getActiveUser();
-    const record = {
-      id: nextId,
-      name,
-      token_hash: tokenHash,
-      token_prefix: raw.slice(0, 8),
-      scope,
-      created_by: activeUser?.username || 'christopher',
-      created_at: new Date().toISOString(),
-      last_used_at: null,
-      revoked: false,
-    };
-    tokens.unshift(record);
-    writeJson(TOKENS_FILE, tokens);
-    res.status(201).json({
-      id: record.id,
-      token: raw,
-      warning: 'This token is shown once. Copy it now.',
-    });
   });
 
   app.post('/api/tokens/:id/revoke', (req, res) => {
+    const activeUser = getActiveUser();
+    if (!activeUser || activeUser.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
     const id = Number(req.params.id);
-    const tokens = readJson<any[]>(TOKENS_FILE, []);
-    const found = tokens.find((t) => t.id === id);
+    const tokens = readTokenStore();
+    const found = tokens.find((t) => Number(t?.id) === id);
     if (!found) return res.status(404).json({ error: 'Token not found.' });
     found.revoked = true;
     writeJson(TOKENS_FILE, tokens);
@@ -3149,17 +3173,21 @@ async function startServer() {
   });
 
   app.delete('/api/tokens/:id', (req, res) => {
+    const activeUser = getActiveUser();
+    if (!activeUser || activeUser.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
     const id = Number(req.params.id);
-    const tokens = readJson<any[]>(TOKENS_FILE, []);
+    const tokens = readTokenStore();
     writeJson(
       TOKENS_FILE,
-      tokens.filter((t) => t.id !== id)
+      tokens.filter((t) => Number(t?.id) !== id)
     );
     res.json({ deleted: id });
   });
 
   // ---- v2.0 Version Manager (GitHub Full & Nightly Releases + Tags) ----
-  const CURRENT_APP_VERSION = 'v2.0-pre7';
+  const CURRENT_APP_VERSION = 'v2.0-pre7fix';
 
   // ---- MediaGrabber - Jellyfin Edition Plugin API Bridge ----
   const TOKEN_SCOPE_LEVEL: Record<string, number> = {

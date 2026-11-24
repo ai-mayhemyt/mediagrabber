@@ -9,12 +9,23 @@
     <div data-role="content">
       <div class="content-primary">
         <form id="MediaGrabberConfigForm">
-          <div class="sectionTitleContainer flex align-items-center">
-            <h2 class="sectionTitle">MediaGrabber — Jellyfin Edition</h2>
+          <div style="display: flex; align-items: center; gap: 1em; margin-bottom: 1em; padding: 1em; border-radius: 10px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.22);">
+            <img id="mgBrandLogo" alt="MediaGrabber Logo" style="width: 56px; height: 56px; border-radius: 10px; object-fit: cover; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.18);" />
+            <div>
+              <h2 class="sectionTitle" style="margin: 0;">MediaGrabber — Jellyfin Edition</h2>
+              <p class="fieldDescription" style="margin: 0.35em 0 0;">
+                Download YouTube, YouTube Music, Spotify, Instagram, and TikTok media straight into your MediaGrabber libraries without leaving Jellyfin. Supports single URLs, bulk playlists, audio/video modes, and live queue tracking.
+              </p>
+            </div>
           </div>
-          <p class="fieldDescription" style="margin-bottom: 1.25em;">
-            Connect Jellyfin directly to your MediaGrabber server. A MediaGrabber API key with <strong>download</strong> or <strong>admin</strong> scope (from MediaGrabber → Account → API Tokens) is required before the downloader can queue jobs.
-          </p>
+
+          <div style="margin-bottom: 1.25em; padding: 0.85em 1em; border-radius: 8px; border: 1px solid rgba(91,124,250,0.35); background: rgba(91,124,250,0.08); font-size: 0.9em;">
+            <div><strong>Required:</strong> Generate a MediaGrabber API key with <strong>download</strong> or <strong>admin</strong> scope in MediaGrabber → Account → API Tokens.</div>
+            <div style="margin-top: 0.4em; opacity: 0.85; word-break: break-all;">
+              <strong>Jellyfin Plugin Repository URL:</strong>
+              <code>https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition/releases/latest/download/manifest.json</code>
+            </div>
+          </div>
 
           <div class="inputContainer">
             <label class="inputLabel inputLabelUnfocused" for="mgServerUrl">MediaGrabber Server URL</label>
@@ -112,6 +123,8 @@
         }
 
         document.querySelector('#MediaGrabberConfigPage').addEventListener('pageshow', function () {
+          var logo = this.querySelector('#mgBrandLogo');
+          if (logo) logo.src = ApiClient.getUrl('MediaGrabber/Logo');
           loadConfig(this);
         });
 

@@ -333,16 +333,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           className="mt-1 p-4 rounded-lg border flex flex-col gap-3"
           style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
         >
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <h3 className="text-xs font-semibold" style={{ color: 'var(--mg-text)' }}>
-                MediaGrabber — Jellyfin Edition Plugin (Jellyfin 10.8 / 10.9 / 10.10 / 10.11+)
-              </h3>
-              <p className="text-[11px] mt-0.5" style={{ color: 'var(--mg-muted)' }}>
-                Queue downloads and monitor your MediaGrabber queue directly inside Jellyfin. Requires a{' '}
-                <strong style={{ color: 'var(--mg-text)' }}>download</strong> or{' '}
-                <strong style={{ color: 'var(--mg-text)' }}>admin</strong> API token from Account → API Tokens.
-              </p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-start gap-3 min-w-0 flex-1">
+              <img
+                src="/pwa-192x192.png"
+                alt="MediaGrabber — Jellyfin Edition"
+                className="w-11 h-11 rounded-lg border shrink-0 object-cover"
+                style={{ borderColor: 'var(--mg-border)' }}
+              />
+              <div className="min-w-0">
+                <h3 className="text-xs font-semibold" style={{ color: 'var(--mg-text)' }}>
+                  MediaGrabber — Jellyfin Edition Plugin (Jellyfin 10.8 / 10.9 / 10.10 / 10.11+)
+                </h3>
+                <p className="text-[11px] mt-1 leading-relaxed" style={{ color: 'var(--mg-muted)' }}>
+                  Connects your Jellyfin server to MediaGrabber so you can paste single or bulk YouTube, YouTube Music, Spotify, and social media links, pick Video or Audio format, and track queue progress directly inside Jellyfin. Requires a{' '}
+                  <strong style={{ color: 'var(--mg-text)' }}>download</strong> or{' '}
+                  <strong style={{ color: 'var(--mg-text)' }}>admin</strong> API token from Account → API Tokens.
+                </p>
+              </div>
             </div>
             <a
               href="/api/server/export-jellyfin-plugin"
@@ -355,11 +363,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </a>
           </div>
 
+          <div className="text-[11px]" style={{ color: 'var(--mg-muted)' }}>
+            Add this Plugin Repository URL in{' '}
+            <strong style={{ color: 'var(--mg-text)' }}>
+              Jellyfin → Dashboard → Plugins → Repositories → +
+            </strong>
+            :
+          </div>
+
           <div className="flex flex-col sm:flex-row sm:items-center gap-2">
             <input
               type="text"
               readOnly
               value={jellyfinRepoUrl}
+              onFocus={(e) => e.currentTarget.select()}
               aria-label="Jellyfin Plugin Repository Manifest URL"
               className={`${inputClass} font-mono text-xs flex-1`}
               style={{ ...inputStyle, backgroundColor: 'var(--mg-card)' }}
@@ -367,13 +384,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <button
               type="button"
               onClick={async () => {
+                let ok = false;
                 try {
-                  await navigator.clipboard.writeText(jellyfinRepoUrl);
+                  if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(jellyfinRepoUrl);
+                    ok = true;
+                  }
+                } catch {
+                  ok = false;
+                }
+                if (!ok) {
+                  try {
+                    const ta = document.createElement('textarea');
+                    ta.value = jellyfinRepoUrl;
+                    ta.setAttribute('readonly', '');
+                    ta.style.position = 'fixed';
+                    ta.style.left = '-9999px';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    ok = document.execCommand('copy');
+                    document.body.removeChild(ta);
+                  } catch {
+                    ok = false;
+                  }
+                }
+                if (ok) {
                   setCopiedRepoUrl(true);
                   onNotify('success', 'Copied Jellyfin Plugin Repository URL.');
                   setTimeout(() => setCopiedRepoUrl(false), 2000);
-                } catch {
-                  onNotify('error', 'Could not copy to clipboard.');
+                } else {
+                  onNotify('error', 'Select the URL field above to copy.');
                 }
               }}
               className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"

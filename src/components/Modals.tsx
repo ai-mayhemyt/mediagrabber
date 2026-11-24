@@ -77,13 +77,40 @@ export const THEME_PRESETS: Record<string, { label: string; colors: ThemeColors;
   },
 };
 
+async function copyTextSafe(text: string): Promise<boolean> {
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // fallback below
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
 export const ToastContainer: React.FC<{
   toasts: ToastMessage[];
   onDismiss: (id: string) => void;
 }> = ({ toasts, onDismiss }) => {
   if (toasts.length === 0) return null;
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+    <div className="fixed bottom-4 right-4 z-[90] flex flex-col gap-2 max-w-sm">
       {toasts.map((t) => (
         <div
           key={t.id}
@@ -410,8 +437,11 @@ export const AccountModal: React.FC<{
   // API Tokens
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [tokenName, setTokenName] = useState('');
-  const [tokenScope, setTokenScope] = useState<'read' | 'download' | 'admin'>('read');
+  const [tokenScope, setTokenScope] = useState<'read' | 'download' | 'admin'>('download');
   const [createdToken, setCreatedToken] = useState<string | null>(null);
+  const [creatingToken, setCreatingToken] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [copiedToken, setCopiedToken] = useState(false);
 
   // Self-service registration
   const [regUser, setRegUser] = useState('');
@@ -420,13 +450,21 @@ export const AccountModal: React.FC<{
 
   const loadTokens = async () => {
     try {
-      const res = await fetch('/api/tokens');
-      if (res.ok) {
-        const data = await res.json();
-        setTokens(data.tokens || []);
+      const res = await fetch('/api/tokens', { cache: 'no-store' });
+      const raw = await res.text();
+      let data: any = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = {};
+      }
+      if (res.ok && Array.isArray(data.tokens)) {
+        setTokens(data.tokens);
+      } else if (!res.ok && data?.error) {
+        setTokenError(String(data.error));
       }
     } catch {
-      // ignore
+      // ignore transient network error
     }
   };
 
@@ -442,10 +480,12 @@ export const AccountModal: React.FC<{
     setTotpSecret('');
     setTotpCode('');
     setCreatedToken(null);
+    setTokenError(null);
+    setCopiedToken(false);
     if (user.role === 'admin') {
       void loadTokens();
     }
-  }, [user, open, initialTab]);
+  }, [user?.id, open, initialTab]);
 
   if (!open || !user) return null;
 
@@ -507,33 +547,81 @@ export const AccountModal: React.FC<{
     onNotify('info', 'Two-factor authentication disabled.');
   };
 
-  const handleCreateToken = async () => {
-    if (!tokenName.trim()) return;
-    const res = await fetch('/api/tokens', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: tokenName.trim(), scope: tokenScope }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      onNotify('error', data.error || 'Could not create token');
+  const handleCreateToken = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    const cleanName = tokenName.trim();
+    if (!cleanName) {
+      const msg = 'Enter a token name first (for example: Jellyfin).';
+      setTokenError(msg);
+      onNotify('error', msg);
       return;
     }
-    setCreatedToken(data.token);
-    setTokenName('');
-    void loadTokens();
-    onNotify('success', 'API token generated.');
+    setCreatingToken(true);
+    setTokenError(null);
+    setCopiedToken(false);
+    try {
+      const res = await fetch('/api/tokens', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: cleanName, scope: tokenScope }),
+      });
+      const raw = await res.text();
+      let data: any = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        data = { error: `Server returned an unexpected response (${res.status}).` };
+      }
+      if (!res.ok || !data?.token) {
+        const errMsg = String(data?.error || `Could not create token (HTTP ${res.status}).`);
+        setTokenError(errMsg);
+        onNotify('error', errMsg);
+        return;
+      }
+      setCreatedToken(String(data.token));
+      setTokenName('');
+      if (data.record) {
+        setTokens((prev) => [data.record as ApiToken, ...prev.filter((t) => t.id !== data.record.id)]);
+      } else {
+        void loadTokens();
+      }
+      onNotify('success', 'API token generated.');
+    } catch (err: any) {
+      const errMsg = err?.message || 'Failed to contact MediaGrabber server while creating token.';
+      setTokenError(errMsg);
+      onNotify('error', errMsg);
+    } finally {
+      setCreatingToken(false);
+    }
   };
 
   const handleRevokeToken = async (id: number) => {
-    await fetch(`/api/tokens/${id}/revoke`, { method: 'POST' });
-    void loadTokens();
-    onNotify('info', 'Token revoked.');
+    try {
+      const res = await fetch(`/api/tokens/${id}/revoke`, { method: 'POST' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        onNotify('error', data.error || 'Could not revoke token.');
+        return;
+      }
+      void loadTokens();
+      onNotify('info', 'Token revoked.');
+    } catch {
+      onNotify('error', 'Failed to revoke token.');
+    }
   };
 
   const handleDeleteToken = async (id: number) => {
-    await fetch(`/api/tokens/${id}`, { method: 'DELETE' });
-    void loadTokens();
+    try {
+      const res = await fetch(`/api/tokens/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        onNotify('error', data.error || 'Could not delete token.');
+        return;
+      }
+      void loadTokens();
+    } catch {
+      onNotify('error', 'Failed to delete token.');
+    }
   };
 
   const handleRegister = async (e: React.FormEvent) => {
@@ -636,33 +724,65 @@ export const AccountModal: React.FC<{
         {tab === 'tokens' && user.role === 'admin' ? (
           <div className="flex flex-col gap-4">
             <p className="text-xs" style={{ color: 'var(--mg-muted)' }}>
-              Create scoped API tokens for external scripts, Home Assistant, or PWA shortcuts. Tokens are shown once upon creation.
+              Create scoped API tokens for Jellyfin, external scripts, or shortcuts. Select{' '}
+              <strong style={{ color: 'var(--mg-text)' }}>download</strong> (or{' '}
+              <strong style={{ color: 'var(--mg-text)' }}>admin</strong>) for MediaGrabber — Jellyfin Edition. Tokens are shown once upon creation.
             </p>
 
-            {createdToken && (
-              <div className="p-3 rounded-lg border flex items-center justify-between gap-2" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-accent)' }}>
-                <code className="text-xs font-mono break-all text-emerald-400">{createdToken}</code>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void navigator.clipboard.writeText(createdToken);
-                    onNotify('success', 'Copied API token.');
-                  }}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded border text-xs whitespace-nowrap shrink-0"
-                  style={{ borderColor: 'var(--mg-border)' }}
-                >
-                  <Copy className="w-3 h-3" />
-                  <span>Copy</span>
-                </button>
+            {tokenError && (
+              <div className="p-3 rounded-lg border text-xs text-red-300 border-red-500/60 bg-red-500/10">
+                {tokenError}
               </div>
             )}
 
-            <div className="flex flex-col sm:flex-row gap-2">
+            {createdToken && (
+              <div
+                className="p-3 rounded-lg border flex flex-col gap-2"
+                style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-accent)' }}
+              >
+                <div className="text-[11px] font-semibold text-emerald-400">
+                  API Token Created — copy it now (shown once):
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={createdToken}
+                    onFocus={(e) => e.currentTarget.select()}
+                    aria-label="Generated API token"
+                    className="flex-1 bg-transparent text-xs font-mono text-emerald-400 outline-none select-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const ok = await copyTextSafe(createdToken);
+                      if (ok) {
+                        setCopiedToken(true);
+                        onNotify('success', 'Copied API token.');
+                        setTimeout(() => setCopiedToken(false), 2000);
+                      } else {
+                        onNotify('info', 'Tap the token text above to copy manually.');
+                      }
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border text-xs whitespace-nowrap shrink-0"
+                    style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>{copiedToken ? 'Copied' : 'Copy'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <form onSubmit={(e) => void handleCreateToken(e)} className="flex flex-col sm:flex-row gap-2">
               <input
                 type="text"
                 value={tokenName}
                 onChange={(e) => setTokenName(e.target.value)}
-                placeholder="Token name (e.g. Home Assistant)"
+                placeholder="Token name (e.g. Jellyfin)"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
                 className="flex-1 px-3 py-2 rounded-lg border text-xs outline-none"
                 style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
               />
@@ -677,15 +797,15 @@ export const AccountModal: React.FC<{
                 <option value="admin">admin</option>
               </select>
               <button
-                type="button"
-                onClick={handleCreateToken}
-                className="inline-flex items-center justify-center gap-1 px-3.5 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0"
+                type="submit"
+                disabled={creatingToken}
+                className="inline-flex items-center justify-center gap-1 px-3.5 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0 disabled:opacity-50"
                 style={{ backgroundColor: 'var(--mg-accent)' }}
               >
                 <KeyRound className="w-3.5 h-3.5" />
-                <span>Create</span>
+                <span>{creatingToken ? 'Creating...' : 'Create'}</span>
               </button>
-            </div>
+            </form>
 
             <div className="divide-y rounded-lg border max-h-48 overflow-y-auto" style={{ borderColor: 'var(--mg-border)' }}>
               {tokens.length === 0 ? (
@@ -879,9 +999,9 @@ export const AccountModal: React.FC<{
                             </a>
                             <button
                               type="button"
-                              onClick={() => {
-                                void navigator.clipboard.writeText(totpUri);
-                                onNotify('success', 'Copied 2FA setup link.');
+                              onClick={async () => {
+                                const ok = await copyTextSafe(totpUri);
+                                onNotify(ok ? 'success' : 'error', ok ? 'Copied 2FA setup link.' : 'Could not copy link.');
                               }}
                               className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                               style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
@@ -901,9 +1021,9 @@ export const AccountModal: React.FC<{
                               </span>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  void navigator.clipboard.writeText(totpSecret);
-                                  onNotify('success', 'Copied 2FA secret key.');
+                                onClick={async () => {
+                                  const ok = await copyTextSafe(totpSecret);
+                                  onNotify(ok ? 'success' : 'error', ok ? 'Copied 2FA secret key.' : 'Could not copy key.');
                                 }}
                                 className="inline-flex items-center gap-1 text-[11px] font-medium hover:underline shrink-0"
                                 style={{ color: 'var(--mg-accent)' }}
@@ -2041,9 +2161,9 @@ export const QuickStartModal: React.FC<{
                             </a>
                             <button
                               type="button"
-                              onClick={() => {
-                                void navigator.clipboard.writeText(qsTotpUri);
-                                onNotify('success', 'Copied 2FA setup link.');
+                              onClick={async () => {
+                                const ok = await copyTextSafe(qsTotpUri);
+                                onNotify(ok ? 'success' : 'error', ok ? 'Copied 2FA setup link.' : 'Could not copy link.');
                               }}
                               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                               style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
@@ -2057,9 +2177,9 @@ export const QuickStartModal: React.FC<{
                               <span className="truncate">Key: {qsTotpSecret}</span>
                               <button
                                 type="button"
-                                onClick={() => {
-                                  void navigator.clipboard.writeText(qsTotpSecret);
-                                  onNotify('success', 'Copied 2FA key.');
+                                onClick={async () => {
+                                  const ok = await copyTextSafe(qsTotpSecret);
+                                  onNotify(ok ? 'success' : 'error', ok ? 'Copied 2FA key.' : 'Could not copy key.');
                                 }}
                                 className="hover:underline shrink-0"
                                 style={{ color: 'var(--mg-accent)' }}

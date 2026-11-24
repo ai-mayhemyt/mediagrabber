@@ -33,8 +33,10 @@
   <ItemGroup>
     <None Remove="Web\configPage.html" />
     <None Remove="Web\downloaderPage.html" />
+    <None Remove="Web\logo.png" />
     <EmbeddedResource Include="Web\configPage.html" />
     <EmbeddedResource Include="Web\downloaderPage.html" />
+    <EmbeddedResource Include="Web\logo.png" />
   </ItemGroup>
 
 </Project>
