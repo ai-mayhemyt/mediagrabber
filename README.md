@@ -8,9 +8,9 @@
 
 Download, transcode, deduplicate, and organize media from **YouTube**, **YouTube Music**, **Spotify**, **Instagram**, **TikTok**, and other `yt-dlp` / `gallery-dl` sources with web-based queue management, scoped API keys, Navidrome radio sync, and native Jellyfin integration across **Linux**, **Windows 11**, and **Windows 10**.
 
-![Version](https://img.shields.io/badge/Version-v2.0--pre8-5b7cfa?style=flat-square)
+![Version](https://img.shields.io/badge/Version-v2.0-5b7cfa?style=flat-square)
 ![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%2011%20%7C%20Windows%2010-10b981?style=flat-square)
-![Branch](https://img.shields.io/badge/Branch-2.0--app-6366f1?style=flat-square)
+![Branch](https://img.shields.io/badge/Branch-mediagrabber-6366f1?style=flat-square)
 
 </div>
 
@@ -18,7 +18,7 @@ Download, transcode, deduplicate, and organize media from **YouTube**, **YouTube
 
 ## Supported Platforms & OS Version Badges
 
-MediaGrabber automatically appends your host OS to the reported build version (for example `v2.0-pre8-Linux`, `v2.0-pre8-Windows11`, or `v2.0-pre8-Windows10`):
+MediaGrabber automatically appends your host OS to the reported build version (for example `v2.0-Linux`, `v2.0-Windows11`, or `v2.0-Windows10`):
 
 | Platform / Environment | Support Status | Reported Version Tag | Notes |
 | --- | --- | --- | --- |
@@ -51,7 +51,7 @@ MediaGrabber automatically appends your host OS to the reported build version (f
 ### Step 1: Clone & Run the Linux Auto-Installer
 
 ```bash
-git clone -b 2.0-app https://github.com/ai-mayhemyt/mediagrabber.git /opt/mediagrabber && \
+git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git /opt/mediagrabber && \
 cd /opt/mediagrabber && \
 sudo bash deploy/install-linux.sh
 ```
@@ -74,7 +74,7 @@ python3 -m pip install --user --upgrade yt-dlp spotdl gallery-dl
 Open **PowerShell** (as Administrator if registering a startup task) and run:
 
 ```powershell
-git clone -b 2.0-app https://github.com/ai-mayhemyt/mediagrabber.git C:\MediaGrabber
+git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git C:\MediaGrabber
 cd C:\MediaGrabber
 Set-ExecutionPolicy -Scope Process Bypass
 .\deploy\install-windows.ps1

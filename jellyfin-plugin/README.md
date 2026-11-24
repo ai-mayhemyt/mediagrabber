@@ -56,13 +56,13 @@ This plugin requires a running **[MediaGrabber](https://github.com/ai-mayhemyt/m
 1. **Install MediaGrabber**:
    - **Linux** (Ubuntu / Debian / Proxmox LXC):
      ```bash
-     git clone -b 2.0-app https://github.com/ai-mayhemyt/mediagrabber.git /opt/mediagrabber && \
+     git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git /opt/mediagrabber && \
      cd /opt/mediagrabber && \
      sudo bash deploy/install-linux.sh
      ```
    - **Windows 10 / 11** (PowerShell):
      ```powershell
-     git clone -b 2.0-app https://github.com/ai-mayhemyt/mediagrabber.git C:\MediaGrabber && cd C:\MediaGrabber && .\deploy\install-windows.ps1
+     git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git C:\MediaGrabber && cd C:\MediaGrabber && .\deploy\install-windows.ps1
      ```
    Choose **Nightly Pre-Releases** (`v2.0-pre8+`) or **Full Releases** during installation. The service runs on port **`3000`** (`http://<your-server-ip>:3000`).
 2. **Complete the First-Run Setup Wizard**:

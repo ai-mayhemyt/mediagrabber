@@ -1,7 +1,7 @@
 {
   "name": "mediagrabber",
   "private": true,
-  "version": "2.0.0-pre8",
+  "version": "2.0.0",
   "description": "Self-hosted media ingestion, download queue console, metadata editor, library deduplication, and Jellyfin companion service for Linux, Windows 11, and Windows 10.",
   "type": "module",
   "scripts": {

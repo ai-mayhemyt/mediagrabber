@@ -10,7 +10,8 @@ APP_DIR="${APP_DIR:-/opt/mediagrabber}"
 DATA_DIR="${MEDIAGRABBER_DATA_DIR:-/var/lib/mediagrabber}"
 PORT="${PORT:-3000}"
 REPO_URL="${REPO_URL:-https://github.com/ai-mayhemyt/mediagrabber.git}"
-DEFAULT_BRANCH="${DEFAULT_BRANCH:-2.0-app}"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-mediagrabber}"
+NIGHTLY_BRANCH="${NIGHTLY_BRANCH:-mediagrabber-nightly}"
 RELEASE_CHANNEL="${RELEASE_CHANNEL:-}"
 
 for arg in "$@"; do
@@ -89,12 +90,13 @@ if [ -d .git ]; then
       echo "==> No full release tag found yet; staying on current checkout."
     fi
   else
-    echo "==> Tracking nightly channel (${DEFAULT_BRANCH} / latest nightly pre-release)..."
-    git checkout "$DEFAULT_BRANCH" 2>/dev/null \
-      || git checkout "v2.0-app" 2>/dev/null \
+    echo "==> Tracking nightly channel (${NIGHTLY_BRANCH} / latest nightly pre-release)..."
+    git checkout "$NIGHTLY_BRANCH" 2>/dev/null \
+      || git checkout -b "$NIGHTLY_BRANCH" "origin/$NIGHTLY_BRANCH" 2>/dev/null \
+      || git checkout "$DEFAULT_BRANCH" 2>/dev/null \
       || true
-    git pull --ff-only origin "$DEFAULT_BRANCH" 2>/dev/null \
-      || git pull --ff-only origin "v2.0-app" 2>/dev/null \
+    git pull --ff-only origin "$NIGHTLY_BRANCH" 2>/dev/null \
+      || git pull --ff-only origin "$DEFAULT_BRANCH" 2>/dev/null \
       || true
   fi
 fi

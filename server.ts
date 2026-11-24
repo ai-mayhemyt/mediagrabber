@@ -3290,7 +3290,7 @@ async function startServer() {
   });
 
   // ---- v2.0 Version Manager (GitHub Full & Nightly Releases + Tags) ----
-  const BASE_APP_VERSION = 'v2.0-pre8';
+  const BASE_APP_VERSION = 'v2.0';
 
   function detectPlatformSuffix(): string {
     if (process.platform === 'linux') return 'Linux';
@@ -3708,7 +3708,7 @@ async function startServer() {
       const current = CURRENT_APP_VERSION;
 
       let zipUrl = '';
-      let targetTag = selectedChannel === 'stable' ? 'latest stable' : '2.0-app';
+      let targetTag = selectedChannel === 'stable' ? 'latest stable' : 'mediagrabber-nightly';
       try {
         const ghRes = await fetch(
           'https://api.github.com/repos/ai-mayhemyt/mediagrabber/releases?per_page=30',
@@ -3796,7 +3796,7 @@ async function startServer() {
             const trimmed = bOut.trim();
             if (trimmed && trimmed !== 'HEAD') currentBranch = trimmed;
           } catch {}
-          const candidates = [currentBranch, '2.0-app', 'v2.0-app', 'v2.0', 'main'].filter(Boolean);
+          const candidates = ['mediagrabber-nightly', currentBranch, 'mediagrabber', '2.0-app', 'main'].filter(Boolean);
           let pulled = false;
           for (const br of candidates) {
             try {
@@ -3806,7 +3806,7 @@ async function startServer() {
             } catch {}
           }
           if (!pulled) {
-            throw new Error('Could not pull latest commits from 2.0-app / v2.0-app.');
+            throw new Error('Could not pull latest commits from mediagrabber-nightly / mediagrabber.');
           }
         }
       }

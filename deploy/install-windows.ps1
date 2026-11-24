@@ -59,8 +59,9 @@ if (-not (Test-Path (Join-Path $ScriptRoot "package.json"))) {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     }
     if (-not (Test-Path (Join-Path $InstallDir "package.json"))) {
-        Write-Host "==> Cloning MediaGrabber (branch 2.0-app) into $InstallDir..."
-        git clone -b 2.0-app https://github.com/ai-mayhemyt/mediagrabber.git $InstallDir
+        $CloneBranch = if ($Channel -eq "nightly") { "mediagrabber-nightly" } else { "mediagrabber" }
+        Write-Host "==> Cloning MediaGrabber (branch $CloneBranch) into $InstallDir..."
+        git clone -b $CloneBranch https://github.com/ai-mayhemyt/mediagrabber.git $InstallDir
     }
 } else {
     $InstallDir = $ScriptRoot
