@@ -17,6 +17,27 @@ interface NightlyReleaseNote {
 
 const NIGHTLY_RELEASES: NightlyReleaseNote[] = [
   {
+    version: 'v2.0-pre8',
+    channel: 'Nightly Pre-Release',
+    date: '2026-11-24',
+    summary:
+      'Added full Windows 10 & Windows 11 server support (grab.ps1, PowerShell installer, batch launcher, WinGet/FFmpeg/yt-dlp PATH resolution) plus dynamic OS platform tags (-Linux, -Windows11, -Windows10) on the running version badge.',
+    items: [
+      {
+        kind: 'new',
+        text: 'Added Windows 10 & Windows 11 support: native PowerShell wrapper (grab.ps1), auto-installer (deploy/install-windows.ps1), one-click launcher (deploy/start-windows.bat), and %LOCALAPPDATA%/User media directory defaults.',
+      },
+      {
+        kind: 'new',
+        text: 'Version badge, /healthz, and /api/version/info now automatically append -Linux, -Windows11, or -Windows10 based on the host operating system.',
+      },
+      {
+        kind: 'fix',
+        text: 'Made auto-updater, zip packaging, PATH lookups, process cancellation (taskkill on Windows), and System Info cross-platform across Linux and Windows.',
+      },
+    ],
+  },
+  {
     version: 'v2.0-pre7-fix4',
     channel: 'Nightly Pre-Release',
     date: '2026-11-24',
@@ -270,8 +291,13 @@ export const ChangelogModal: React.FC<{
 
         <div className="flex flex-col gap-3">
           {NIGHTLY_RELEASES.map((release) => {
+            const normalizedCurrent = currentVersion
+              .trim()
+              .replace(/-(?:linux|windows11|windows10|windows|macos|darwin)$/i, '')
+              .toLowerCase();
             const isCurrent =
-              release.version.toLowerCase() === currentVersion.trim().toLowerCase();
+              release.version.toLowerCase() === currentVersion.trim().toLowerCase() ||
+              release.version.toLowerCase() === normalizedCurrent;
             return (
               <section
                 key={release.version}

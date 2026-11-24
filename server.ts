@@ -26,8 +26,12 @@ function resolvePort(): number {
 
 const PORT = resolvePort();
 const HOST = '0.0.0.0';
+const IS_WINDOWS = process.platform === 'win32';
+const SYSTEM_TMP_GRAB_DIR = IS_WINDOWS ? path.join(os.tmpdir(), 'mediagrabber') : '/tmp/mediagrabber';
 const WORKSPACE_ROOT = process.env.MEDIAGRABBER_DATA_DIR
   ? path.resolve(process.env.MEDIAGRABBER_DATA_DIR)
+  : IS_WINDOWS
+  ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'MediaGrabber')
   : '/tmp/mediagrabber-workspace';
 const YT_DIR = path.join(WORKSPACE_ROOT, 'YouTube');
 const MUSIC_DIR = path.join(WORKSPACE_ROOT, 'Music');
@@ -111,6 +115,18 @@ function isSafeLibraryBasePath(dirPath: unknown): string | null {
   const trimmed = dirPath.trim();
   if (!trimmed) return null;
   const resolved = path.resolve(trimmed);
+  if (IS_WINDOWS) {
+    const lower = resolved.toLowerCase();
+    const sysDrive = (process.env.SystemDrive || 'C:').toLowerCase();
+    const winDir = (process.env.SystemRoot || `${sysDrive}\\Windows`).toLowerCase();
+    const progFiles = (process.env.ProgramFiles || `${sysDrive}\\Program Files`).toLowerCase();
+    const progFiles86 = (process.env['ProgramFiles(x86)'] || `${sysDrive}\\Program Files (x86)`).toLowerCase();
+    if (/^[a-z]:\\?$/i.test(resolved)) return null;
+    for (const blocked of [winDir, progFiles, progFiles86, `${sysDrive}\\programdata`]) {
+      if (lower === blocked || lower.startsWith(blocked + '\\')) return null;
+    }
+    return resolved;
+  }
   if (BLOCKED_SYSTEM_ROOTS.has(resolved)) return null;
   for (const blocked of BLOCKED_SYSTEM_ROOTS) {
     if (blocked !== '/' && (resolved === blocked || resolved.startsWith(blocked + path.sep))) {
@@ -134,7 +150,7 @@ function getAllowedLibraryRoots(settings?: any): string[] {
   const s = settings || readJson<any>(SETTINGS_FILE, {});
   const candidates = [
     WORKSPACE_ROOT,
-    '/tmp/mediagrabber',
+    SYSTEM_TMP_GRAB_DIR,
     isSafeLibraryBasePath(s?.yt_base_path) || YT_DIR,
     isSafeLibraryBasePath(s?.music_base_path) || MUSIC_DIR,
     isSafeLibraryBasePath(s?.gallery_base_path) || GALLERY_DIR,
@@ -146,7 +162,13 @@ function safePathWithinLibraries(targetPath: string, settings?: any): string | n
   if (typeof targetPath !== 'string' || !targetPath.trim()) return null;
   const resolved = path.resolve(targetPath.trim());
   for (const root of getAllowedLibraryRoots(settings)) {
-    if (resolved === root || resolved.startsWith(root + path.sep)) {
+    if (IS_WINDOWS) {
+      const rLow = resolved.toLowerCase();
+      const rootLow = root.toLowerCase();
+      if (rLow === rootLow || rLow.startsWith(rootLow + path.sep)) {
+        return resolved;
+      }
+    } else if (resolved === root || resolved.startsWith(root + path.sep)) {
       return resolved;
     }
   }
@@ -168,9 +190,24 @@ function moveFileSafe(src: string, dest: string) {
 }
 
 function buildToolEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  if (IS_WINDOWS) {
+    const winExtras = [
+      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links') : '',
+      process.env.ProgramData ? path.join(process.env.ProgramData, 'chocolatey', 'bin') : '',
+      path.join(os.homedir(), 'scoop', 'shims'),
+      process.env.APPDATA ? path.join(process.env.APPDATA, 'Python', 'Scripts') : '',
+    ].filter(Boolean);
+    const basePath = process.env.PATH || process.env.Path || '';
+    const mergedPath = [...winExtras, basePath].filter(Boolean).join(path.delimiter);
+    return {
+      ...process.env,
+      PATH: mergedPath,
+      ...(extra || {}),
+    };
+  }
   const localBin = path.join(os.homedir(), '.local', 'bin');
   const basePath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
-  const mergedPath = [localBin, '/usr/local/bin', basePath].filter(Boolean).join(':');
+  const mergedPath = [localBin, '/usr/local/bin', basePath].filter(Boolean).join(path.delimiter);
   return {
     ...process.env,
     PATH: mergedPath,
@@ -179,30 +216,49 @@ function buildToolEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
 }
 
 function resolveExecutable(name: string, extraPaths: string[] = []): string | null {
-  const candidates = [
-    ...extraPaths,
-    path.join(os.homedir(), '.local', 'bin', name),
-    path.join('/usr/local/bin', name),
-    path.join('/usr/bin', name),
-    path.join('/bin', name),
-  ];
-  for (const c of candidates) {
+  const namesToTry = IS_WINDOWS && !/\.(exe|cmd|bat|ps1)$/i.test(name)
+    ? [`${name}.exe`, `${name}.cmd`, `${name}.bat`, name]
+    : [name];
+  const accessMode = IS_WINDOWS ? fs.constants.F_OK : fs.constants.X_OK;
+
+  for (const c of extraPaths) {
     if (!c) continue;
     try {
-      fs.accessSync(c, fs.constants.X_OK);
+      fs.accessSync(c, accessMode);
       return c;
     } catch {
       // continue
     }
   }
-  const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  for (const dir of pathDirs) {
-    const full = path.join(dir, name);
-    try {
-      fs.accessSync(full, fs.constants.X_OK);
-      return full;
-    } catch {
-      // continue
+
+  const fixedDirs = IS_WINDOWS
+    ? [
+        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links') : '',
+        process.env.ProgramData ? path.join(process.env.ProgramData, 'chocolatey', 'bin') : '',
+        path.join(os.homedir(), 'scoop', 'shims'),
+        process.env.APPDATA ? path.join(process.env.APPDATA, 'Python', 'Scripts') : '',
+        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0',
+        'C:\\Program Files\\PowerShell\\7',
+      ].filter(Boolean)
+    : [
+        path.join(os.homedir(), '.local', 'bin'),
+        '/usr/local/bin',
+        '/usr/bin',
+        '/bin',
+      ];
+
+  const envPathDirs = (process.env.PATH || process.env.Path || '').split(path.delimiter).filter(Boolean);
+  for (const dir of [...fixedDirs, ...envPathDirs]) {
+    for (const candidateName of namesToTry) {
+      const full = path.join(dir, candidateName);
+      try {
+        if (fs.existsSync(full) && !fs.statSync(full).isDirectory()) {
+          fs.accessSync(full, accessMode);
+          return full;
+        }
+      } catch {
+        // continue
+      }
     }
   }
   return null;
@@ -215,6 +271,14 @@ interface ResolvedGrabCommand {
 }
 
 function getGrabCandidatePaths(): string[] {
+  if (IS_WINDOWS) {
+    return [
+      process.env.MEDIAGRABBER_GRAB_BIN || '',
+      path.join(process.cwd(), 'grab.ps1'),
+      path.join(os.homedir(), '.mediagrabber', 'grab.ps1'),
+      'C:\\MediaGrabber\\grab.ps1',
+    ].filter(Boolean);
+  }
   return [
     process.env.MEDIAGRABBER_GRAB_BIN || '',
     '/usr/local/bin/grab',
@@ -225,6 +289,27 @@ function getGrabCandidatePaths(): string[] {
 }
 
 function resolveGrabCommand(): ResolvedGrabCommand | null {
+  if (IS_WINDOWS) {
+    const psBin = resolveExecutable('pwsh') || resolveExecutable('powershell') || 'powershell.exe';
+    for (const candidate of getGrabCandidatePaths()) {
+      if (!fs.existsSync(candidate)) continue;
+      try {
+        if (fs.statSync(candidate).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      if (/\.ps1$/i.test(candidate)) {
+        return {
+          bin: psBin,
+          prefixArgs: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', candidate],
+          scriptPath: candidate,
+        };
+      }
+      return { bin: candidate, prefixArgs: [], scriptPath: candidate };
+    }
+    return null;
+  }
+
   for (const candidate of getGrabCandidatePaths()) {
     if (!fs.existsSync(candidate)) continue;
     try {
@@ -255,39 +340,41 @@ function resolveGrabCommand(): ResolvedGrabCommand | null {
 }
 
 function ensureGrabInitialized(): string | null {
-  const localGrab = path.join(process.cwd(), 'grab');
-  if (fs.existsSync(localGrab)) {
-    try {
-      fs.chmodSync(localGrab, 0o755);
-    } catch {
-      // ignore if read-only or owned by another user
-    }
-  }
-
-  const sysGrab = '/usr/local/bin/grab';
-  if (!fs.existsSync(sysGrab) && fs.existsSync(localGrab)) {
-    try {
-      fs.copyFileSync(localGrab, sysGrab);
-      fs.chmodSync(sysGrab, 0o755);
-    } catch {
-      // non-root runtime cannot write to /usr/local/bin; localGrab remains usable
-    }
-  } else if (fs.existsSync(sysGrab)) {
-    try {
-      fs.accessSync(sysGrab, fs.constants.X_OK);
-    } catch {
+  if (!IS_WINDOWS) {
+    const localGrab = path.join(process.cwd(), 'grab');
+    if (fs.existsSync(localGrab)) {
       try {
+        fs.chmodSync(localGrab, 0o755);
+      } catch {
+        // ignore if read-only or owned by another user
+      }
+    }
+
+    const sysGrab = '/usr/local/bin/grab';
+    if (!fs.existsSync(sysGrab) && fs.existsSync(localGrab)) {
+      try {
+        fs.copyFileSync(localGrab, sysGrab);
         fs.chmodSync(sysGrab, 0o755);
       } catch {
-        // ignore if lacking permission; resolveGrabCommand falls back to bash
+        // non-root runtime cannot write to /usr/local/bin; localGrab remains usable
+      }
+    } else if (fs.existsSync(sysGrab)) {
+      try {
+        fs.accessSync(sysGrab, fs.constants.X_OK);
+      } catch {
+        try {
+          fs.chmodSync(sysGrab, 0o755);
+        } catch {
+          // ignore if lacking permission; resolveGrabCommand falls back to bash
+        }
       }
     }
   }
 
   try {
-    fs.mkdirSync('/tmp/mediagrabber', { recursive: true });
+    fs.mkdirSync(SYSTEM_TMP_GRAB_DIR, { recursive: true });
   } catch {
-    // ignore if /tmp/mediagrabber cannot be created
+    // ignore if temp grab directory cannot be created
   }
 
   const cmd = resolveGrabCommand();
@@ -419,11 +506,21 @@ async function seedWorkspace() {
       audio_bitrate: '320k',
       generate_lrc: false,
       folder_structure: 'default',
-      yt_base_path: fs.existsSync('/media') ? '/media/YouTube' : YT_DIR,
-      music_base_path: fs.existsSync('/opt/navidrome/music/navidrome/music')
+      yt_base_path: IS_WINDOWS
+        ? path.join(os.homedir(), 'Videos', 'MediaGrabber')
+        : fs.existsSync('/media')
+        ? '/media/YouTube'
+        : YT_DIR,
+      music_base_path: IS_WINDOWS
+        ? path.join(os.homedir(), 'Music', 'MediaGrabber')
+        : fs.existsSync('/opt/navidrome/music/navidrome/music')
         ? '/opt/navidrome/music/navidrome/music'
         : MUSIC_DIR,
-      gallery_base_path: fs.existsSync('/media') ? '/media/Gallery' : GALLERY_DIR,
+      gallery_base_path: IS_WINDOWS
+        ? path.join(os.homedir(), 'Pictures', 'MediaGrabber')
+        : fs.existsSync('/media')
+        ? '/media/Gallery'
+        : GALLERY_DIR,
       cookies_youtube_path: '',
       cookies_gallery_path: '',
       jellyfin_url: 'http://localhost:8096',
@@ -1324,9 +1421,9 @@ async function startServer() {
       const spotdlBin = resolveExecutable('spotdl');
       const gallerydlBin = resolveExecutable('gallery-dl');
 
-      // Use real `grab` wrapper when available on the host or workspace
+      // Use real `grab` / `grab.ps1` wrapper when available on the host or workspace
       if (grabCmd) {
-        let tempJobDir = job.output_dir || path.join('/tmp/mediagrabber', jobId);
+        let tempJobDir = job.output_dir || path.join(SYSTEM_TMP_GRAB_DIR, jobId);
         try {
           fs.mkdirSync(tempJobDir, { recursive: true });
           fs.accessSync(tempJobDir, fs.constants.W_OK);
@@ -1670,18 +1767,7 @@ async function startServer() {
 
       const proc = activeProcesses.get(job.job_id);
       if (proc) {
-        try {
-          proc.kill('SIGTERM');
-          setTimeout(() => {
-            try {
-              proc.kill('SIGKILL');
-            } catch {
-              // already exited
-            }
-          }, 3000);
-        } catch {
-          // ignore kill error
-        }
+        killChildProcessTree(proc);
         activeProcesses.delete(job.job_id);
       }
 
@@ -2024,24 +2110,32 @@ async function startServer() {
     res.json({ job_id: job.job_id, url: job.url, status: job.status, log: job.log });
   });
 
+  function killChildProcessTree(proc: ChildProcess) {
+    try {
+      if (IS_WINDOWS && proc.pid) {
+        execFile('taskkill', ['/pid', String(proc.pid), '/T', '/F'], () => {});
+        return;
+      }
+      proc.kill('SIGTERM');
+      setTimeout(() => {
+        try {
+          if (!proc.killed) proc.kill('SIGKILL');
+        } catch {
+          // ignore
+        }
+      }, 2000);
+    } catch {
+      // ignore
+    }
+  }
+
   function cancelJobById(jobId: string): { ok: true } | { ok: false; status: number; error: string } {
     const job = queue.get(jobId);
     if (!job) return { ok: false, status: 404, error: 'Job not found' };
     cancelledJobs.add(job.job_id);
     const proc = activeProcesses.get(job.job_id);
     if (proc) {
-      try {
-        proc.kill('SIGTERM');
-        setTimeout(() => {
-          try {
-            if (!proc.killed) proc.kill('SIGKILL');
-          } catch {
-            // ignore
-          }
-        }, 2000);
-      } catch {
-        // ignore
-      }
+      killChildProcessTree(proc);
     }
     if (job.status === 'queued' || job.status === 'running') {
       job.status = 'cancelled';
@@ -2924,16 +3018,25 @@ async function startServer() {
     const utilId = req.body?.id;
     if (utilId === 'sysinfo') {
       try {
-        const { stdout } = await execFileAsync('uname', ['-a']);
+        let hostLine = '';
+        if (IS_WINDOWS) {
+          hostLine = `${PLATFORM_SUFFIX} (Build ${os.release()}) ${os.arch()} on ${os.hostname()}`;
+        } else {
+          const { stdout } = await execFileAsync('uname', ['-a']);
+          hostLine = `${stdout.trim()} (${PLATFORM_SUFFIX})`;
+        }
         let ffmpegVersion = 'unavailable';
         try {
-          const ff = await execFileAsync('ffmpeg', ['-version']);
+          const ffBin = resolveExecutable('ffmpeg') || 'ffmpeg';
+          const ff = await execFileAsync(ffBin, ['-version']);
           ffmpegVersion = ff.stdout.split('\n')[0] || 'installed';
         } catch {
           // ignore
         }
+        const ytdlpFound = resolveExecutable('yt-dlp') || 'unavailable';
+        const grabFound = resolveGrabCommand()?.scriptPath || 'unavailable';
         return res.json({
-          stdout: `${stdout.trim()}\nNode.js: ${process.version}\nFFmpeg: ${ffmpegVersion}\nWorkspace: ${WORKSPACE_ROOT}`,
+          stdout: `${hostLine}\nVersion: ${CURRENT_APP_VERSION}\nNode.js: ${process.version}\nFFmpeg: ${ffmpegVersion}\nyt-dlp: ${ytdlpFound}\ngrab: ${grabFound}\nWorkspace: ${WORKSPACE_ROOT}`,
           stderr: '',
         });
       } catch (err: any) {
@@ -3187,7 +3290,24 @@ async function startServer() {
   });
 
   // ---- v2.0 Version Manager (GitHub Full & Nightly Releases + Tags) ----
-  const CURRENT_APP_VERSION = 'v2.0-pre7-fix4';
+  const BASE_APP_VERSION = 'v2.0-pre8';
+
+  function detectPlatformSuffix(): string {
+    if (process.platform === 'linux') return 'Linux';
+    if (process.platform === 'win32') {
+      const parts = os.release().split('.');
+      const major = parseInt(parts[0] || '0', 10);
+      const build = parseInt(parts[2] || '0', 10);
+      if (major >= 10 && build >= 22000) return 'Windows11';
+      if (major >= 10) return 'Windows10';
+      return 'Windows';
+    }
+    if (process.platform === 'darwin') return 'macOS';
+    return process.platform;
+  }
+
+  const PLATFORM_SUFFIX = detectPlatformSuffix();
+  const CURRENT_APP_VERSION = `${BASE_APP_VERSION}-${PLATFORM_SUFFIX}`;
 
   // ---- MediaGrabber - Jellyfin Edition Plugin API Bridge ----
   const TOKEN_SCOPE_LEVEL: Record<string, number> = {
@@ -3352,36 +3472,41 @@ async function startServer() {
     stable: { data: null, ts: 0 },
   };
 
+  const stripOsSuffix = (raw: string): string =>
+    raw.trim().replace(/-(?:linux|windows11|windows10|windows|macos|darwin)$/i, '');
+
   const parseVer = (raw: string): [number, number, number, number, number, number] => {
-    const clean = raw.trim().replace(/^[vV]/, '');
+    const clean = stripOsSuffix(raw).replace(/^[vV]/, '');
     const m = clean.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-.]?(.*))?$/);
     if (!m) return [0, 0, 0, 0, 0, 0];
     const maj = parseInt(m[1] || '0', 10);
     const min = parseInt(m[2] || '0', 10);
     const pat = parseInt(m[3] || '0', 10);
     const suffix = (m[4] || '').toLowerCase();
-    const fixRank = suffix.includes('fix') ? 1 : 0;
-    if (!suffix || suffix === 'final') return [maj, min, pat, 5, 0, fixRank];
-    if (suffix.startsWith('rc')) {
-      const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+    const fixNumMatch = suffix.match(/fix(\d*)/);
+    const fixRank = fixNumMatch ? (fixNumMatch[1] ? parseInt(fixNumMatch[1], 10) : 1) : 0;
+    const baseSuffix = suffix.replace(/-?fix\d*/g, '');
+    if (!baseSuffix || baseSuffix === 'final') return [maj, min, pat, 5, 0, fixRank];
+    if (baseSuffix.startsWith('rc')) {
+      const n = parseInt(baseSuffix.replace(/[^0-9]/g, '') || '0', 10);
       return [maj, min, pat, 4, n, fixRank];
     }
     if (
-      suffix.startsWith('pre') ||
-      suffix.includes('nightly') ||
-      suffix.startsWith('beta') ||
-      suffix.startsWith('alpha') ||
-      suffix.startsWith('dev')
+      baseSuffix.startsWith('pre') ||
+      baseSuffix.includes('nightly') ||
+      baseSuffix.startsWith('beta') ||
+      baseSuffix.startsWith('alpha') ||
+      baseSuffix.startsWith('dev')
     ) {
-      const nums = suffix.match(/\d+/g);
+      const nums = baseSuffix.match(/\d+/g);
       const n = nums ? parseInt(nums.join(''), 10) : 0;
       return [maj, min, pat, 3, n, fixRank];
     }
-    if (suffix.startsWith('v')) {
-      const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+    if (baseSuffix.startsWith('v')) {
+      const n = parseInt(baseSuffix.replace(/[^0-9]/g, '') || '0', 10);
       return [maj, min, pat, 1, n, fixRank];
     }
-    const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+    const n = parseInt(baseSuffix.replace(/[^0-9]/g, '') || '0', 10);
     return [maj, min, pat, 2, n, fixRank];
   };
 
@@ -3395,7 +3520,7 @@ async function startServer() {
   };
 
   const isNightlyReleaseTag = (tag: string, rel?: any): boolean =>
-    Boolean(rel?.prerelease || /pre|nightly|rc|alpha|beta|dev/i.test(tag));
+    Boolean(rel?.prerelease || /pre|nightly|rc|alpha|beta|dev/i.test(stripOsSuffix(tag)));
 
   async function resolveVersionInfo(
     selectedChannel: 'nightly' | 'stable',
@@ -3504,6 +3629,10 @@ async function startServer() {
 
     const data = {
       current,
+      base_version: BASE_APP_VERSION,
+      platform: PLATFORM_SUFFIX,
+      os_release: os.release(),
+      os_arch: os.arch(),
       latest,
       channel: isNightlyReleaseTag(current) ? 'nightly' : 'stable',
       selected_channel: selectedChannel,
@@ -3618,13 +3747,30 @@ async function startServer() {
       }
 
       if (zipUrl) {
-        const tmpZip = '/tmp/mediagrabber-auto-update.zip';
-        await execFileAsync('curl', ['-fL', zipUrl, '-o', tmpZip], { timeout: 60000 });
-        await execFileAsync(
-          'python3',
-          ['-c', 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])', tmpZip, cwd],
-          { timeout: 30000 }
-        );
+        const tmpZip = path.join(os.tmpdir(), 'mediagrabber-auto-update.zip');
+        const dlRes = await fetch(zipUrl, {
+          headers: { 'User-Agent': 'MediaGrabber' },
+          signal: AbortSignal.timeout(60000),
+        });
+        if (!dlRes.ok) {
+          throw new Error(`Failed to download update archive (${dlRes.status})`);
+        }
+        const dlBuf = Buffer.from(await dlRes.arrayBuffer());
+        fs.writeFileSync(tmpZip, dlBuf);
+        if (IS_WINDOWS) {
+          const psBin = resolveExecutable('pwsh') || resolveExecutable('powershell') || 'powershell.exe';
+          await execFileAsync(
+            psBin,
+            ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${tmpZip.replace(/'/g, "''")}' -DestinationPath '${cwd.replace(/'/g, "''")}' -Force`],
+            { timeout: 60000 }
+          );
+        } else {
+          await execFileAsync(
+            'python3',
+            ['-c', 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])', tmpZip, cwd],
+            { timeout: 30000 }
+          );
+        }
         try { fs.unlinkSync(tmpZip); } catch {}
       } else {
         await execFileAsync('git', ['fetch', '--all', '--tags'], { cwd, timeout: 20000 });
@@ -3665,12 +3811,13 @@ async function startServer() {
         }
       }
 
+      const npmBin = IS_WINDOWS ? 'npm.cmd' : 'npm';
       await execFileAsync(
-        'npm',
+        npmBin,
         ['install', '--no-package-lock', '--legacy-peer-deps'],
-        { cwd, timeout: 120000 }
+        { cwd, timeout: 120000, shell: IS_WINDOWS }
       );
-      await execFileAsync('npm', ['run', 'build'], { cwd, timeout: 120000 });
+      await execFileAsync(npmBin, ['run', 'build'], { cwd, timeout: 120000, shell: IS_WINDOWS });
 
       res.json({
         ok: true,
@@ -4069,11 +4216,12 @@ async function startServer() {
       'deploy',
       'jellyfin-plugin',
       'grab',
+      'grab.ps1',
     ].filter((item) => fs.existsSync(path.join(process.cwd(), item)));
 
     try {
       if (format === 'tar.gz') {
-        const outTar = `/tmp/mediagrabber-${CURRENT_APP_VERSION}.tar.gz`;
+        const outTar = path.join(os.tmpdir(), `mediagrabber-${BASE_APP_VERSION}.tar.gz`);
         await execFileAsync(
           'tar',
           [
@@ -4088,11 +4236,13 @@ async function startServer() {
           ],
           { cwd: process.cwd(), timeout: 15000 }
         );
-        return res.download(outTar, `mediagrabber-${CURRENT_APP_VERSION}.tar.gz`);
+        return res.download(outTar, `mediagrabber-${BASE_APP_VERSION}.tar.gz`);
       }
 
-      const outZip = `/tmp/mediagrabber-${CURRENT_APP_VERSION}.zip`;
-      const pyScript = `
+      const outZip = path.join(os.tmpdir(), `mediagrabber-${BASE_APP_VERSION}.zip`);
+      const pyBin = resolveExecutable('python3') || resolveExecutable('python');
+      if (pyBin) {
+        const pyScript = `
 import os, sys, zipfile
 out_zip = sys.argv[1]
 items = sys.argv[2:]
@@ -4111,12 +4261,23 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
                     fp = os.path.join(root, f)
                     zf.write(fp, fp)
 `;
-      await execFileAsync('python3', ['-c', pyScript, outZip, ...allowlist], {
-        cwd: process.cwd(),
-        timeout: 15000,
-      });
+        await execFileAsync(pyBin, ['-c', pyScript, outZip, ...allowlist], {
+          cwd: process.cwd(),
+          timeout: 15000,
+        });
+      } else if (IS_WINDOWS) {
+        const psBin = resolveExecutable('pwsh') || resolveExecutable('powershell') || 'powershell.exe';
+        const quotedItems = allowlist.map((i) => `'${i.replace(/'/g, "''")}'`).join(',');
+        await execFileAsync(
+          psBin,
+          ['-NoProfile', '-Command', `Compress-Archive -Path ${quotedItems} -DestinationPath '${outZip.replace(/'/g, "''")}' -Force`],
+          { cwd: process.cwd(), timeout: 30000 }
+        );
+      } else {
+        throw new Error('python3 is required to package zip archive on this host.');
+      }
       res.setHeader('Content-Type', 'application/zip');
-      return res.download(outZip, `mediagrabber-${CURRENT_APP_VERSION}.zip`);
+      return res.download(outZip, `mediagrabber-${BASE_APP_VERSION}.zip`);
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to package source bundle' });
     }
@@ -4132,8 +4293,10 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
       return res.status(404).json({ error: 'Jellyfin plugin directory not found.' });
     }
     try {
-      const outZip = '/tmp/MediaGrabber-Jellyfin-Edition.zip';
-      const pyScript = `
+      const outZip = path.join(os.tmpdir(), 'MediaGrabber-Jellyfin-Edition.zip');
+      const pyBin = resolveExecutable('python3') || resolveExecutable('python');
+      if (pyBin) {
+        const pyScript = `
 import os, sys, zipfile
 out_zip = sys.argv[1]
 src_dir = sys.argv[2]
@@ -4148,10 +4311,20 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
             arcname = os.path.relpath(fp, src_dir)
             zf.write(fp, arcname)
 `;
-      await execFileAsync('python3', ['-c', pyScript, outZip, pluginDir], {
-        cwd: process.cwd(),
-        timeout: 15000,
-      });
+        await execFileAsync(pyBin, ['-c', pyScript, outZip, pluginDir], {
+          cwd: process.cwd(),
+          timeout: 15000,
+        });
+      } else if (IS_WINDOWS) {
+        const psBin = resolveExecutable('pwsh') || resolveExecutable('powershell') || 'powershell.exe';
+        await execFileAsync(
+          psBin,
+          ['-NoProfile', '-Command', `Compress-Archive -Path '${pluginDir.replace(/'/g, "''")}\\*' -DestinationPath '${outZip.replace(/'/g, "''")}' -Force`],
+          { cwd: process.cwd(), timeout: 30000 }
+        );
+      } else {
+        throw new Error('python3 is required to package Jellyfin plugin archive.');
+      }
       res.setHeader('Content-Type', 'application/zip');
       return res.download(outZip, 'MediaGrabber-Jellyfin-Edition.zip');
     } catch (err: any) {

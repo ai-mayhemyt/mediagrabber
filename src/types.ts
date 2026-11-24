@@ -153,6 +153,10 @@ export interface ApiToken {
 
 export interface VersionInfo {
   current: string;
+  base_version?: string;
+  platform?: string;
+  os_release?: string;
+  os_arch?: string;
   latest: string;
   channel?: 'nightly' | 'stable';
   selected_channel?: 'nightly' | 'stable';

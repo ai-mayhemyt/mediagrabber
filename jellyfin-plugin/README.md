@@ -51,15 +51,20 @@ https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition/releases/latest/dow
 
 ## Step 1: Set Up the Original MediaGrabber Server (Prerequisite)
 
-This plugin requires a running **[MediaGrabber](https://github.com/ai-mayhemyt/mediagrabber)** server (`v2.0-pre7-fix4` or newer) on your host or LAN:
+This plugin requires a running **[MediaGrabber](https://github.com/ai-mayhemyt/mediagrabber)** server (`v2.0-pre8` or newer, on **Linux**, **Windows 11**, or **Windows 10**):
 
-1. **Install MediaGrabber on Linux** (Ubuntu / Debian / Proxmox LXC):
-   ```bash
-   git clone -b 2.0-app https://github.com/ai-mayhemyt/mediagrabber.git /opt/mediagrabber && \
-   cd /opt/mediagrabber && \
-   sudo bash deploy/install-linux.sh
-   ```
-   Choose **Nightly Pre-Releases** (`v2.0-pre7-fix4+`) or **Full Releases** during installation. The service runs on port **`3000`** (`http://<your-server-ip>:3000`).
+1. **Install MediaGrabber**:
+   - **Linux** (Ubuntu / Debian / Proxmox LXC):
+     ```bash
+     git clone -b 2.0-app https://github.com/ai-mayhemyt/mediagrabber.git /opt/mediagrabber && \
+     cd /opt/mediagrabber && \
+     sudo bash deploy/install-linux.sh
+     ```
+   - **Windows 10 / 11** (PowerShell):
+     ```powershell
+     git clone -b 2.0-app https://github.com/ai-mayhemyt/mediagrabber.git C:\MediaGrabber && cd C:\MediaGrabber && .\deploy\install-windows.ps1
+     ```
+   Choose **Nightly Pre-Releases** (`v2.0-pre8+`) or **Full Releases** during installation. The service runs on port **`3000`** (`http://<your-server-ip>:3000`).
 2. **Complete the First-Run Setup Wizard**:
    - Open `http://<your-server-ip>:3000` in your browser and follow the 5-step Setup Wizard to create your Admin account (without affecting existing accounts), set your media library folders (e.g., `/media/YouTube`, `/media/Music`), and optionally link Jellyfin library refresh.
 3. **Generate a MediaGrabber API Key**:

@@ -51,7 +51,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectView,
   user,
   storage,
-  version = 'v2.0-pre7-fix4',
+  version = 'v2.0-pre8',
   onOpenAccount,
   onOpenTheme,
   onLogout,

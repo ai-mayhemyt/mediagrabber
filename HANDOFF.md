@@ -1,36 +1,28 @@
-# MediaGrabber `v2.0-pre7-fix4` (Nightly Pre-Release) — Release Handoff
+# MediaGrabber `v2.0-pre8` (Nightly Pre-Release) — Release Handoff
 
 ## Summary
-`v2.0-pre7-fix4` is a nightly hotfix pre-release on the `2.0-app` branch replacing the remaining AI Studio README template with full MediaGrabber documentation (high-res Web UI logo, Linux platforms, dependencies, and `grab` wrapper setup), updating systemd & package service descriptions, fixing API Token creation and plain-HTTP clipboard copying (iPad/LAN Safari), and adding inline API key & server setup directly on the Jellyfin Downloader page.
+`v2.0-pre8` is a nightly feature pre-release on the `2.0-app` branch adding **full Windows 10 & Windows 11 support** alongside Linux, plus **dynamic OS platform tags** appended to the version string (`v2.0-pre8-Linux`, `v2.0-pre8-Windows11`, `v2.0-pre8-Windows10`).
 
 ---
 
-## What Changed in `v2.0-pre7-fix4`
+## What Changed in `v2.0-pre8`
 
-### 1. API Token Generation & HTTP Clipboard Fixes (`Modals.tsx` + `server.ts`)
-- Fixed `AccountModal → API Tokens` form submission, inline error alerts, `cache: 'no-store'` reads, immediate list updates from `POST /api/tokens`, and `writeJson` parent directory safety (`mkdirSync` + array validation).
-- Prevented background user object refreshes from clearing freshly generated `mg_...` tokens before copying.
-- Added a `document.execCommand('copy')` fallback alongside `navigator.clipboard` plus `z-[90]` toast layering so copying tokens, 2FA keys, and the Jellyfin repo URL works on LAN/Tailscale HTTP origins (such as `http://100.88.171.48:3000`).
+### 1. Windows 10 & Windows 11 Support
+- Added [`grab.ps1`](./grab.ps1): native PowerShell download wrapper mirroring Linux [`grab`](./grab) for YouTube, YouTube Music, Spotify, and Gallery pipelines with `.info.json` routing, thumbnails, and archive tracking.
+- Added [`deploy/install-windows.ps1`](./deploy/install-windows.ps1) and [`deploy/start-windows.bat`](./deploy/start-windows.bat) with automatic Windows 10 vs Windows 11 detection, `winget` dependency checks, and optional startup Scheduled Task registration.
+- Updated `server.ts` across PATH resolution (`path.delimiter` + `.exe`/`.cmd`/`.bat` + WinGet/Chocolatey/Scoop/Python paths), `%LOCALAPPDATA%\MediaGrabber` state directory, `Videos`/`Music`/`Pictures` library defaults, case-insensitive path safety checks, `taskkill` job cancellation, PowerShell zip extract/compress fallbacks, and cross-platform System Info.
 
-### 2. MediaGrabber — Jellyfin Edition Branding & Inline Setup (`jellyfin-plugin/`)
-- Added `logo.png` (`manifest.json` `"imageUrl"`, CI release zip `thumb.png` + `"imagePath": "thumb.png"`, and embedded `Web/logo.png` served at `GET /MediaGrabber/Logo`).
-- Added an inline Server URL & API Key configuration drawer directly inside `downloaderPage.html` (auto-expands when the API key is missing/invalid, with Test Connection and Save Settings actions) so users don't get stuck on the Jellyfin Downloader page.
-- Added full plugin descriptions and the copyable Jellyfin Plugin Repository URL across `manifest.json`, `build.yaml`, `README.md`, Jellyfin `configPage.html` / `downloaderPage.html`, and MediaGrabber **Settings → Media Server Integrations**.
-- Supports Jellyfin **`10.8.x` (`net6.0`)**, **`10.9.x` (`net8.0`)**, **`10.10.x` (`net8.0`)**, and **`10.11+` (`net9.0`)** with mandatory `download`/`admin` API key enforcement via `/api/jellyfin/*`.
-
-### 3. Carried-Forward `v2.0-pre6` & `v2.0-pre5` Nightly Features
-- **Interactive TopBar Changelog (`ChangelogModal.tsx`)**: Clicking the version badge in the TopBar opens recent nightly builds with `NEW`, `FIX`, and `SEC` badges and Setup Wizard shortcut.
-- **Full Releases vs Nightly Pre-Releases Selector**: Toggle update channels in `Utilities → Server Manager` or during Linux auto-install (`deploy/install-linux.sh --stable | --nightly`).
-- **Jellyfin-Style 5-Step Setup Wizard** (`QuickStartModal`) with non-destructive admin creation (`POST /api/quickstart/admin`) preserving existing `users.json` accounts.
-- **Direct 2FA Authenticator Link (`otpauth://`) + Copy Key** alongside 2FA QR codes.
-- **Outgoing Webhooks** (Discord, Slack, JSON/ntfy/Shortcuts) + SSRF validation + Test button.
-- **Stale Download Auto-Cleanup** (`stale_timeout_minutes` + 60s janitor + manual trigger).
-- **In-Browser Media Player** (`206 Partial Content` HTTP range streaming for iOS/iPad & desktop).
-- **Library & Download Stats** (`Utilities → Stats`).
+### 2. Dynamic OS Tag in Version Number
+- `CURRENT_APP_VERSION` now automatically resolves to:
+  - `v2.0-pre8-Linux` on Linux hosts
+  - `v2.0-pre8-Windows11` on Windows 11 (`Build >= 22000`)
+  - `v2.0-pre8-Windows10` on Windows 10 (`Build < 22000`)
+- Updated `parseVer` & `isNightlyReleaseTag` in `server.ts` and `ChangelogModal.tsx` to normalize trailing OS tags when comparing upstream GitHub tags (`v2.0-pre8`, `v2.0-pre9`, etc.).
+- Displayed in the **TopBar**, **Sidebar**, **`/healthz`**, **`/api/version/info`**, and **Utilities → Server Manager**.
 
 ---
 
 ## GitHub Repository & Release Alignment Notes
 - Default branch target: **`2.0-app`**
-- All `v2.0-pre*` releases (`v2.0-pre2`, `V2.0-pre3`, `v2.0-pre3fix`, `v2.0-pre4`, `v2.0-pre5`, `v2.0-pre6`, `v2.0-pre7`, `v2.0-pre7-fix4`) should be marked as GitHub **Pre-releases** (`--prerelease`) so stable channel users only see full releases while nightly channel users receive all pre-releases and `2.0-app` updates.
+- All `v2.0-pre*` releases (`v2.0-pre2`, `V2.0-pre3`, `v2.0-pre3fix`, `v2.0-pre4`, `v2.0-pre5`, `v2.0-pre6`, `v2.0-pre7`, `v2.0-pre7-fix4`, `v2.0-pre8`) should be marked as GitHub **Pre-releases** (`--prerelease`) so stable channel users only see full releases while nightly channel users receive all pre-releases and `2.0-app` updates.
 - Companion Jellyfin Plugin repository: **`https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition`** (root contents live inside `jellyfin-plugin/`).
