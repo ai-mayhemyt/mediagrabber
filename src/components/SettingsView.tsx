@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Save, RefreshCw, BellRing, BellOff, Smartphone, Send } from 'lucide-react';
+import { Save, RefreshCw, BellRing, BellOff, Smartphone, Send, Download, Copy, Check } from 'lucide-react';
 import { MediaGrabberSettings } from '../types';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
@@ -30,6 +30,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [saving, setSaving] = useState(false);
   const [scanningJellyfin, setScanningJellyfin] = useState(false);
   const [testingWebhook, setTestingWebhook] = useState(false);
+  const [copiedRepoUrl, setCopiedRepoUrl] = useState(false);
+
+  const jellyfinRepoUrl =
+    'https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition/releases/latest/download/manifest.json';
 
   useEffect(() => {
     fetch('/api/settings')
@@ -323,6 +327,62 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               style={inputStyle}
             />
           </label>
+        </div>
+
+        <div
+          className="mt-1 p-4 rounded-lg border flex flex-col gap-3"
+          style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h3 className="text-xs font-semibold" style={{ color: 'var(--mg-text)' }}>
+                MediaGrabber — Jellyfin Edition Plugin (Jellyfin 10.8 / 10.9 / 10.10 / 10.11+)
+              </h3>
+              <p className="text-[11px] mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+                Queue downloads and monitor your MediaGrabber queue directly inside Jellyfin. Requires a{' '}
+                <strong style={{ color: 'var(--mg-text)' }}>download</strong> or{' '}
+                <strong style={{ color: 'var(--mg-text)' }}>admin</strong> API token from Account → API Tokens.
+              </p>
+            </div>
+            <a
+              href="/api/server/export-jellyfin-plugin"
+              download="MediaGrabber-Jellyfin-Edition.zip"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0"
+              style={{ backgroundColor: 'var(--mg-accent)' }}
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download Plugin Repo (.zip)</span>
+            </a>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+            <input
+              type="text"
+              readOnly
+              value={jellyfinRepoUrl}
+              aria-label="Jellyfin Plugin Repository Manifest URL"
+              className={`${inputClass} font-mono text-xs flex-1`}
+              style={{ ...inputStyle, backgroundColor: 'var(--mg-card)' }}
+            />
+            <button
+              type="button"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(jellyfinRepoUrl);
+                  setCopiedRepoUrl(true);
+                  onNotify('success', 'Copied Jellyfin Plugin Repository URL.');
+                  setTimeout(() => setCopiedRepoUrl(false), 2000);
+                } catch {
+                  onNotify('error', 'Could not copy to clipboard.');
+                }
+              }}
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
+              style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+            >
+              {copiedRepoUrl ? <Check className="w-3.5 h-3.5 text-emerald-500" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copiedRepoUrl ? 'Copied' : 'Copy Repo URL'}</span>
+            </button>
+          </div>
         </div>
       </section>
 

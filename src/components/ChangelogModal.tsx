@@ -17,6 +17,27 @@ interface NightlyReleaseNote {
 
 const NIGHTLY_RELEASES: NightlyReleaseNote[] = [
   {
+    version: 'v2.0-pre7',
+    channel: 'Nightly Pre-Release',
+    date: '2026-11-24',
+    summary:
+      'MediaGrabber - Jellyfin Edition companion plugin (Jellyfin 10.8–10.11+), API key-gated Jellyfin downloader bridge, and Settings/Utilities plugin repository export.',
+    items: [
+      {
+        kind: 'new',
+        text: 'Added MediaGrabber - Jellyfin Edition plugin repository (jellyfin-plugin/) supporting Jellyfin 10.8, 10.9, 10.10, and 10.11+ with CI workflow and manifest.json.',
+      },
+      {
+        kind: 'security',
+        text: 'Added API key-authenticated Jellyfin bridge (/api/jellyfin/verify, /grab, /queue, /cancel, /retry) requiring a valid download/admin MediaGrabber API key.',
+      },
+      {
+        kind: 'new',
+        text: 'Added Jellyfin Plugin (.zip) export & repository URL copy card in Settings → Media Server Integrations and Utilities → Server Manager.',
+      },
+    ],
+  },
+  {
     version: 'v2.0-pre6',
     channel: 'Nightly Pre-Release',
     date: '2026-11-24',

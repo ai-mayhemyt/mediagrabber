@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MediaGrabber Downloader</title>
+</head>
+<body>
+  <div id="MediaGrabberDownloaderPage" data-role="page" class="page type-interior" data-require="emby-input,emby-button,emby-select">
+    <div data-role="content">
+      <div class="content-primary" style="max-width: 960px;">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 1em; flex-wrap: wrap; margin-bottom: 1em;">
+          <div>
+            <h2 style="margin: 0;">MediaGrabber Downloader</h2>
+            <p class="fieldDescription" style="margin: 0.25em 0 0;">Queue YouTube, YouTube Music, Spotify, and social media URLs directly from Jellyfin.</p>
+          </div>
+          <span id="mgConnBadge" style="font-size: 0.85em; padding: 0.35em 0.7em; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);">Checking API key...</span>
+        </div>
+
+        <div id="mgKeyWarning" style="display: none; padding: 0.9em 1em; border-radius: 8px; border: 1px solid #ef4444; background: rgba(239,68,68,0.12); margin-bottom: 1.25em;">
+          <strong>MediaGrabber API Key Required:</strong>
+          <span id="mgKeyWarningText">Configure your MediaGrabber Server URL and download-scoped API key in Dashboard → Plugins → MediaGrabber before queueing downloads.</span>
+        </div>
+
+        <form id="mgGrabForm" style="display: flex; flex-direction: column; gap: 0.85em; margin-bottom: 1.5em;">
+          <label for="mgUrlsInput" style="font-weight: 600; font-size: 0.95em;">Media URL(s) — one per line for playlists/bulk queues</label>
+          <textarea id="mgUrlsInput" rows="4" placeholder="https://www.youtube.com/watch?v=...&#10;https://open.spotify.com/track/..." style="width: 100%; padding: 0.75em; border-radius: 8px; background: rgba(0,0,0,0.28); color: inherit; border: 1px solid rgba(255,255,255,0.18); font-family: monospace;"></textarea>
+          <div style="display: flex; gap: 0.75em; align-items: center; flex-wrap: wrap;">
+            <select id="mgModeSelect" is="emby-select" style="max-width: 220px;">
+              <option value="video">Video (MP4/MKV)</option>
+              <option value="audio">Audio Only (MP3/FLAC)</option>
+            </select>
+            <button id="mgSubmitGrab" type="submit" is="emby-button" class="raised button-submit">
+              <span>Add to MediaGrabber Queue</span>
+            </button>
+            <button id="mgRefreshQueueBtn" type="button" is="emby-button" class="raised">
+              <span>Refresh Queue</span>
+            </button>
+            <span id="mgSubmitMsg" style="font-size: 0.9em;"></span>
+          </div>
+        </form>
+
+        <div>
+          <h3 style="margin-bottom: 0.6em;">Active &amp; Recent Downloads</h3>
+          <div id="mgQueueList" style="display: flex; flex-direction: column; gap: 0.6em;"></div>
+        </div>
+      </div>
+    </div>
+
+    <script type="text/javascript">
+      (function () {
+        var pollHandle = null;
+        var canDownload = false;
+
+        function headers() {
+          return {
+            'Content-Type': 'application/json',
+            'X-Emby-Token': ApiClient.accessToken()
+          };
+        }
+
+        function updateStatus(page) {
+          return fetch(ApiClient.getUrl('MediaGrabber/Status'), { headers: headers() })
+            .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+            .then(function (res) {
+              var badge = page.querySelector('#mgConnBadge');
+              var warn = page.querySelector('#mgKeyWarning');
+              var warnText = page.querySelector('#mgKeyWarningText');
+              var btn = page.querySelector('#mgSubmitGrab');
+
+              if (!res.ok || !res.data.ok || !res.data.can_download) {
+                canDownload = false;
+                btn.disabled = true;
+                badge.textContent = 'API Key Required';
+                badge.style.borderColor = '#ef4444';
+                badge.style.color = '#f87171';
+                warn.style.display = 'block';
+                warnText.textContent = res.data.error || 'A MediaGrabber API key with download or admin scope is required in Dashboard → Plugins → MediaGrabber.';
+                return false;
+              }
+
+              canDownload = true;
+              btn.disabled = false;
+              badge.textContent = 'Connected · ' + (res.data.version || 'MediaGrabber') + ' (' + (res.data.scope || 'download') + ')';
+              badge.style.borderColor = '#10b981';
+              badge.style.color = '#34d399';
+              warn.style.display = 'none';
+              return true;
+            })
+            .catch(function () {
+              canDownload = false;
+              page.querySelector('#mgSubmitGrab').disabled = true;
+              page.querySelector('#mgConnBadge').textContent = 'Offline';
+              return false;
+            });
+        }
+
+        function renderQueue(page, jobs) {
+          var container = page.querySelector('#mgQueueList');
+          while (container.firstChild) container.removeChild(container.firstChild);
+
+          if (!Array.isArray(jobs) || jobs.length === 0) {
+            var empty = document.createElement('div');
+            empty.textContent = 'No jobs in the MediaGrabber queue.';
+            empty.style.opacity = '0.7';
+            empty.style.fontSize = '0.9em';
+            container.appendChild(empty);
+            return;
+          }
+
+          jobs.slice(0, 20).forEach(function (job) {
+            var card = document.createElement('div');
+            card.style.padding = '0.75em 1em';
+            card.style.borderRadius = '8px';
+            card.style.border = '1px solid rgba(255,255,255,0.14)';
+            card.style.background = 'rgba(0,0,0,0.22)';
+            card.style.display = 'flex';
+            card.style.justifyContent = 'space-between';
+            card.style.alignItems = 'center';
+            card.style.gap = '0.75em';
+            card.style.flexWrap = 'wrap';
+
+            var left = document.createElement('div');
+            left.style.minWidth = '200px';
+            left.style.flex = '1';
+
+            var title = document.createElement('div');
+            title.style.fontWeight = '600';
+            title.textContent = job.title || job.url || job.job_id;
+            left.appendChild(title);
+
+            var meta = document.createElement('div');
+            meta.style.fontSize = '0.82em';
+            meta.style.opacity = '0.75';
+            meta.style.fontFamily = 'monospace';
+            meta.textContent = (job.engine || 'MEDIA') + ' · ' + (job.mode || 'video') + ' · ' + (job.status || 'queued') + ' (' + Math.round(job.progress || 0) + '%)';
+            left.appendChild(meta);
+
+            var actions = document.createElement('div');
+            actions.style.display = 'flex';
+            actions.style.gap = '0.5em';
+
+            if (job.status === 'queued' || job.status === 'running') {
+              var cancelBtn = document.createElement('button');
+              cancelBtn.type = 'button';
+              cancelBtn.textContent = 'Cancel';
+              cancelBtn.style.padding = '0.35em 0.7em';
+              cancelBtn.style.borderRadius = '6px';
+              cancelBtn.style.border = '1px solid rgba(239,68,68,0.5)';
+              cancelBtn.style.background = 'transparent';
+              cancelBtn.style.color = '#f87171';
+              cancelBtn.style.cursor = 'pointer';
+              cancelBtn.addEventListener('click', function () {
+                fetch(ApiClient.getUrl('MediaGrabber/Cancel/' + encodeURIComponent(job.job_id)), {
+                  method: 'POST',
+                  headers: headers()
+                }).then(function () { loadQueue(page); });
+              });
+              actions.appendChild(cancelBtn);
+            } else if (job.status === 'failed' || job.status === 'cancelled') {
+              var retryBtn = document.createElement('button');
+              retryBtn.type = 'button';
+              retryBtn.textContent = 'Retry';
+              retryBtn.style.padding = '0.35em 0.7em';
+              retryBtn.style.borderRadius = '6px';
+              retryBtn.style.border = '1px solid rgba(91,124,250,0.6)';
+              retryBtn.style.background = 'transparent';
+              retryBtn.style.color = '#93c5fd';
+              retryBtn.style.cursor = 'pointer';
+              retryBtn.addEventListener('click', function () {
+                fetch(ApiClient.getUrl('MediaGrabber/Retry/' + encodeURIComponent(job.job_id)), {
+                  method: 'POST',
+                  headers: headers()
+                }).then(function () { loadQueue(page); });
+              });
+              actions.appendChild(retryBtn);
+            }
+
+            card.appendChild(left);
+            card.appendChild(actions);
+            container.appendChild(card);
+          });
+        }
+
+        function loadQueue(page) {
+          fetch(ApiClient.getUrl('MediaGrabber/Queue'), { headers: headers() })
+            .then(function (r) { return r.ok ? r.json() : []; })
+            .then(function (jobs) { renderQueue(page, jobs); })
+            .catch(function () {});
+        }
+
+        var pageEl = document.querySelector('#MediaGrabberDownloaderPage');
+        pageEl.addEventListener('pageshow', function () {
+          var self = this;
+          updateStatus(self).then(function (ready) {
+            if (ready) loadQueue(self);
+          });
+          if (pollHandle) clearInterval(pollHandle);
+          pollHandle = setInterval(function () {
+            if (canDownload) loadQueue(self);
+          }, 2500);
+        });
+
+        pageEl.addEventListener('pagehide', function () {
+          if (pollHandle) {
+            clearInterval(pollHandle);
+            pollHandle = null;
+          }
+        });
+
+        pageEl.querySelector('#mgRefreshQueueBtn').addEventListener('click', function () {
+          updateStatus(pageEl).then(function (ready) {
+            if (ready) loadQueue(pageEl);
+          });
+        });
+
+        pageEl.querySelector('#mgGrabForm').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var msg = pageEl.querySelector('#mgSubmitMsg');
+          if (!canDownload) {
+            msg.style.color = '#f87171';
+            msg.textContent = 'MediaGrabber API key required.';
+            return;
+          }
+          var raw = pageEl.querySelector('#mgUrlsInput').value.trim();
+          if (!raw) {
+            msg.style.color = '#f87171';
+            msg.textContent = 'Enter at least one URL.';
+            return;
+          }
+          msg.style.color = '#93c5fd';
+          msg.textContent = 'Queueing...';
+          fetch(ApiClient.getUrl('MediaGrabber/Grab'), {
+            method: 'POST',
+            headers: headers(),
+            body: JSON.stringify({
+              url: raw,
+              mode: pageEl.querySelector('#mgModeSelect').value
+            })
+          })
+            .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+            .then(function (res) {
+              if (!res.ok) {
+                msg.style.color = '#f87171';
+                msg.textContent = res.data.error || 'Failed to queue.';
+              } else {
+                pageEl.querySelector('#mgUrlsInput').value = '';
+                msg.style.color = '#34d399';
+                msg.textContent = 'Queued ' + (res.data.count || 1) + ' job(s).';
+                loadQueue(pageEl);
+              }
+            })
+            .catch(function () {
+              msg.style.color = '#f87171';
+              msg.textContent = 'Request failed.';
+            });
+        });
+      })();
+    </script>
+  </div>
+</body>
+</html>

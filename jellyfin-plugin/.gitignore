@@ -1,0 +1,9 @@
+bin/
+obj/
+out/
+dist/
+*.zip
+*.nupkg
+.vs/
+.vscode/
+.DS_Store

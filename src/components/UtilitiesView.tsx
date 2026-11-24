@@ -1730,7 +1730,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <a
                   href="/api/server/export-bundle?format=zip"
-                  download="mediagrabber-v2.0-pre6.zip"
+                  download="mediagrabber-v2.0-pre7.zip"
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                   style={{
                     backgroundColor: 'var(--mg-bg)',
@@ -1740,6 +1740,19 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>Download Bundle (.zip)</span>
+                </a>
+                <a
+                  href="/api/server/export-jellyfin-plugin"
+                  download="MediaGrabber-Jellyfin-Edition.zip"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
+                  style={{
+                    backgroundColor: 'var(--mg-bg)',
+                    borderColor: 'var(--mg-border)',
+                    color: 'var(--mg-text)',
+                  }}
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Jellyfin Plugin (.zip)</span>
                 </a>
                 {versionInfo?.update_available && (
                   <button
@@ -1818,13 +1831,13 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
                   Current Build ({versionInfo?.channel === 'nightly' ? 'Nightly' : 'Release'})
                 </div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre6'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre7'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
                   Latest {(versionInfo?.selected_channel ?? 'nightly') === 'stable' ? 'Full Release' : 'Nightly Pre-Release'}
                 </div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre6'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre7'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Last Checked</div>

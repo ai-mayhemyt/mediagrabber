@@ -1,0 +1,44 @@
+[
+  {
+    "guid": "c7f3a1e4-9b2d-4c6f-a810-4e92d3b17c50",
+    "name": "MediaGrabber",
+    "description": "Queue YouTube, YouTube Music, Spotify, and gallery media downloads directly from Jellyfin using your MediaGrabber server and API key.",
+    "overview": "Download media into your Jellyfin library directly via MediaGrabber.",
+    "owner": "ai-mayhemyt",
+    "category": "General",
+    "versions": [
+      {
+        "version": "2.0.0.4",
+        "changelog": "MediaGrabber - Jellyfin Edition for Jellyfin 10.11+ (net9.0). Requires a MediaGrabber download-scoped API key.",
+        "targetAbi": "10.11.0.0",
+        "sourceUrl": "https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition/releases/latest/download/mediagrabber-jellyfin-10.11.zip",
+        "checksum": "",
+        "timestamp": "2026-11-24T14:35:00Z"
+      },
+      {
+        "version": "2.0.0.3",
+        "changelog": "MediaGrabber - Jellyfin Edition for Jellyfin 10.10.x (net8.0). Requires a MediaGrabber download-scoped API key.",
+        "targetAbi": "10.10.0.0",
+        "sourceUrl": "https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition/releases/latest/download/mediagrabber-jellyfin-10.10.zip",
+        "checksum": "",
+        "timestamp": "2026-11-24T14:35:00Z"
+      },
+      {
+        "version": "2.0.0.2",
+        "changelog": "MediaGrabber - Jellyfin Edition for Jellyfin 10.9.x (net8.0). Requires a MediaGrabber download-scoped API key.",
+        "targetAbi": "10.9.0.0",
+        "sourceUrl": "https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition/releases/latest/download/mediagrabber-jellyfin-10.9.zip",
+        "checksum": "",
+        "timestamp": "2026-11-24T14:35:00Z"
+      },
+      {
+        "version": "2.0.0.1",
+        "changelog": "MediaGrabber - Jellyfin Edition for Jellyfin 10.8.x (net6.0). Requires a MediaGrabber download-scoped API key.",
+        "targetAbi": "10.8.0.0",
+        "sourceUrl": "https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition/releases/latest/download/mediagrabber-jellyfin-10.8.zip",
+        "checksum": "",
+        "timestamp": "2026-11-24T14:35:00Z"
+      }
+    ]
+  }
+]

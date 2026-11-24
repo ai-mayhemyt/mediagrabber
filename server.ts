@@ -2023,9 +2023,9 @@ async function startServer() {
     res.json({ job_id: job.job_id, url: job.url, status: job.status, log: job.log });
   });
 
-  app.post('/api/cancel/:jobId', (req, res) => {
-    const job = queue.get(req.params.jobId);
-    if (!job) return res.status(404).json({ error: 'Job not found' });
+  function cancelJobById(jobId: string): { ok: true } | { ok: false; status: number; error: string } {
+    const job = queue.get(jobId);
+    if (!job) return { ok: false, status: 404, error: 'Job not found' };
     cancelledJobs.add(job.job_id);
     const proc = activeProcesses.get(job.job_id);
     if (proc) {
@@ -2046,6 +2046,37 @@ async function startServer() {
       job.status = 'cancelled';
       job.log.push('[mediagrabber] Cancelled by user.');
     }
+    return { ok: true };
+  }
+
+  function retryJobById(jobId: string): { ok: true; new_job_id: string } | { ok: false; status: number; error: string } {
+    const oldJob = queue.get(jobId);
+    if (!oldJob) return { ok: false, status: 404, error: 'Job not found' };
+    removeFromArchive(oldJob.url);
+    queue.delete(oldJob.job_id);
+
+    const newJobId = crypto.randomUUID();
+    const newJob: JobRecord = {
+      job_id: newJobId,
+      url: oldJob.url,
+      mode: oldJob.mode,
+      engine: oldJob.engine,
+      status: 'queued',
+      progress: 0,
+      file: null,
+      thumbnail: oldJob.thumbnail,
+      output_dir: null,
+      log: [`[mediagrabber] Retrying ${oldJob.url}`],
+      created_at: new Date().toISOString(),
+    };
+    queue.set(newJobId, newJob);
+    void processJob(newJobId);
+    return { ok: true, new_job_id: newJobId };
+  }
+
+  app.post('/api/cancel/:jobId', (req, res) => {
+    const result = cancelJobById(req.params.jobId);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
     res.json({ status: 'cancelled' });
   });
 
@@ -2075,28 +2106,9 @@ async function startServer() {
   });
 
   app.post('/api/retry/:jobId', (req, res) => {
-    const oldJob = queue.get(req.params.jobId);
-    if (!oldJob) return res.status(404).json({ error: 'Job not found' });
-    removeFromArchive(oldJob.url);
-    queue.delete(oldJob.job_id);
-
-    const newJobId = crypto.randomUUID();
-    const newJob: JobRecord = {
-      job_id: newJobId,
-      url: oldJob.url,
-      mode: oldJob.mode,
-      engine: oldJob.engine,
-      status: 'queued',
-      progress: 0,
-      file: null,
-      thumbnail: oldJob.thumbnail,
-      output_dir: null,
-      log: [`[mediagrabber] Retrying ${oldJob.url}`],
-      created_at: new Date().toISOString(),
-    };
-    queue.set(newJobId, newJob);
-    void processJob(newJobId);
-    res.json({ status: 'retried', new_job_id: newJobId });
+    const result = retryJobById(req.params.jobId);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ status: 'retried', new_job_id: result.new_job_id });
   });
 
   // ---- History Routes ----
@@ -3147,7 +3159,166 @@ async function startServer() {
   });
 
   // ---- v2.0 Version Manager (GitHub Full & Nightly Releases + Tags) ----
-  const CURRENT_APP_VERSION = 'v2.0-pre6';
+  const CURRENT_APP_VERSION = 'v2.0-pre7';
+
+  // ---- MediaGrabber - Jellyfin Edition Plugin API Bridge ----
+  const TOKEN_SCOPE_LEVEL: Record<string, number> = {
+    read: 1,
+    download: 2,
+    admin: 3,
+  };
+
+  function extractBearerOrApiKey(req: express.Request): string {
+    const headerKey = String(req.header('x-api-key') || '').trim();
+    if (headerKey) return headerKey;
+    const authHeader = String(req.header('authorization') || '').trim();
+    if (/^Bearer\s+/i.test(authHeader)) {
+      return authHeader.replace(/^Bearer\s+/i, '').trim();
+    }
+    return '';
+  }
+
+  function authenticateApiToken(
+    req: express.Request,
+    minScope: 'read' | 'download' | 'admin'
+  ): { ok: true; token: any } | { ok: false; status: number; error: string } {
+    const rawToken = extractBearerOrApiKey(req);
+    if (!rawToken) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'MediaGrabber API Key is required (send via X-API-Key or Authorization: Bearer).',
+      };
+    }
+    const candidateHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const candidateBuf = Buffer.from(candidateHash, 'hex');
+    const tokens = readJson<any[]>(TOKENS_FILE, []);
+    const matched = tokens.find((t) => {
+      if (!t || typeof t.token_hash !== 'string' || t.token_hash.length !== candidateHash.length) {
+        return false;
+      }
+      try {
+        return crypto.timingSafeEqual(Buffer.from(t.token_hash, 'hex'), candidateBuf);
+      } catch {
+        return false;
+      }
+    });
+
+    if (!matched || matched.revoked === true) {
+      return {
+        ok: false,
+        status: 401,
+        error: 'Invalid or revoked MediaGrabber API Key.',
+      };
+    }
+
+    const tokenLevel = TOKEN_SCOPE_LEVEL[String(matched.scope || 'read')] ?? 0;
+    const requiredLevel = TOKEN_SCOPE_LEVEL[minScope] ?? 1;
+    if (tokenLevel < requiredLevel) {
+      return {
+        ok: false,
+        status: 403,
+        error: `This API Key has "${matched.scope || 'read'}" scope; "${minScope}" or "admin" scope is required.`,
+      };
+    }
+
+    matched.last_used_at = new Date().toISOString();
+    writeJson(TOKENS_FILE, tokens);
+    return { ok: true, token: matched };
+  }
+
+  app.get('/api/jellyfin/verify', (req, res) => {
+    const auth = authenticateApiToken(req, 'read');
+    if (!auth.ok) {
+      return res.status(auth.status).json({ ok: false, error: auth.error });
+    }
+    const scope = String(auth.token.scope || 'read');
+    res.json({
+      ok: true,
+      service: 'MediaGrabber',
+      version: CURRENT_APP_VERSION,
+      token_name: auth.token.name,
+      scope,
+      can_download: scope === 'download' || scope === 'admin',
+    });
+  });
+
+  app.get('/api/jellyfin/queue', (req, res) => {
+    const auth = authenticateApiToken(req, 'read');
+    if (!auth.ok) {
+      return res.status(auth.status).json({ error: auth.error });
+    }
+    const list = Array.from(queue.values())
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+      .slice(0, 100)
+      .map((j) => ({
+        job_id: j.job_id,
+        url: j.url,
+        title: j.title || j.url,
+        mode: j.mode,
+        engine: j.engine,
+        status: j.status,
+        progress: j.progress,
+        created_at: j.created_at,
+      }));
+    res.json(list);
+  });
+
+  app.post('/api/jellyfin/grab', (req, res) => {
+    const auth = authenticateApiToken(req, 'download');
+    if (!auth.ok) {
+      return res.status(auth.status).json({ error: auth.error });
+    }
+    const rawInputs: string[] = [];
+    if (Array.isArray(req.body?.urls)) {
+      for (const u of req.body.urls) {
+        const s = String(u || '').trim();
+        if (s) rawInputs.push(s);
+      }
+    }
+    if (typeof req.body?.url === 'string') {
+      for (const line of req.body.url.split(/[\r\n]+/)) {
+        const s = line.trim();
+        if (s) rawInputs.push(s);
+      }
+    }
+    const validUrls = rawInputs.filter((u) => {
+      try {
+        const parsed = new URL(u);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    });
+    if (validUrls.length === 0) {
+      return res.status(400).json({ error: 'Provide at least one valid http:// or https:// media URL.' });
+    }
+    req.body = {
+      urls: validUrls,
+      mode: req.body?.mode === 'audio' ? 'audio' : 'video',
+    };
+    return handleGrabRequest(req, res);
+  });
+
+  app.post('/api/jellyfin/cancel/:jobId', (req, res) => {
+    const auth = authenticateApiToken(req, 'download');
+    if (!auth.ok) {
+      return res.status(auth.status).json({ error: auth.error });
+    }
+    const result = cancelJobById(req.params.jobId);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ status: 'cancelled' });
+  });
+
+  app.post('/api/jellyfin/retry/:jobId', (req, res) => {
+    const auth = authenticateApiToken(req, 'download');
+    if (!auth.ok) {
+      return res.status(auth.status).json({ error: auth.error });
+    }
+    const result = retryJobById(req.params.jobId);
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+    res.json({ status: 'retried', new_job_id: result.new_job_id });
+  });
   const versionCacheByChannel: Record<'nightly' | 'stable', { data: any; ts: number }> = {
     nightly: { data: null, ts: 0 },
     stable: { data: null, ts: 0 },
@@ -3867,6 +4038,7 @@ async function startServer() {
       'src',
       'public',
       'deploy',
+      'jellyfin-plugin',
       'grab',
     ].filter((item) => fs.existsSync(path.join(process.cwd(), item)));
 
@@ -3894,7 +4066,7 @@ async function startServer() {
 import os, sys, zipfile
 out_zip = sys.argv[1]
 items = sys.argv[2:]
-skip_dirs = {'node_modules', 'dist', '.git'}
+skip_dirs = {'node_modules', 'dist', '.git', 'bin', 'obj'}
 with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
     for item in items:
         if os.path.isfile(item):
@@ -3917,6 +4089,43 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
       return res.download(outZip, `mediagrabber-${CURRENT_APP_VERSION}.zip`);
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to package source bundle' });
+    }
+  });
+
+  app.get('/api/server/export-jellyfin-plugin', async (_req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const pluginDir = path.join(process.cwd(), 'jellyfin-plugin');
+    if (!fs.existsSync(pluginDir)) {
+      return res.status(404).json({ error: 'Jellyfin plugin directory not found.' });
+    }
+    try {
+      const outZip = '/tmp/MediaGrabber-Jellyfin-Edition.zip';
+      const pyScript = `
+import os, sys, zipfile
+out_zip = sys.argv[1]
+src_dir = sys.argv[2]
+skip_dirs = {'node_modules', 'dist', '.git', 'bin', 'obj'}
+with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+    for root, dirs, files in os.walk(src_dir):
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for f in files:
+            if f == '.env':
+                continue
+            fp = os.path.join(root, f)
+            arcname = os.path.relpath(fp, src_dir)
+            zf.write(fp, arcname)
+`;
+      await execFileAsync('python3', ['-c', pyScript, outZip, pluginDir], {
+        cwd: process.cwd(),
+        timeout: 15000,
+      });
+      res.setHeader('Content-Type', 'application/zip');
+      return res.download(outZip, 'MediaGrabber-Jellyfin-Edition.zip');
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to package Jellyfin plugin repository' });
     }
   });
 

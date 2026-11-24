@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MediaGrabber Settings</title>
+</head>
+<body>
+  <div id="MediaGrabberConfigPage" data-role="page" class="page type-interior pluginConfigurationPage" data-require="emby-input,emby-button,emby-select,emby-checkbox">
+    <div data-role="content">
+      <div class="content-primary">
+        <form id="MediaGrabberConfigForm">
+          <div class="sectionTitleContainer flex align-items-center">
+            <h2 class="sectionTitle">MediaGrabber — Jellyfin Edition</h2>
+          </div>
+          <p class="fieldDescription" style="margin-bottom: 1.25em;">
+            Connect Jellyfin directly to your MediaGrabber server. A MediaGrabber API key with <strong>download</strong> or <strong>admin</strong> scope (from MediaGrabber → Account → API Tokens) is required before the downloader can queue jobs.
+          </p>
+
+          <div class="inputContainer">
+            <label class="inputLabel inputLabelUnfocused" for="mgServerUrl">MediaGrabber Server URL</label>
+            <input id="mgServerUrl" type="url" is="emby-input" placeholder="http://127.0.0.1:3000" required />
+            <div class="fieldDescription">Full URL reachable from your Jellyfin server (e.g. http://127.0.0.1:3000 or http://192.168.1.50:3000).</div>
+          </div>
+
+          <div class="inputContainer">
+            <label class="inputLabel inputLabelUnfocused" for="mgApiKey">MediaGrabber API Key (Required)</label>
+            <input id="mgApiKey" type="password" is="emby-input" placeholder="mg_..." autocomplete="off" required />
+            <div class="fieldDescription">Required for downloading, queue status, cancel, and retry actions. Generate one in MediaGrabber under Account → API Tokens.</div>
+          </div>
+
+          <div class="selectContainer">
+            <label class="selectLabel" for="mgDefaultMode">Default Download Mode</label>
+            <select id="mgDefaultMode" is="emby-select">
+              <option value="video">Video (YouTube / Gallery)</option>
+              <option value="audio">Audio Only (MP3 / FLAC / Spotify / YT Music)</option>
+            </select>
+          </div>
+
+          <div class="checkboxContainer checkboxContainer-withDescription">
+            <label class="emby-checkbox-label">
+              <input id="mgAutoRefresh" type="checkbox" is="emby-checkbox" />
+              <span>Auto-refresh Jellyfin library after downloads complete</span>
+            </label>
+          </div>
+
+          <div id="mgTestResult" style="margin: 0.75em 0; font-size: 0.9em;"></div>
+
+          <div style="display: flex; gap: 0.75em; flex-wrap: wrap; margin-top: 1em;">
+            <button id="mgTestBtn" type="button" is="emby-button" class="raised emby-button">
+              <span>Test Connection &amp; API Key</span>
+            </button>
+            <button type="submit" is="emby-button" class="raised button-submit block">
+              <span>Save Configuration</span>
+            </button>
+          </div>
+        </form>
+
+        <hr style="margin: 2em 0; opacity: 0.2;" />
+
+        <div>
+          <h3>Quick Add Media</h3>
+          <p class="fieldDescription">Open <strong>Dashboard → MediaGrabber Downloader</strong> from the sidebar anytime, or queue a test URL below once your API key is saved.</p>
+          <div class="inputContainer">
+            <label class="inputLabel inputLabelUnfocused" for="mgQuickUrls">Media URL(s) (one per line)</label>
+            <textarea id="mgQuickUrls" rows="3" style="width: 100%; padding: 0.65em; border-radius: 6px; background: rgba(0,0,0,0.25); color: inherit; border: 1px solid rgba(255,255,255,0.18);" placeholder="https://www.youtube.com/watch?v=..."></textarea>
+          </div>
+          <div style="display: flex; gap: 0.75em; align-items: center; flex-wrap: wrap;">
+            <select id="mgQuickMode" is="emby-select" style="max-width: 180px;">
+              <option value="video">Video</option>
+              <option value="audio">Audio Only</option>
+            </select>
+            <button id="mgQuickGrabBtn" type="button" is="emby-button" class="raised button-submit">
+              <span>Queue Download</span>
+            </button>
+            <span id="mgQuickStatus" style="font-size: 0.9em;"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script type="text/javascript">
+      (function () {
+        var pluginId = 'c7f3a1e4-9b2d-4c6f-a810-4e92d3b17c50';
+
+        function authHeaders() {
+          return {
+            'Content-Type': 'application/json',
+            'X-Emby-Token': ApiClient.accessToken()
+          };
+        }
+
+        function setMsg(el, text, isError) {
+          el.textContent = text || '';
+          el.style.color = isError ? '#f87171' : '#34d399';
+        }
+
+        function loadConfig(page) {
+          Dashboard.showLoadingMsg();
+          ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+            page.querySelector('#mgServerUrl').value = config.MediaGrabberUrl || 'http://127.0.0.1:3000';
+            page.querySelector('#mgApiKey').value = config.MediaGrabberApiKey || '';
+            page.querySelector('#mgDefaultMode').value = config.DefaultMode || 'video';
+            page.querySelector('#mgQuickMode').value = config.DefaultMode || 'video';
+            page.querySelector('#mgAutoRefresh').checked = config.AutoRefreshLibrary !== false;
+            var hasKey = Boolean((config.MediaGrabberApiKey || '').trim());
+            page.querySelector('#mgQuickGrabBtn').disabled = !hasKey;
+            if (!hasKey) {
+              setMsg(page.querySelector('#mgQuickStatus'), 'Enter and save your MediaGrabber API key above to enable downloads.', true);
+            }
+            Dashboard.hideLoadingMsg();
+          });
+        }
+
+        document.querySelector('#MediaGrabberConfigPage').addEventListener('pageshow', function () {
+          loadConfig(this);
+        });
+
+        document.querySelector('#MediaGrabberConfigForm').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var page = document.querySelector('#MediaGrabberConfigPage');
+          var apiKey = page.querySelector('#mgApiKey').value.trim();
+          var serverUrl = page.querySelector('#mgServerUrl').value.trim();
+          if (!apiKey) {
+            setMsg(page.querySelector('#mgTestResult'), 'MediaGrabber API Key is required.', true);
+            return;
+          }
+          Dashboard.showLoadingMsg();
+          ApiClient.getPluginConfiguration(pluginId).then(function (config) {
+            config.MediaGrabberUrl = serverUrl;
+            config.MediaGrabberApiKey = apiKey;
+            config.DefaultMode = page.querySelector('#mgDefaultMode').value;
+            config.AutoRefreshLibrary = page.querySelector('#mgAutoRefresh').checked;
+            ApiClient.updatePluginConfiguration(pluginId, config).then(function (result) {
+              Dashboard.processPluginConfigurationUpdateResult(result);
+              page.querySelector('#mgQuickGrabBtn').disabled = false;
+              setMsg(page.querySelector('#mgQuickStatus'), 'API key saved. Downloader ready.', false);
+            });
+          });
+        });
+
+        document.querySelector('#mgTestBtn').addEventListener('click', function () {
+          var page = document.querySelector('#MediaGrabberConfigPage');
+          var out = page.querySelector('#mgTestResult');
+          setMsg(out, 'Testing MediaGrabber connection...', false);
+          fetch(ApiClient.getUrl('MediaGrabber/TestConnection'), {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({
+              mediaGrabberUrl: page.querySelector('#mgServerUrl').value.trim(),
+              mediaGrabberApiKey: page.querySelector('#mgApiKey').value.trim()
+            })
+          })
+            .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+            .then(function (res) {
+              if (!res.ok || !res.data.ok) {
+                setMsg(out, res.data.error || 'Connection test failed.', true);
+              } else if (!res.data.can_download) {
+                setMsg(out, 'Connected to MediaGrabber ' + (res.data.version || '') + ', but token scope "' + res.data.scope + '" cannot queue downloads. Use a download or admin API token.', true);
+              } else {
+                setMsg(out, 'Connected to MediaGrabber ' + (res.data.version || '') + ' (Token: ' + (res.data.token_name || 'valid') + ', Scope: ' + res.data.scope + ').', false);
+              }
+            })
+            .catch(function () {
+              setMsg(out, 'Unable to reach Jellyfin MediaGrabber controller.', true);
+            });
+        });
+
+        document.querySelector('#mgQuickGrabBtn').addEventListener('click', function () {
+          var page = document.querySelector('#MediaGrabberConfigPage');
+          var statusEl = page.querySelector('#mgQuickStatus');
+          var raw = page.querySelector('#mgQuickUrls').value.trim();
+          if (!raw) {
+            setMsg(statusEl, 'Paste at least one URL first.', true);
+            return;
+          }
+          setMsg(statusEl, 'Sending to MediaGrabber...', false);
+          fetch(ApiClient.getUrl('MediaGrabber/Grab'), {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({
+              url: raw,
+              mode: page.querySelector('#mgQuickMode').value
+            })
+          })
+            .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+            .then(function (res) {
+              if (!res.ok) {
+                setMsg(statusEl, res.data.error || 'Failed to queue download.', true);
+              } else {
+                page.querySelector('#mgQuickUrls').value = '';
+                setMsg(statusEl, 'Queued ' + (res.data.count || 1) + ' download job(s) in MediaGrabber.', false);
+              }
+            })
+            .catch(function () {
+              setMsg(statusEl, 'Request failed.', true);
+            });
+        });
+      })();
+    </script>
+  </div>
+</body>
+</html>

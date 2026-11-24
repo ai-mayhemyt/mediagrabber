@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Override JellyfinSeries=10.8 | 10.9 | 10.10 | 10.11 to build for any Jellyfin version -->
+    <JellyfinSeries Condition="'$(JellyfinSeries)' == ''">10.10</JellyfinSeries>
+
+    <TargetFramework Condition="'$(JellyfinSeries)' == '10.8'">net6.0</TargetFramework>
+    <TargetFramework Condition="'$(JellyfinSeries)' == '10.9' or '$(JellyfinSeries)' == '10.10'">net8.0</TargetFramework>
+    <TargetFramework Condition="'$(JellyfinSeries)' == '10.11'">net9.0</TargetFramework>
+    <TargetFramework Condition="'$(TargetFramework)' == ''">net8.0</TargetFramework>
+
+    <JellyfinApiVersion Condition="'$(JellyfinApiVersion)' == '' and '$(JellyfinSeries)' == '10.8'">10.8.13</JellyfinApiVersion>
+    <JellyfinApiVersion Condition="'$(JellyfinApiVersion)' == '' and '$(JellyfinSeries)' == '10.9'">10.9.11</JellyfinApiVersion>
+    <JellyfinApiVersion Condition="'$(JellyfinApiVersion)' == '' and '$(JellyfinSeries)' == '10.10'">10.10.7</JellyfinApiVersion>
+    <JellyfinApiVersion Condition="'$(JellyfinApiVersion)' == '' and '$(JellyfinSeries)' == '10.11'">10.11.*</JellyfinApiVersion>
+
+    <AssemblyName>MediaGrabber.Jellyfin</AssemblyName>
+    <RootNamespace>MediaGrabber.Jellyfin</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Version>2.0.0.0</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Jellyfin.Controller" Version="$(JellyfinApiVersion)" />
+    <PackageReference Include="Jellyfin.Model" Version="$(JellyfinApiVersion)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="Web\configPage.html" />
+    <None Remove="Web\downloaderPage.html" />
+    <EmbeddedResource Include="Web\configPage.html" />
+    <EmbeddedResource Include="Web\downloaderPage.html" />
+  </ItemGroup>
+
+</Project>
