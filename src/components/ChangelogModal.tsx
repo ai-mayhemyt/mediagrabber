@@ -17,6 +17,35 @@ interface NightlyReleaseNote {
 
 const NIGHTLY_RELEASES: NightlyReleaseNote[] = [
   {
+    version: 'v2.1-pre2',
+    channel: 'Nightly Pre-Release',
+    date: '2026-11-24',
+    summary:
+      'Live SSE download log streaming, automated scheduled SHA-256 duplicate cleanup, custom per-site naming templates, and bandwidth rate throttling across Windows 10/11 and Linux.',
+    items: [
+      {
+        kind: 'new',
+        text: 'Added real-time Live Log Streaming via Server-Sent Events (/api/log/:jobId/stream) with live stream status, keepalive pings, and auto-scroll toggle in the Queue log modal.',
+      },
+      {
+        kind: 'new',
+        text: 'Added Automated Duplicate Cleanup Scheduler (Off / Daily / Weekly) using chunked SHA-256 hashing across YouTube, Music, and Gallery roots, plus a 1-click Run All Libraries Now trigger.',
+      },
+      {
+        kind: 'new',
+        text: 'Added Custom Per-Site Naming Templates for yt-dlp (YouTube/YT Music), spotdl (Spotify), and gallery-dl (Instagram/TikTok/X) wired into Linux grab, Windows grab.ps1, and direct fallback.',
+      },
+      {
+        kind: 'new',
+        text: 'Added configurable Bandwidth Limit (--limit-rate, e.g. 2M, 5M, 10M, 25M, or custom) in Settings for yt-dlp and gallery-dl across both Windows and Linux.',
+      },
+      {
+        kind: 'security',
+        text: 'Validated custom naming templates against path traversal (..) and shell operators, enforced admin guards on deduplication routes, and protected log streams with authentication checks.',
+      },
+    ],
+  },
+  {
     version: 'v2.1-pre1',
     channel: 'Nightly Pre-Release',
     date: '2026-11-24',

@@ -66,6 +66,13 @@ export interface MediaGrabberSettings {
   max_concurrent_downloads?: number;
   quick_start_completed?: boolean;
   update_channel?: 'stable' | 'nightly';
+  download_rate_limit?: string;
+  auto_dedup_schedule?: 'off' | 'daily' | 'weekly';
+  auto_dedup_last_run?: string | null;
+  auto_dedup_last_summary?: string | null;
+  yt_naming_template?: string;
+  music_naming_template?: string;
+  gallery_naming_template?: string;
 }
 
 export interface CookieFileStatus {

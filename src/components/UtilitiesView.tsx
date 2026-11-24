@@ -105,6 +105,8 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
   const [dedupTarget, setDedupTarget] = useState('/tmp/mediagrabber-workspace/YouTube');
   const [dedupLogs, setDedupLogs] = useState<string[]>(['Ready to scan target folder for SHA-256 duplicates.']);
   const [dedupBusy, setDedupBusy] = useState(false);
+  const [autoDedupSchedule, setAutoDedupSchedule] = useState<'off' | 'daily' | 'weekly'>('off');
+  const [autoDedupSummary, setAutoDedupSummary] = useState<string | null>(null);
 
   // Metadata Editor
   const [editorFolder, setEditorFolder] = useState('/tmp/mediagrabber-workspace');
@@ -397,6 +399,12 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
         if (s?.yt_base_path) {
           setDedupTarget(s.yt_base_path);
           setEditorFolder(s.yt_base_path);
+        }
+        if (s?.auto_dedup_schedule) {
+          setAutoDedupSchedule(s.auto_dedup_schedule);
+        }
+        if (s?.auto_dedup_last_summary) {
+          setAutoDedupSummary(s.auto_dedup_last_summary);
         }
       })
       .catch(() => {});
@@ -960,14 +968,20 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
             className="p-5 rounded-xl border flex flex-col gap-3"
             style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
           >
-            <div>
-              <h2 className="font-display text-sm font-semibold flex items-center gap-2">
-                <CopyX className="w-4 h-4" />
-                <span>Deduplicate Files (SHA-256)</span>
-              </h2>
-              <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
-                Identify exact byte-identical files in a library folder, keeping the largest copy and trashing duplicates.
-              </p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+                  <CopyX className="w-4 h-4" />
+                  <span>Deduplicate Files (SHA-256)</span>
+                </h2>
+                <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
+                  Identify exact byte-identical files in a library folder, keeping the largest copy and trashing duplicates.
+                </p>
+              </div>
+              <span className="text-[11px] font-mono" style={{ color: 'var(--mg-muted)' }}>
+                Auto-Cleanup: {autoDedupSchedule === 'off' ? 'Off' : autoDedupSchedule === 'daily' ? 'Daily' : 'Weekly'}
+                {autoDedupSummary ? ` · ${autoDedupSummary}` : ''}
+              </span>
             </div>
             <div className="flex flex-col sm:flex-row gap-2.5">
               <input
@@ -1805,7 +1819,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <a
                   href="/api/server/export-bundle?format=zip"
-                  download="mediagrabber-v2.1-pre1.zip"
+                  download="mediagrabber-v2.1-pre2.zip"
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                   style={{
                     backgroundColor: 'var(--mg-bg)',
@@ -1907,13 +1921,13 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
                   Current Build ({versionInfo?.channel === 'nightly' ? 'Nightly' : 'Release'}{versionInfo?.platform ? ` · ${versionInfo.platform}` : ''}{versionInfo?.is_binary ? ' · Standalone Binary' : ''})
                 </div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.1-pre1'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.1-pre2'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
                   Latest {(versionInfo?.selected_channel ?? 'nightly') === 'stable' ? 'Full Release' : 'Nightly Pre-Release'}
                 </div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.1-pre1'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.1-pre2'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Last Checked</div>

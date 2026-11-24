@@ -49,6 +49,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [cookiePasteKind, setCookiePasteKind] = useState<'youtube' | 'gallery' | null>(null);
   const [cookiePasteText, setCookiePasteText] = useState('');
   const [cookieBusyKind, setCookieBusyKind] = useState<'youtube' | 'gallery' | null>(null);
+  const [runningAutoDedup, setRunningAutoDedup] = useState(false);
   const ytCookieInputRef = useRef<HTMLInputElement | null>(null);
   const galleryCookieInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -240,6 +241,46 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </select>
           </label>
         </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1 border-t" style={{ borderColor: 'var(--mg-border)' }}>
+          <label className="flex flex-col gap-1.5 text-xs font-medium">
+            <span>Bandwidth Limit (--limit-rate)</span>
+            <select
+              value={
+                ['', '1M', '2M', '5M', '10M', '25M', '50M'].includes(settings.download_rate_limit || '')
+                  ? settings.download_rate_limit || ''
+                  : 'custom'
+              }
+              onChange={(e) => {
+                if (e.target.value !== 'custom') {
+                  updateField('download_rate_limit', e.target.value);
+                }
+              }}
+              className={inputClass}
+              style={inputStyle}
+            >
+              <option value="">Unlimited (Full Line Speed)</option>
+              <option value="1M">1 MB/s (1M)</option>
+              <option value="2M">2 MB/s (2M)</option>
+              <option value="5M">5 MB/s (5M)</option>
+              <option value="10M">10 MB/s (10M)</option>
+              <option value="25M">25 MB/s (25M)</option>
+              <option value="50M">50 MB/s (50M)</option>
+              <option value="custom">Custom Rate</option>
+            </select>
+          </label>
+          <label className="flex flex-col gap-1.5 text-xs font-medium">
+            <span>Custom Rate Override (e.g. 500K, 3.5M)</span>
+            <input
+              type="text"
+              value={settings.download_rate_limit || ''}
+              onChange={(e) => updateField('download_rate_limit', e.target.value)}
+              placeholder="Leave blank for unlimited (applied to yt-dlp & gallery-dl)"
+              className={`${inputClass} font-mono`}
+              style={inputStyle}
+            />
+          </label>
+        </div>
       </section>
 
       <section
@@ -247,7 +288,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
       >
         <h2 className="font-display text-sm font-semibold border-b pb-2.5" style={{ borderColor: 'var(--mg-border)' }}>
-          Folder Structure &amp; Storage Paths
+          Folder Structure, Paths &amp; Naming Templates
         </h2>
         <label className="flex flex-col gap-1.5 text-xs font-medium">
           <span>Organization Template</span>
@@ -293,6 +334,64 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               style={inputStyle}
             />
           </label>
+        </div>
+
+        <div className="pt-2 border-t flex flex-col gap-3" style={{ borderColor: 'var(--mg-border)' }}>
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-xs font-semibold">Custom Per-Site Filename Templates</h3>
+              <p className="text-[11px] mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+                Applied across Linux <code className="font-mono">grab</code>, Windows <code className="font-mono">grab.ps1</code>, and direct fallback. Path traversal (<code className="font-mono">..</code>) is blocked.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                updateField('yt_naming_template', '%(title).150s.%(ext)s');
+                updateField('music_naming_template', '{artist}/{album}/{title}.{ext}');
+                updateField('gallery_naming_template', '%(title).100s-%(id)s.%(ext)s');
+              }}
+              className="px-2.5 py-1 rounded border text-[11px] font-medium whitespace-nowrap shrink-0"
+              style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-muted)' }}
+            >
+              Reset Defaults
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-3">
+            <label className="flex flex-col gap-1 text-xs font-medium">
+              <span>YouTube / YT Music Output Template (<code className="font-mono">yt-dlp -o</code>)</span>
+              <input
+                type="text"
+                value={settings.yt_naming_template ?? '%(title).150s.%(ext)s'}
+                onChange={(e) => updateField('yt_naming_template', e.target.value)}
+                placeholder="%(title).150s.%(ext)s"
+                className={`${inputClass} font-mono text-xs`}
+                style={inputStyle}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-medium">
+              <span>Spotify Output Template (<code className="font-mono">spotdl --output</code>)</span>
+              <input
+                type="text"
+                value={settings.music_naming_template ?? '{artist}/{album}/{title}.{ext}'}
+                onChange={(e) => updateField('music_naming_template', e.target.value)}
+                placeholder="{artist}/{album}/{title}.{ext}"
+                className={`${inputClass} font-mono text-xs`}
+                style={inputStyle}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-medium">
+              <span>Social / Gallery Filename Template (<code className="font-mono">gallery-dl --filename</code>)</span>
+              <input
+                type="text"
+                value={settings.gallery_naming_template ?? '%(title).100s-%(id)s.%(ext)s'}
+                onChange={(e) => updateField('gallery_naming_template', e.target.value)}
+                placeholder="%(title).100s-%(id)s.%(ext)s"
+                className={`${inputClass} font-mono text-xs`}
+                style={inputStyle}
+              />
+            </label>
+          </div>
         </div>
       </section>
 
@@ -782,7 +881,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
       >
         <h2 className="font-display text-sm font-semibold border-b pb-2.5" style={{ borderColor: 'var(--mg-border)' }}>
-          Webhooks &amp; Stale Job Cleanup
+          Webhooks, Stale Jobs &amp; Scheduled Duplicate Cleanup
         </h2>
 
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -843,6 +942,60 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <Send className="w-3.5 h-3.5" />
             <span>{testingWebhook ? 'Testing...' : 'Test Webhook'}</span>
           </button>
+        </div>
+
+        <div className="pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--mg-border)' }}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
+            <label className="flex flex-col gap-1.5 text-xs font-medium">
+              <span>Automated Duplicate Cleanup (SHA-256)</span>
+              <select
+                value={settings.auto_dedup_schedule || 'off'}
+                onChange={(e) =>
+                  updateField('auto_dedup_schedule', e.target.value as 'off' | 'daily' | 'weekly')
+                }
+                className={inputClass}
+                style={inputStyle}
+              >
+                <option value="off">Off (Manual Deduplication Only)</option>
+                <option value="daily">Daily (Every 24 Hours)</option>
+                <option value="weekly">Weekly (Every 7 Days)</option>
+              </select>
+            </label>
+            <div className="flex justify-start sm:justify-end">
+              <button
+                type="button"
+                disabled={runningAutoDedup}
+                onClick={async () => {
+                  setRunningAutoDedup(true);
+                  try {
+                    const res = await fetch('/api/deduplicate/run-scheduled', { method: 'POST' });
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                      onNotify('error', data.error || 'Failed to run cleanup');
+                      return;
+                    }
+                    if (data.settings) setSettings(data.settings);
+                    onNotify('success', data.summary || 'Duplicate cleanup completed.');
+                    onStorageRefresh();
+                  } catch {
+                    onNotify('error', 'Failed to run scheduled duplicate cleanup.');
+                  } finally {
+                    setRunningAutoDedup(false);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50"
+                style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${runningAutoDedup ? 'animate-spin' : ''}`} />
+                <span>{runningAutoDedup ? 'Scanning Libraries...' : 'Run All Libraries Now'}</span>
+              </button>
+            </div>
+          </div>
+          <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+            {settings.auto_dedup_last_run
+              ? `Last run (${new Date(settings.auto_dedup_last_run).toLocaleString()}): ${settings.auto_dedup_last_summary || 'Completed'}`
+              : 'No automated cleanup pass has run yet. Keeps the largest copy of exact byte duplicates and moves extras to duplicates_trash.'}
+          </div>
         </div>
       </section>
 

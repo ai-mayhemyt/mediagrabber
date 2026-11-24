@@ -44,7 +44,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [storage, setStorage] = useState<StorageMap>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [appVersion, setAppVersion] = useState('v2.1-pre1');
+  const [appVersion, setAppVersion] = useState('v2.1-pre2');
 
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
   const [themeColors, setThemeColors] = useState<ThemeColors>(THEME_PRESETS.default.colors);
@@ -213,7 +213,7 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.current) {
-          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.1-pre1';
+          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.1-pre2';
           setAppVersion(shortVer);
         }
         if (

@@ -45,7 +45,7 @@ function resolvePort(): number {
   return Number(process.env.PORT) || 3000;
 }
 
-const BASE_APP_VERSION = 'v2.1-pre1';
+const BASE_APP_VERSION = 'v2.1-pre2';
 
 function detectPlatformSuffix(): string {
   if (process.platform === 'linux') return 'Linux';
@@ -491,6 +491,78 @@ function sanitizeSegment(input: string, fallback = 'Unknown'): string {
   return clean || fallback;
 }
 
+const DEFAULT_YT_NAMING_TEMPLATE = '%(title).150s.%(ext)s';
+const DEFAULT_MUSIC_NAMING_TEMPLATE = '{artist}/{album}/{title}.{ext}';
+const DEFAULT_GALLERY_NAMING_TEMPLATE = '%(title).100s-%(id)s.%(ext)s';
+
+function sanitizeRateLimit(raw: unknown): string {
+  if (raw === undefined || raw === null) return '';
+  const trimmed = String(raw).trim();
+  if (!trimmed) return '';
+  if (!/^\d+(?:\.\d+)?[kKmMgG]?$/.test(trimmed)) {
+    throw new Error('Bandwidth limit must be empty (unlimited) or a value like 500K, 5M, or 25M.');
+  }
+  const last = trimmed[trimmed.length - 1];
+  if (/[kKmMgG]/.test(last)) {
+    return `${trimmed.slice(0, -1)}${last.toUpperCase()}`;
+  }
+  return trimmed;
+}
+
+function sanitizeRateLimitQuiet(raw: unknown): string {
+  try {
+    return sanitizeRateLimit(raw);
+  } catch {
+    return '';
+  }
+}
+
+function sanitizeNamingTemplate(
+  raw: unknown,
+  fallback: string,
+  allowSubdirs = true
+): string {
+  if (raw === undefined || raw === null) return fallback;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return fallback;
+  if (/[\x00-\x1f\r\n`$;|&><"']/.test(trimmed)) {
+    throw new Error('Naming template contains unsafe control or shell characters.');
+  }
+  if (trimmed.includes('..') || /^[a-zA-Z]:/.test(trimmed) || /^[/\\]/.test(trimmed)) {
+    throw new Error('Naming template must be a relative path without ".." or root/drive prefixes.');
+  }
+  if (!allowSubdirs && /[/\\]/.test(trimmed)) {
+    throw new Error('This template cannot contain directory separators.');
+  }
+  if (trimmed.length > 180) {
+    throw new Error('Naming template is too long (max 180 characters).');
+  }
+  return trimmed;
+}
+
+function sanitizeNamingTemplateQuiet(raw: unknown, fallback: string, allowSubdirs = true): string {
+  try {
+    return sanitizeNamingTemplate(raw, fallback, allowSubdirs);
+  } catch {
+    return fallback;
+  }
+}
+
+function hashFileSha256(filePath: string): string {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let bytesRead = 0;
+    while ((bytesRead = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(buf.subarray(0, bytesRead));
+    }
+    return hash.digest('hex');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function detectEngine(url: string): 'YOUTUBE' | 'YT MUSIC' | 'SPOTIFY' | 'GALLERY' {
   const u = url.toLowerCase();
   if (u.includes('music.youtube.com')) return 'YT MUSIC';
@@ -613,6 +685,13 @@ async function seedWorkspace() {
       webhook_url: '',
       stale_timeout_minutes: 120,
       max_concurrent_downloads: 2,
+      download_rate_limit: '',
+      auto_dedup_schedule: 'off',
+      auto_dedup_last_run: null,
+      auto_dedup_last_summary: null,
+      yt_naming_template: DEFAULT_YT_NAMING_TEMPLATE,
+      music_naming_template: DEFAULT_MUSIC_NAMING_TEMPLATE,
+      gallery_naming_template: DEFAULT_GALLERY_NAMING_TEMPLATE,
       quick_start_completed: false,
       update_channel:
         process.env.MEDIAGRABBER_UPDATE_CHANNEL === 'stable' ? 'stable' : 'nightly',
@@ -1298,8 +1377,45 @@ async function startServer() {
   const queue = new Map<string, JobRecord>();
   const activeProcesses = new Map<string, ChildProcess>();
   const cancelledJobs = new Set<string>();
+  const jobLogSubscribers = new Map<string, Set<(event: string, payload: unknown) => void>>();
   let currentUserId: string | null = 'usr-admin-1';
   let radioDbPath = '/var/lib/navidrome/navidrome.db';
+
+  function broadcastJobEvent(jobId: string, event: string, payload: unknown) {
+    const subs = jobLogSubscribers.get(jobId);
+    if (!subs || subs.size === 0) return;
+    for (const cb of subs) {
+      try {
+        cb(event, payload);
+      } catch {
+        // ignore broken SSE sink
+      }
+    }
+  }
+
+  function appendJobLog(job: JobRecord, line: string) {
+    job.log.push(line);
+    while (job.log.length > 500) job.log.shift();
+    broadcastJobEvent(job.job_id, 'line', {
+      line,
+      progress: job.progress,
+      status: job.status,
+      engine: job.engine,
+      title: job.title,
+      uploader: job.uploader,
+    });
+  }
+
+  function notifyJobStatus(job: JobRecord) {
+    broadcastJobEvent(job.job_id, 'status', {
+      status: job.status,
+      progress: job.progress,
+      file: job.file,
+      title: job.title,
+      engine: job.engine,
+      thumbnail: job.thumbnail,
+    });
+  }
 
   const reorgState = {
     status: 'idle' as 'idle' | 'running' | 'done',
@@ -1553,10 +1669,17 @@ async function startServer() {
       job.status = 'running';
       job.started_at = new Date().toISOString();
       job.progress = 2;
-      job.log.push(`[mediagrabber] Job ${jobId.slice(0, 8)} started`);
+      appendJobLog(job, `[mediagrabber] Job ${jobId.slice(0, 8)} started`);
+      notifyJobStatus(job);
       persistQueue();
 
       const settings = readJson<any>(SETTINGS_FILE, {});
+      const rateLimit = sanitizeRateLimitQuiet(settings.download_rate_limit);
+      const ytTemplate = sanitizeNamingTemplateQuiet(settings.yt_naming_template, DEFAULT_YT_NAMING_TEMPLATE, true);
+      const musicTemplate = sanitizeNamingTemplateQuiet(settings.music_naming_template, DEFAULT_MUSIC_NAMING_TEMPLATE, true);
+      const galleryTemplate = sanitizeNamingTemplateQuiet(settings.gallery_naming_template, DEFAULT_GALLERY_NAMING_TEMPLATE, false);
+      const folderStructure = settings.folder_structure === 'flat' ? 'flat' : 'default';
+
       const meta = await resolveRemoteMetadata(job.url, job.engine);
       job.title = meta.title;
       job.uploader = meta.uploader;
@@ -1564,7 +1687,8 @@ async function startServer() {
 
       if (cancelledJobs.has(jobId)) {
         job.status = 'cancelled';
-        job.log.push('[mediagrabber] Job cancelled by user.');
+        appendJobLog(job, '[mediagrabber] Job cancelled by user.');
+        notifyJobStatus(job);
         return;
       }
 
@@ -1584,7 +1708,7 @@ async function startServer() {
           fs.mkdirSync(tempJobDir, { recursive: true });
           fs.accessSync(tempJobDir, fs.constants.W_OK);
         } catch (err: any) {
-          job.log.push(`[mediagrabber] Failed to initialize ${tempJobDir}: ${err?.message || err}`);
+          appendJobLog(job, `[mediagrabber] Failed to initialize ${tempJobDir}: ${err?.message || err}`);
           tempJobDir = path.join(TMP_DIR, jobId);
           fs.mkdirSync(tempJobDir, { recursive: true });
         }
@@ -1612,21 +1736,23 @@ async function startServer() {
           GRAB_EMBED_SUBS: job.options?.embed_subtitles ? 'true' : 'false',
           GRAB_SPONSORBLOCK: job.options?.sponsorblock ? 'true' : 'false',
           GRAB_PLAYLIST: job.options?.playlist_mode === 'playlist' ? 'true' : 'false',
+          GRAB_FOLDER_STRUCTURE: folderStructure,
+          GRAB_YT_TEMPLATE: ytTemplate,
+          GRAB_MUSIC_TEMPLATE: musicTemplate,
+          GRAB_GALLERY_TEMPLATE: galleryTemplate,
+          ...(rateLimit ? { GRAB_RATE_LIMIT: rateLimit } : {}),
           ...(extraYt ? { GRAB_EXTRA_YT: extraYt } : {}),
           ...(settings.spotdl_extra ? { GRAB_EXTRA_SPOTIFY: String(settings.spotdl_extra) } : {}),
           ...(settings.gallerydl_extra ? { GRAB_EXTRA_GALLERY: String(settings.gallerydl_extra) } : {}),
         });
 
         const launchArgs = [...grabCmd.prefixArgs, job.url];
-        job.log.push(`[mediagrabber] Launching ${grabCmd.scriptPath} (${job.mode})`);
+        appendJobLog(job, `[mediagrabber] Launching ${grabCmd.scriptPath} (${job.mode}${rateLimit ? `, limit ${rateLimit}` : ''})`);
         let lastProgress = 2;
         let detectedEngine: string = job.engine;
         let galleryDownloadStarted = false;
 
         const exitCode = await runCommandStreaming(jobId, grabCmd.bin, launchArgs, env, (line) => {
-        job.log.push(line);
-        if (job.log.length > 500) job.log.shift();
-
         if (line.includes('Engine → SPOTIFY')) {
           detectedEngine = 'SPOTIFY';
           job.engine = 'SPOTIFY';
@@ -1675,11 +1801,13 @@ async function startServer() {
           const rawThumb = line.split('FINAL_THUMB:', 2)[1].trim();
           job.thumbnail = toClientThumbUrl(rawThumb) || job.thumbnail;
         }
+        appendJobLog(job, line);
       });
 
       if (cancelledJobs.has(jobId)) {
         job.status = 'cancelled';
-        job.log.push('[mediagrabber] Job cancelled by user.');
+        appendJobLog(job, '[mediagrabber] Job cancelled by user.');
+        notifyJobStatus(job);
         return;
       }
 
@@ -1731,7 +1859,8 @@ async function startServer() {
           file: job.file,
         });
         writeJson(HISTORY_FILE, history.slice(0, 200));
-        job.log.push('[mediagrabber] Completed successfully.');
+        appendJobLog(job, '[mediagrabber] Completed successfully.');
+        notifyJobStatus(job);
         void sendPushNotification({
           title: 'Download Complete',
           body: `${job.title || job.url} finished (${job.engine}).`,
@@ -1748,7 +1877,8 @@ async function startServer() {
       } else {
         job.status = 'failed';
         job.progress = 0;
-        job.log.push(`[mediagrabber] Download failed (exit code ${exitCode}).`);
+        appendJobLog(job, `[mediagrabber] Download failed (exit code ${exitCode}).`);
+        notifyJobStatus(job);
         void sendPushNotification({
           title: 'Download Failed',
           body: `${job.title || job.url} failed (${job.engine}).`,
@@ -1773,7 +1903,7 @@ async function startServer() {
       const targetRoot = resolveJobBaseDir(job.engine, settings);
       const safeUploader = sanitizeSegment(meta.uploader, 'Unknown');
       const year = String(new Date().getFullYear());
-      const outDir = settings.folder_structure === 'flat' ? targetRoot : path.join(targetRoot, safeUploader, year);
+      const outDir = folderStructure === 'flat' ? targetRoot : path.join(targetRoot, safeUploader, year);
       fs.mkdirSync(outDir, { recursive: true });
       job.output_dir = outDir;
 
@@ -1782,6 +1912,9 @@ async function startServer() {
       if (toolName.includes('yt-dlp')) {
         const isAudio = job.mode === 'audio' || job.engine === 'YT MUSIC';
         args.push('--newline', '--write-info-json', '--write-thumbnail', '--download-archive', ARCHIVE_FILE);
+        if (rateLimit) {
+          args.push('--limit-rate', rateLimit);
+        }
         if (job.options?.playlist_mode === 'playlist') {
           args.push('--yes-playlist');
         } else {
@@ -1803,31 +1936,36 @@ async function startServer() {
           const container = String(settings.container || 'mp4');
           args.push('-f', `bestvideo[height<=${resNum}]+bestaudio/best[height<=${resNum}]/best`, '--merge-output-format', container);
         }
-        args.push('-o', path.join(outDir, '%(title).120s.%(ext)s'), job.url);
+        const ytRel = ytTemplate.replace(/^[/\\]+/, '');
+        const hasSubdirs = /[/\\]/.test(ytRel);
+        const directOutBase = hasSubdirs ? targetRoot : outDir;
+        args.push('-o', path.join(directOutBase, ytRel), job.url);
       } else if (toolName.includes('spotdl')) {
-        args.push('download', job.url, '--output', path.join(outDir, '{artist} - {title}.{output-ext}'));
+        args.push(job.url, '--output', path.join(targetRoot, musicTemplate));
       } else {
-        args.push('-D', outDir, job.url);
+        args.push('-D', outDir, '--filename', galleryTemplate);
+        if (rateLimit) args.push('--limit-rate', rateLimit);
+        args.push(job.url);
       }
 
-      job.log.push(`[mediagrabber] Launching direct ${toolName}...`);
-      const beforeSet = new Set(walkFiles(outDir));
+      appendJobLog(job, `[mediagrabber] Launching direct ${toolName}...`);
+      const beforeSet = new Set(walkFiles(targetRoot));
       const exitCode = await runCommandStreaming(jobId, directTool, args, buildToolEnv(), (line) => {
-        job.log.push(line);
-        if (job.log.length > 500) job.log.shift();
         const m = line.match(/(\d{1,3}(?:\.\d+)?)%/);
         if (m && line.includes('[download]')) {
           job.progress = Math.min(99, parseFloat(m[1]));
         }
+        appendJobLog(job, line);
       });
 
       if (cancelledJobs.has(jobId)) {
         job.status = 'cancelled';
-        job.log.push('[mediagrabber] Job cancelled by user.');
+        appendJobLog(job, '[mediagrabber] Job cancelled by user.');
+        notifyJobStatus(job);
         return;
       }
 
-      const afterFiles = walkFiles(outDir).filter(
+      const afterFiles = walkFiles(targetRoot).filter(
         (f) => !beforeSet.has(f) && MEDIA_EXTS.has(path.extname(f).toLowerCase())
       );
       if (afterFiles.length > 0) {
@@ -1853,7 +1991,8 @@ async function startServer() {
           file: job.file,
         });
         writeJson(HISTORY_FILE, history.slice(0, 200));
-        job.log.push('[mediagrabber] Completed successfully.');
+        appendJobLog(job, '[mediagrabber] Completed successfully.');
+        notifyJobStatus(job);
         void sendPushNotification({
           title: 'Download Complete',
           body: `${job.title || job.url} finished (${job.engine}).`,
@@ -1870,7 +2009,8 @@ async function startServer() {
       } else {
         job.status = 'failed';
         job.progress = 0;
-        job.log.push(`[mediagrabber] ${toolName} failed (exit code ${exitCode}).`);
+        appendJobLog(job, `[mediagrabber] ${toolName} failed (exit code ${exitCode}).`);
+        notifyJobStatus(job);
         void sendPushNotification({
           title: 'Download Failed',
           body: `${job.title || job.url} failed (${job.engine}).`,
@@ -1889,8 +2029,9 @@ async function startServer() {
 
       job.status = 'failed';
       job.progress = 0;
-      job.log.push('[mediagrabber] ERROR: No grab script or downloading binary found.');
-      job.log.push('[mediagrabber] Ensure /usr/local/bin/grab or yt-dlp is installed and in PATH.');
+      appendJobLog(job, '[mediagrabber] ERROR: No grab script or downloading binary found.');
+      appendJobLog(job, '[mediagrabber] Ensure /usr/local/bin/grab or yt-dlp is installed and in PATH.');
+      notifyJobStatus(job);
       void sendPushNotification({
         title: 'Download Failed',
         body: `${job.title || job.url} failed: no download binary found.`,
@@ -1907,7 +2048,8 @@ async function startServer() {
     } catch (err: any) {
       job.status = 'failed';
       job.progress = 0;
-      job.log.push(`[mediagrabber] Unexpected job error: ${err?.message || String(err)}`);
+      appendJobLog(job, `[mediagrabber] Unexpected job error: ${err?.message || String(err)}`);
+      notifyJobStatus(job);
       void sendPushNotification({
         title: 'Download Failed',
         body: `${job.title || job.url} encountered an unexpected error.`,
@@ -1947,7 +2089,8 @@ async function startServer() {
 
       job.status = 'failed';
       job.progress = 0;
-      job.log.push(`[janitor] Marked failed after exceeding ${timeoutMins}m stale download timeout.`);
+      appendJobLog(job, `[janitor] Marked failed after exceeding ${timeoutMins}m stale download timeout.`);
+      notifyJobStatus(job);
       cleaned++;
 
       void sendPushNotification({
@@ -2299,9 +2442,96 @@ async function startServer() {
   });
 
   app.get('/api/log/:jobId', (req, res) => {
+    const active = getActiveUser();
+    if (!active) return res.status(401).json({ error: 'Sign in required.' });
     const job = queue.get(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     res.json({ job_id: job.job_id, url: job.url, status: job.status, log: job.log });
+  });
+
+  app.get('/api/log/:jobId/stream', (req, res) => {
+    const active = getActiveUser();
+    if (!active) return res.status(401).json({ error: 'Sign in required.' });
+    const job = queue.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const sendEvent = (event: string, data: unknown) => {
+      try {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // ignore disconnected stream
+      }
+    };
+
+    sendEvent('init', {
+      job_id: job.job_id,
+      status: job.status,
+      progress: job.progress,
+      title: job.title,
+      engine: job.engine,
+      log: job.log,
+    });
+
+    const isTerminal = job.status === 'done' || job.status === 'failed' || job.status === 'cancelled';
+    if (isTerminal) {
+      sendEvent('status', {
+        status: job.status,
+        progress: job.progress,
+        file: job.file,
+        title: job.title,
+        engine: job.engine,
+        thumbnail: job.thumbnail,
+      });
+      res.end();
+      return;
+    }
+
+    let listeners = jobLogSubscribers.get(job.job_id);
+    if (!listeners) {
+      listeners = new Set();
+      jobLogSubscribers.set(job.job_id, listeners);
+    }
+
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': keepalive\n\n');
+      } catch {
+        cleanup();
+      }
+    }, 15_000);
+
+    const onEvent = (event: string, payload: any) => {
+      sendEvent(event, payload);
+      if (
+        event === 'status' &&
+        (payload?.status === 'done' || payload?.status === 'failed' || payload?.status === 'cancelled')
+      ) {
+        cleanup();
+        try {
+          res.end();
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      const setRef = jobLogSubscribers.get(job.job_id);
+      if (setRef) {
+        setRef.delete(onEvent);
+        if (setRef.size === 0) jobLogSubscribers.delete(job.job_id);
+      }
+    };
+
+    listeners.add(onEvent);
+    req.on('close', cleanup);
   });
 
   function killChildProcessTree(proc: ChildProcess) {
@@ -2333,7 +2563,8 @@ async function startServer() {
     }
     if (job.status === 'queued' || job.status === 'running') {
       job.status = 'cancelled';
-      job.log.push('[mediagrabber] Cancelled by user.');
+      appendJobLog(job, '[mediagrabber] Cancelled by user.');
+      notifyJobStatus(job);
     }
     dispatchingJobIds.delete(job.job_id);
     persistQueue();
@@ -2421,7 +2652,17 @@ async function startServer() {
 
   // ---- Settings & Storage Routes ----
   app.get('/api/settings', (_req, res) => {
-    res.json(readJson(SETTINGS_FILE, {}));
+    const s = readJson<any>(SETTINGS_FILE, {});
+    res.json({
+      download_rate_limit: '',
+      auto_dedup_schedule: 'off',
+      auto_dedup_last_run: null,
+      auto_dedup_last_summary: null,
+      yt_naming_template: DEFAULT_YT_NAMING_TEMPLATE,
+      music_naming_template: DEFAULT_MUSIC_NAMING_TEMPLATE,
+      gallery_naming_template: DEFAULT_GALLERY_NAMING_TEMPLATE,
+      ...s,
+    });
   });
 
   app.post('/api/settings', (req, res) => {
@@ -2462,6 +2703,38 @@ async function startServer() {
         incoming.webhook_url = validateWebhookUrl(incoming.webhook_url);
       } catch (err: any) {
         return res.status(400).json({ error: err?.message || 'Invalid webhook URL.' });
+      }
+    }
+    if ('download_rate_limit' in incoming) {
+      try {
+        incoming.download_rate_limit = sanitizeRateLimit(incoming.download_rate_limit);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || 'Invalid download rate limit.' });
+      }
+    }
+    if ('auto_dedup_schedule' in incoming) {
+      const val = String(incoming.auto_dedup_schedule || 'off').toLowerCase();
+      incoming.auto_dedup_schedule = val === 'daily' || val === 'weekly' ? val : 'off';
+    }
+    if ('yt_naming_template' in incoming) {
+      try {
+        incoming.yt_naming_template = sanitizeNamingTemplate(incoming.yt_naming_template, DEFAULT_YT_NAMING_TEMPLATE, true);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || 'Invalid YouTube naming template.' });
+      }
+    }
+    if ('music_naming_template' in incoming) {
+      try {
+        incoming.music_naming_template = sanitizeNamingTemplate(incoming.music_naming_template, DEFAULT_MUSIC_NAMING_TEMPLATE, true);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || 'Invalid Music naming template.' });
+      }
+    }
+    if ('gallery_naming_template' in incoming) {
+      try {
+        incoming.gallery_naming_template = sanitizeNamingTemplate(incoming.gallery_naming_template, DEFAULT_GALLERY_NAMING_TEMPLATE, false);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || 'Invalid Gallery naming template.' });
       }
     }
     if ('stale_timeout_minutes' in incoming) {
@@ -3045,25 +3318,27 @@ async function startServer() {
     res.json(tmpReorgState);
   });
 
-  // ---- Deduplicate (SHA-256) ----
-  app.post('/api/deduplicate', (req, res) => {
-    const settings = readJson<any>(SETTINGS_FILE, {});
-    const action = req.body?.action === 'delete' ? 'delete' : 'scan';
-    const defaultYt = isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR;
-    const requestedPath = String(req.body?.path || defaultYt);
-    const targetDir = safePathWithinLibraries(requestedPath, settings) || defaultYt;
-
-    if (!fs.existsSync(targetDir)) {
-      return res.status(400).json({ error: `Folder not found in configured libraries: ${requestedPath}` });
-    }
-
-    const files = walkFiles(targetDir).filter((f) => MEDIA_EXTS.has(path.extname(f).toLowerCase()));
+  // ---- Deduplicate (SHA-256) & Scheduled Auto-Cleanup ----
+  function deduplicateDirectory(targetDir: string, action: 'scan' | 'delete') {
+    const trashRoot = path.resolve(TRASH_DIR);
+    const tmpRoot = path.resolve(TMP_DIR);
+    const files = walkFiles(targetDir).filter((f) => {
+      const resolved = path.resolve(f);
+      if (resolved.startsWith(trashRoot + path.sep) || resolved.startsWith(tmpRoot + path.sep)) {
+        return false;
+      }
+      return MEDIA_EXTS.has(path.extname(f).toLowerCase());
+    });
     const byHash = new Map<string, string[]>();
     for (const file of files) {
-      const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-      const group = byHash.get(hash) || [];
-      group.push(file);
-      byHash.set(hash, group);
+      try {
+        const hash = hashFileSha256(file);
+        const group = byHash.get(hash) || [];
+        group.push(file);
+        byHash.set(hash, group);
+      } catch {
+        // skip unreadable file
+      }
     }
 
     const logs: string[] = [`Scanned ${files.length} file(s) in ${targetDir}`];
@@ -3082,7 +3357,9 @@ async function startServer() {
           const trashDest = path.join(TRASH_DIR, `${Date.now()}_${path.basename(dup)}`);
           moveFileSafe(dup, trashDest);
           const dupInfo = dup.replace(/\.[^.]+$/, '.info.json');
-          if (fs.existsSync(dupInfo)) fs.unlinkSync(dupInfo);
+          if (fs.existsSync(dupInfo)) {
+            try { fs.unlinkSync(dupInfo); } catch {}
+          }
           trashedCount++;
           logs.push(`  🗑️ Moved duplicate to trash: ${path.basename(dup)}`);
         } else {
@@ -3099,7 +3376,114 @@ async function startServer() {
       logs.push(`✅ Moved ${trashedCount} duplicate file(s) to ${TRASH_DIR}.`);
     }
 
-    res.json({ status: 'done', duplicateCount, trashedCount, logs });
+    return { scannedFiles: files.length, duplicateCount, trashedCount, logs };
+  }
+
+  let scheduledDedupRunning = false;
+
+  async function runScheduledDeduplication(force = false) {
+    if (scheduledDedupRunning) return { ok: false, skipped: true, reason: 'already_running' };
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const schedule = settings?.auto_dedup_schedule === 'daily' || settings?.auto_dedup_schedule === 'weekly'
+      ? settings.auto_dedup_schedule
+      : 'off';
+
+    if (!force) {
+      if (schedule === 'off') return { ok: true, skipped: true, reason: 'disabled' };
+      const intervalMs = schedule === 'weekly' ? 7 * 86_400_000 : 86_400_000;
+      const lastRunMs = settings?.auto_dedup_last_run ? new Date(settings.auto_dedup_last_run).getTime() : 0;
+      if (Number.isFinite(lastRunMs) && lastRunMs > 0 && Date.now() - lastRunMs < intervalMs) {
+        return { ok: true, skipped: true, reason: 'not_due' };
+      }
+    }
+
+    scheduledDedupRunning = true;
+    try {
+      const dirs = Array.from(
+        new Set(
+          [
+            isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR,
+            isSafeLibraryBasePath(settings.music_base_path) || MUSIC_DIR,
+            isSafeLibraryBasePath(settings.gallery_base_path) || GALLERY_DIR,
+          ]
+            .map((d) => path.resolve(d))
+            .filter((d) => fs.existsSync(d))
+        )
+      );
+
+      let totalScanned = 0;
+      let duplicateCount = 0;
+      let trashedCount = 0;
+      const logs: string[] = [];
+      for (const dir of dirs) {
+        const resDir = deduplicateDirectory(dir, 'delete');
+        totalScanned += resDir.scannedFiles;
+        duplicateCount += resDir.duplicateCount;
+        trashedCount += resDir.trashedCount;
+        logs.push(...resDir.logs);
+      }
+
+      const nowIso = new Date().toISOString();
+      const summary =
+        trashedCount > 0
+          ? `Scanned ${totalScanned} files across ${dirs.length} library root(s); moved ${trashedCount} duplicate(s) to trash.`
+          : `Scanned ${totalScanned} files across ${dirs.length} library root(s); no duplicates found.`;
+
+      const updated = {
+        ...readJson<any>(SETTINGS_FILE, {}),
+        auto_dedup_last_run: nowIso,
+        auto_dedup_last_summary: summary,
+      };
+      writeJson(SETTINGS_FILE, updated);
+
+      if (trashedCount > 0) {
+        void sendPushNotification({
+          title: 'Automated Duplicate Cleanup',
+          body: summary,
+          tag: 'auto-dedup',
+          url: '/',
+        });
+      }
+
+      return { ok: true, skipped: false, totalScanned, duplicateCount, trashedCount, summary, logs, settings: updated };
+    } finally {
+      scheduledDedupRunning = false;
+    }
+  }
+
+  setTimeout(() => {
+    void runScheduledDeduplication(false);
+  }, 90_000);
+  setInterval(() => {
+    void runScheduledDeduplication(false);
+  }, 30 * 60_000);
+
+  app.post('/api/deduplicate', (req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const action = req.body?.action === 'delete' ? 'delete' : 'scan';
+    const defaultYt = isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR;
+    const requestedPath = String(req.body?.path || defaultYt);
+    const targetDir = safePathWithinLibraries(requestedPath, settings) || defaultYt;
+
+    if (!fs.existsSync(targetDir)) {
+      return res.status(400).json({ error: `Folder not found in configured libraries: ${requestedPath}` });
+    }
+
+    const result = deduplicateDirectory(targetDir, action);
+    res.json({ status: 'done', ...result });
+  });
+
+  app.post('/api/deduplicate/run-scheduled', async (_req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const result = await runScheduledDeduplication(true);
+    res.json(result);
   });
 
   // ---- Archive Manager ----

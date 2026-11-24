@@ -2,13 +2,13 @@
 
 <img src="public/logo.png" alt="MediaGrabber" width="360" />
 
-# MediaGrabber (`v2.1-pre1`)
+# MediaGrabber (`v2.1-pre2`)
 
 **Self-Hosted Media Ingestion, Download Queue Console, Metadata Editor & Jellyfin Companion Service**
 
-Download, transcode, deduplicate, and organize media from **YouTube**, **YouTube Music**, **Spotify**, **Instagram**, **TikTok**, and other `yt-dlp` / `gallery-dl` sources with web-based queue management, YouTube RSS Auto-Grab, per-grab Subtitle/SponsorBlock controls, in-UI `cookies.txt` management, pre-flight dependency updates, scoped API keys, Navidrome radio sync, and native Jellyfin integration across **Linux**, **Windows 11**, and **Windows 10**.
+Download, transcode, deduplicate, and organize media from **YouTube**, **YouTube Music**, **Spotify**, **Instagram**, **TikTok**, and other `yt-dlp` / `gallery-dl` sources with real-time SSE log streaming, automated scheduled SHA-256 duplicate cleanup, custom per-site naming templates, bandwidth rate limiting (`--limit-rate`), YouTube RSS Auto-Grab, per-grab Subtitle/SponsorBlock controls, in-UI `cookies.txt` management, pre-flight dependency updates, scoped API keys, Navidrome radio sync, and native Jellyfin integration across **Linux**, **Windows 11**, and **Windows 10**.
 
-![Version](https://img.shields.io/badge/Version-v2.1--pre1-5b7cfa?style=flat-square)
+![Version](https://img.shields.io/badge/Version-v2.1--pre2-5b7cfa?style=flat-square)
 ![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%2011%20%7C%20Windows%2010-10b981?style=flat-square)
 ![Branch](https://img.shields.io/badge/Branch-mediagrabber%20%7C%20mediagrabber--nightly-6366f1?style=flat-square)
 
@@ -18,7 +18,7 @@ Download, transcode, deduplicate, and organize media from **YouTube**, **YouTube
 
 ## Supported Platforms & OS Version Badges
 
-MediaGrabber automatically appends your host OS to the reported build version (for example `v2.1-pre1-Linux`, `v2.1-pre1-Windows11`, or `v2.1-pre1-Windows10`):
+MediaGrabber automatically appends your host OS to the reported build version (for example `v2.1-pre2-Linux`, `v2.1-pre2-Windows11`, or `v2.1-pre2-Windows10`):
 
 | Platform / Environment | Support Status | Reported Version Tag | Notes |
 | --- | --- | --- | --- |

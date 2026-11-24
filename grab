@@ -72,15 +72,31 @@ AUDIO_ONLY="${GRAB_AUDIO_ONLY:-false}"
 EMBED_SUBS="${GRAB_EMBED_SUBS:-false}"
 SPONSORBLOCK="${GRAB_SPONSORBLOCK:-false}"
 PLAYLIST_MODE="${GRAB_PLAYLIST:-false}"
+FOLDER_STRUCTURE="${GRAB_FOLDER_STRUCTURE:-default}"
+RATE_LIMIT="$(printf "%s" "${GRAB_RATE_LIMIT:-}" | tr -cd '0-9.kKmMgG')"
+if [ -n "$RATE_LIMIT" ] && ! [[ "$RATE_LIMIT" =~ ^[0-9]+(\.[0-9]+)?[kKmMgG]?$ ]]; then
+    RATE_LIMIT=""
+fi
 
-log "⚙️  Video max: ${VIDEO_RES}p, Audio: $AUDIO_FORMAT ($AUDIO_BITRATE), Container: $CONTAINER, Audio-Only: $AUDIO_ONLY, Subtitles: $EMBED_SUBS, SponsorBlock: $SPONSORBLOCK, Playlist: $PLAYLIST_MODE"
+sanitize_rel_template() {
+    local raw="$1"
+    local fallback="$2"
+    raw="$(printf "%s" "$raw" | tr -d '\r\n\0`$;|&><"'\''' | sed -e 's/^[\/\\]*//' -e 's/\.\.//g')"
+    [ -n "$raw" ] && echo "$raw" || echo "$fallback"
+}
+
+YT_TEMPLATE="$(sanitize_rel_template "${GRAB_YT_TEMPLATE:-}" "%(title).150s.%(ext)s")"
+MUSIC_TEMPLATE="$(sanitize_rel_template "${GRAB_MUSIC_TEMPLATE:-}" "{artist}/{album}/{title}.{ext}")"
+GALLERY_TEMPLATE="$(sanitize_rel_template "${GRAB_GALLERY_TEMPLATE:-}" "%(title).100s-%(id)s.%(ext)s")"
+
+log "⚙️  Video max: ${VIDEO_RES}p, Audio: $AUDIO_FORMAT ($AUDIO_BITRATE), Container: $CONTAINER, Audio-Only: $AUDIO_ONLY, Subtitles: $EMBED_SUBS, SponsorBlock: $SPONSORBLOCK, Playlist: $PLAYLIST_MODE${RATE_LIMIT:+, Limit: $RATE_LIMIT}"
 
 # ---------- SPOTIFY PIPELINE ----------
 if [ "$ENGINE" = "SPOTIFY" ]; then
     log "🎧 Spotify → spotdl"
     [ -z "$SPOTDL" ] && log "❌ spotdl not found" && exit 1
     mkdir -p "$MUSIC_DIR"
-    OUTPUT_TEMPLATE="$MUSIC_DIR/{artist}/{album}/{title}.{ext}"
+    OUTPUT_TEMPLATE="$MUSIC_DIR/$MUSIC_TEMPLATE"
     CMD=("$SPOTDL" "$CLEAN_URL" --output "$OUTPUT_TEMPLATE" --format "$AUDIO_FORMAT" --simple-tui)
     [ "$AUDIO_FORMAT" = "mp3" ] && CMD+=("--bitrate" "$AUDIO_BITRATE")
     [ "$GENERATE_LRC" = "true" ] && CMD+=("--generate-lrc")
@@ -99,7 +115,7 @@ if [ "$ENGINE" = "SPOTIFY" ]; then
     EXIT_CODE=$?
 
     if [ $EXIT_CODE -eq 0 ]; then
-        latest_file=$(find "$MUSIC_DIR" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" \) -mmin -2 2>/dev/null | head -1)
+        latest_file=$(find "$MUSIC_DIR" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" -o -name "*.opus" \) -mmin -2 2>/dev/null | head -1)
         [ -n "$latest_file" ] && log "FINAL_FILE: $latest_file"
     fi
     exit $EXIT_CODE
@@ -110,7 +126,10 @@ if [ "$ENGINE" = "GALLERY" ]; then
     log "🖼 Gallery → gallery-dl"
     [ -z "$GALLERY" ] && log "❌ gallery-dl not found" && exit 1
     cd "$TEMP_DIR" || exit 1
-    CMD=("$GALLERY" "$CLEAN_URL" --directory "./" --filename "%(title).100s-%(id)s.%(ext)s")
+    GALLERY_FILE_TMPL="${GALLERY_TEMPLATE##*/}"
+    [ -z "$GALLERY_FILE_TMPL" ] && GALLERY_FILE_TMPL="%(title).100s-%(id)s.%(ext)s"
+    CMD=("$GALLERY" "$CLEAN_URL" --directory "./" --filename "$GALLERY_FILE_TMPL")
+    [ -n "$RATE_LIMIT" ] && CMD+=("--limit-rate" "$RATE_LIMIT")
     [ -n "$COOKIES_GALLERY" ] && [ -f "$COOKIES_GALLERY" ] && CMD+=("--cookies" "$COOKIES_GALLERY")
     [ -n "$GRAB_EXTRA_GALLERY" ] && IFS=' ' read -ra EXTRA <<< "$GRAB_EXTRA_GALLERY" && CMD+=("${EXTRA[@]}")
 
@@ -119,9 +138,10 @@ if [ "$ENGINE" = "GALLERY" ]; then
     EXIT_CODE=$?
 
     if [ $EXIT_CODE -eq 0 ]; then
-        latest_file=$(find . -maxdepth 1 -type f -mmin -2 2>/dev/null | head -1)
+        latest_file=$(find . -type f -mmin -2 2>/dev/null | head -1)
         if [ -n "$latest_file" ]; then
             final_dir="$GALLERY_DIR/Unsorted"
+            [ "$FOLDER_STRUCTURE" = "flat" ] && final_dir="$GALLERY_DIR"
             mkdir -p "$final_dir"
             filename=$(basename "$latest_file")
             if mv "$latest_file" "$final_dir/$filename"; then
@@ -143,7 +163,6 @@ if [ "$AUDIO_ONLY" = "true" ]; then
 else
     USE_MUSIC_DIR=false
     OUTPUT_BASE="$YT_DIR"
-    CONTAINER="mp4"
 fi
 
 CMD=(
@@ -155,6 +174,10 @@ CMD=(
     --extractor-args "youtube:skip=hls,dash"
     --retries 10 --fragment-retries 10
 )
+
+if [ -n "$RATE_LIMIT" ]; then
+    CMD+=("--limit-rate" "$RATE_LIMIT")
+fi
 
 if [ -n "$COOKIES_YOUTUBE" ] && [ -f "$COOKIES_YOUTUBE" ]; then
     CMD+=("--cookies" "$COOKIES_YOUTUBE")
@@ -180,11 +203,11 @@ fi
 
 if [ "$AUDIO_ONLY" = "true" ]; then
     CMD+=("--extract-audio" "--audio-format" "$AUDIO_FORMAT" "--audio-quality" "0")
-    CMD+=("-o" "./%(title).150s.%(ext)s")
+    CMD+=("-o" "./$YT_TEMPLATE")
 else
     CMD+=("-f" "bv*[height<=${VIDEO_RES}]+ba/b[height<=${VIDEO_RES}]")
-    CMD+=("--merge-output-format" "mp4")
-    CMD+=("-o" "./%(title).150s.%(ext)s")
+    CMD+=("--merge-output-format" "$CONTAINER")
+    CMD+=("-o" "./$YT_TEMPLATE")
 fi
 
 [ -n "$GRAB_EXTRA_YT" ] && IFS=' ' read -ra EXTRA <<< "$GRAB_EXTRA_YT" && CMD+=("${EXTRA[@]}")
@@ -198,19 +221,27 @@ if [ $EXIT_CODE -eq 0 ]; then
     log "✅ Download complete, processing..."
     VIDEO_FILE=""
     if [ "$AUDIO_ONLY" = "true" ]; then
-        for ext in mp3 flac m4a; do
-            found=$(find . -maxdepth 1 -name "*.$ext" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2- | sed 's/^\.\///')
+        for ext in mp3 flac m4a opus; do
+            found=$(find . -type f -name "*.$ext" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2- | sed 's/^\.\///')
             [ -n "$found" ] && VIDEO_FILE="$found" && break
         done
     else
         for ext in mp4 mkv webm; do
-            found=$(find . -maxdepth 1 -name "*.$ext" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2- | sed 's/^\.\///')
+            found=$(find . -type f -name "*.$ext" -printf "%T@ %p\n" 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2- | sed 's/^\.\///')
             [ -n "$found" ] && VIDEO_FILE="$found" && break
         done
     fi
 
     if [ -n "$VIDEO_FILE" ]; then
-        INFO_FILE="$(basename "$VIDEO_FILE" | sed 's/\.[^.]*$/.info.json/')"
+        VIDEO_DIR="$(dirname "$VIDEO_FILE")"
+        VIDEO_BASE="$(basename "$VIDEO_FILE")"
+        VIDEO_STEM="${VIDEO_BASE%.*}"
+        if [ "$VIDEO_DIR" = "." ]; then
+            INFO_FILE="${VIDEO_STEM}.info.json"
+        else
+            INFO_FILE="${VIDEO_DIR}/${VIDEO_STEM}.info.json"
+        fi
+
         if [ -f "$INFO_FILE" ]; then
             uploader=$(jq -r '.uploader' "$INFO_FILE" 2>/dev/null)
             upload_date=$(jq -r '.upload_date' "$INFO_FILE" 2>/dev/null)
@@ -218,26 +249,32 @@ if [ $EXIT_CODE -eq 0 ]; then
             uploader=""; upload_date=""
         fi
 
-        [ -z "$uploader" ] && uploader="Unknown Uploader"
-        [ -z "$upload_date" ] && upload_date=$(date +%Y%m%d)
+        [ -z "$uploader" ] || [ "$uploader" = "null" ] && uploader="Unknown Uploader"
+        [ -z "$upload_date" ] || [ "$upload_date" = "null" ] && upload_date=$(date +%Y%m%d)
         year="${upload_date:0:4}"; [ -z "$year" ] && year=$(date +%Y)
         uploader_safe=$(echo "$uploader" | tr -cd '[:alnum:][:space:]._-' | sed 's/^[._-]*//')
         [ -z "$uploader_safe" ] && uploader_safe="Unknown Uploader"
 
-        if [ "$USE_MUSIC_DIR" = true ]; then
-            final_dir="$MUSIC_DIR/$uploader_safe/$year"
+        if [ "$VIDEO_DIR" != "." ]; then
+            final_dir="$OUTPUT_BASE/$VIDEO_DIR"
+        elif [ "$FOLDER_STRUCTURE" = "flat" ]; then
+            final_dir="$OUTPUT_BASE"
         else
-            final_dir="$YT_DIR/$uploader_safe/$year"
+            final_dir="$OUTPUT_BASE/$uploader_safe/$year"
         fi
         mkdir -p "$final_dir"
 
-        if mv "$VIDEO_FILE" "$final_dir/"; then
-            log "FINAL_FILE: $final_dir/$VIDEO_FILE"
-            for ext in webp jpg png; do
-                thumb_file="$(basename "$VIDEO_FILE" | sed 's/\.[^.]*$/.'"$ext"'/')"
-                [ -f "$thumb_file" ] && mv "$thumb_file" "$final_dir/" && log "FINAL_THUMB: $final_dir/$thumb_file"
+        if mv "$VIDEO_FILE" "$final_dir/$VIDEO_BASE"; then
+            log "FINAL_FILE: $final_dir/$VIDEO_BASE"
+            for ext in webp jpg jpeg png; do
+                if [ "$VIDEO_DIR" = "." ]; then
+                    thumb_path="${VIDEO_STEM}.${ext}"
+                else
+                    thumb_path="${VIDEO_DIR}/${VIDEO_STEM}.${ext}"
+                fi
+                [ -f "$thumb_path" ] && mv "$thumb_path" "$final_dir/${VIDEO_STEM}.${ext}" && log "FINAL_THUMB: $final_dir/${VIDEO_STEM}.${ext}"
             done
-            [ -f "$INFO_FILE" ] && mv "$INFO_FILE" "$final_dir/"
+            [ -f "$INFO_FILE" ] && mv "$INFO_FILE" "$final_dir/${VIDEO_STEM}.info.json"
             log "✅ Moved to $final_dir"
         fi
         exit 0

@@ -75,8 +75,23 @@ $AudioOnly = ($env:GRAB_AUDIO_ONLY -eq "true") -or ($Engine -eq "YT MUSIC")
 $EmbedSubs = ($env:GRAB_EMBED_SUBS -eq "true")
 $SponsorBlock = ($env:GRAB_SPONSORBLOCK -eq "true")
 $AllowPlaylist = ($env:GRAB_PLAYLIST -eq "true")
+$FolderStructure = if ($env:GRAB_FOLDER_STRUCTURE) { $env:GRAB_FOLDER_STRUCTURE } else { "default" }
+$RateLimit = if ($env:GRAB_RATE_LIMIT -and ($env:GRAB_RATE_LIMIT.Trim() -match '^\d+(?:\.\d+)?[kKmMgG]?$')) { $env:GRAB_RATE_LIMIT.Trim() } else { "" }
 
-Write-GrabLog "Video max: ${VideoRes}p, Audio: $AudioFormat ($AudioBitrate), Container: $Container, Audio-Only: $AudioOnly, Subtitles: $EmbedSubs, SponsorBlock: $SponsorBlock, Playlist: $AllowPlaylist"
+function Get-SafeRelTemplate {
+    param([string]$Raw, [string]$Fallback)
+    if (-not $Raw) { return $Fallback }
+    $clean = ($Raw -replace '[\r\n\x00`$;|&><"'']', '') -replace '\.\.', ''
+    $clean = $clean.TrimStart('/', '\')
+    if (-not $clean) { return $Fallback }
+    return $clean
+}
+
+$YtTemplate = Get-SafeRelTemplate $env:GRAB_YT_TEMPLATE "%(title).150s.%(ext)s"
+$MusicTemplate = Get-SafeRelTemplate $env:GRAB_MUSIC_TEMPLATE "{artist}/{album}/{title}.{ext}"
+$GalleryTemplate = Get-SafeRelTemplate $env:GRAB_GALLERY_TEMPLATE "%(title).100s-%(id)s.%(ext)s"
+
+Write-GrabLog "Video max: ${VideoRes}p, Audio: $AudioFormat ($AudioBitrate), Container: $Container, Audio-Only: $AudioOnly, Subtitles: $EmbedSubs, SponsorBlock: $SponsorBlock, Playlist: $AllowPlaylist$(if ($RateLimit) { ", Limit: $RateLimit" })"
 
 # ---------- SPOTIFY PIPELINE ----------
 if ($Engine -eq "SPOTIFY") {
@@ -84,7 +99,7 @@ if ($Engine -eq "SPOTIFY") {
         Write-GrabLog "ERROR: spotdl not found in PATH."
         exit 1
     }
-    $OutTemplate = Join-Path $MusicDir "{artist}\{album}\{title}.{ext}"
+    $OutTemplate = Join-Path $MusicDir ($MusicTemplate -replace '/', '\')
     $ArgsList = @($CleanUrl, "--output", $OutTemplate, "--format", $AudioFormat, "--simple-tui", "--max-retries", "5")
     if ($AudioFormat -eq "mp3") { $ArgsList += @("--bitrate", $AudioBitrate) }
     if ($GenerateLrc) { $ArgsList += "--generate-lrc" }
@@ -120,7 +135,10 @@ if ($Engine -eq "GALLERY") {
         exit 1
     }
     Push-Location $TempDir
-    $ArgsList = @($CleanUrl, "--directory", ".", "--filename", "%(title).100s-%(id)s.%(ext)s")
+    $GalleryFileTmpl = Split-Path -Leaf ($GalleryTemplate -replace '/', '\')
+    if (-not $GalleryFileTmpl) { $GalleryFileTmpl = "%(title).100s-%(id)s.%(ext)s" }
+    $ArgsList = @($CleanUrl, "--directory", ".", "--filename", $GalleryFileTmpl)
+    if ($RateLimit) { $ArgsList += @("--limit-rate", $RateLimit) }
     if ($CookiesGallery -and (Test-Path $CookiesGallery)) { $ArgsList += @("--cookies", $CookiesGallery) }
     if ($env:GRAB_EXTRA_GALLERY) { $ArgsList += ($env:GRAB_EXTRA_GALLERY -split '\s+' | Where-Object { $_ }) }
 
@@ -129,10 +147,10 @@ if ($Engine -eq "GALLERY") {
     $ExitCode = $LASTEXITCODE
 
     if ($ExitCode -eq 0) {
-        $Latest = Get-ChildItem -Path $TempDir -File -ErrorAction SilentlyContinue |
+        $Latest = Get-ChildItem -Path $TempDir -Recurse -File -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
         if ($Latest) {
-            $FinalDir = Join-Path $GalleryDir "Unsorted"
+            $FinalDir = if ($FolderStructure -eq "flat") { $GalleryDir } else { Join-Path $GalleryDir "Unsorted" }
             New-Item -ItemType Directory -Force -Path $FinalDir | Out-Null
             $Dest = Join-Path $FinalDir $Latest.Name
             Move-Item -Force -Path $Latest.FullName -Destination $Dest
@@ -150,6 +168,7 @@ if (-not $YtDlp) {
 }
 
 Push-Location $TempDir
+$YtRelOut = ".\\" + ($YtTemplate -replace '/', '\')
 $ArgsList = @(
     "--no-mtime", "--no-part", "--ignore-errors", "--continue", "--no-overwrites", "--newline",
     "--download-archive", $ArchiveFile,
@@ -157,6 +176,7 @@ $ArgsList = @(
     "--concurrent-fragments", "4", "--geo-bypass",
     "--retries", "10", "--fragment-retries", "10"
 )
+if ($RateLimit) { $ArgsList += @("--limit-rate", $RateLimit) }
 if ($CookiesYoutube -and (Test-Path $CookiesYoutube)) { $ArgsList += @("--cookies", $CookiesYoutube) }
 if ($DenoBin) { $ArgsList += @("--js-runtimes", "deno:$DenoBin", "--remote-components", "ejs:github") }
 if ($AllowPlaylist) { $ArgsList += "--yes-playlist" } else { $ArgsList += "--no-playlist" }
@@ -164,9 +184,9 @@ if ($EmbedSubs -and (-not $AudioOnly)) { $ArgsList += @("--write-subs", "--write
 if ($SponsorBlock) { $ArgsList += @("--sponsorblock-remove", "sponsor") }
 
 if ($AudioOnly) {
-    $ArgsList += @("--extract-audio", "--audio-format", $AudioFormat, "--audio-quality", "0", "-o", ".\\%(title).150s.%(ext)s")
+    $ArgsList += @("--extract-audio", "--audio-format", $AudioFormat, "--audio-quality", "0", "-o", $YtRelOut)
 } else {
-    $ArgsList += @("-f", "bv*[height<=$VideoRes]+ba/b[height<=$VideoRes]/b", "--merge-output-format", $Container, "-o", ".\\%(title).150s.%(ext)s")
+    $ArgsList += @("-f", "bv*[height<=$VideoRes]+ba/b[height<=$VideoRes]/b", "--merge-output-format", $Container, "-o", $YtRelOut)
 }
 if ($env:GRAB_EXTRA_YT) { $ArgsList += ($env:GRAB_EXTRA_YT -split '\s+' | Where-Object { $_ }) }
 $ArgsList += $CleanUrl
@@ -177,13 +197,14 @@ $ExitCode = $LASTEXITCODE
 
 if ($ExitCode -eq 0) {
     $MediaExts = if ($AudioOnly) { @(".mp3", ".flac", ".m4a", ".opus") } else { @(".mp4", ".mkv", ".webm") }
-    $MediaFile = Get-ChildItem -Path $TempDir -File -ErrorAction SilentlyContinue |
+    $MediaFile = Get-ChildItem -Path $TempDir -Recurse -File -ErrorAction SilentlyContinue |
         Where-Object { $MediaExts -contains $_.Extension.ToLowerInvariant() } |
         Sort-Object LastWriteTime -Descending | Select-Object -First 1
 
     if ($MediaFile) {
         $BaseName = [System.IO.Path]::GetFileNameWithoutExtension($MediaFile.Name)
-        $InfoPath = Join-Path $TempDir "$BaseName.info.json"
+        $MediaParent = $MediaFile.Directory.FullName
+        $InfoPath = Join-Path $MediaParent "$BaseName.info.json"
         $Uploader = "Unknown Uploader"
         $Year = (Get-Date -Format "yyyy")
         if (Test-Path $InfoPath) {
@@ -199,7 +220,16 @@ if ($ExitCode -eq 0) {
         if (-not $UploaderSafe) { $UploaderSafe = "Unknown Uploader" }
 
         $BaseDestRoot = if ($AudioOnly) { $MusicDir } else { $YtDir }
-        $FinalDir = Join-Path (Join-Path $BaseDestRoot $UploaderSafe) $Year
+        $TempFull = (Resolve-Path $TempDir).Path.TrimEnd('\')
+        $ParentFull = $MediaParent.TrimEnd('\')
+        if ($ParentFull.Length -gt $TempFull.Length) {
+            $RelSub = $ParentFull.Substring($TempFull.Length).TrimStart('\')
+            $FinalDir = Join-Path $BaseDestRoot $RelSub
+        } elseif ($FolderStructure -eq "flat") {
+            $FinalDir = $BaseDestRoot
+        } else {
+            $FinalDir = Join-Path (Join-Path $BaseDestRoot $UploaderSafe) $Year
+        }
         New-Item -ItemType Directory -Force -Path $FinalDir | Out-Null
 
         $DestMedia = Join-Path $FinalDir $MediaFile.Name
@@ -207,7 +237,7 @@ if ($ExitCode -eq 0) {
         Write-GrabLog "FINAL_FILE: $DestMedia"
 
         foreach ($ext in @(".webp", ".jpg", ".jpeg", ".png")) {
-            $ThumbPath = Join-Path $TempDir "$BaseName$ext"
+            $ThumbPath = Join-Path $MediaParent "$BaseName$ext"
             if (Test-Path $ThumbPath) {
                 $DestThumb = Join-Path $FinalDir "$BaseName$ext"
                 Move-Item -Force -Path $ThumbPath -Destination $DestThumb

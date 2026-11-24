@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
   X,
@@ -187,7 +187,100 @@ export const JobLogModal: React.FC<{
   job: Job | null;
   onClose: () => void;
 }> = ({ job, onClose }) => {
+  const [streamLines, setStreamLines] = useState<string[]>([]);
+  const [liveStatus, setLiveStatus] = useState<Job['status']>('queued');
+  const [streamActive, setStreamActive] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const preRef = useRef<HTMLPreElement | null>(null);
+  const jobId = job?.job_id ?? null;
+
+  useEffect(() => {
+    if (!job) {
+      setStreamLines([]);
+      setStreamActive(false);
+      return;
+    }
+    setStreamLines(Array.isArray(job.log) ? job.log : []);
+    setLiveStatus(job.status);
+
+    const isTerminal = job.status === 'done' || job.status === 'failed' || job.status === 'cancelled';
+    if (isTerminal || typeof EventSource === 'undefined') {
+      setStreamActive(false);
+      return;
+    }
+
+    const es = new EventSource(`/api/log/${encodeURIComponent(job.job_id)}/stream`);
+    setStreamActive(true);
+
+    const handleInit = (evt: MessageEvent) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (Array.isArray(data?.log)) setStreamLines(data.log);
+        if (data?.status) setLiveStatus(data.status);
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    const handleLine = (evt: MessageEvent) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (typeof data?.line === 'string') {
+          setStreamLines((prev) => {
+            if (prev.length > 0 && prev[prev.length - 1] === data.line) return prev;
+            const next = [...prev, data.line];
+            return next.length > 500 ? next.slice(-500) : next;
+          });
+        }
+        if (data?.status) setLiveStatus(data.status);
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    const handleStatus = (evt: MessageEvent) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (data?.status) {
+          setLiveStatus(data.status);
+          if (data.status === 'done' || data.status === 'failed' || data.status === 'cancelled') {
+            setStreamActive(false);
+            es.close();
+          }
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    es.addEventListener('init', handleInit as EventListener);
+    es.addEventListener('line', handleLine as EventListener);
+    es.addEventListener('status', handleStatus as EventListener);
+    es.onerror = () => {
+      setStreamActive(false);
+    };
+
+    return () => {
+      setStreamActive(false);
+      es.close();
+    };
+  }, [jobId]);
+
+  // Keep lines synced with parent polling fallback if SSE isn't active
+  useEffect(() => {
+    if (!job || streamActive) return;
+    setStreamLines((prev) => (job.log.length >= prev.length ? job.log : prev));
+    setLiveStatus(job.status);
+  }, [job, streamActive]);
+
+  useEffect(() => {
+    if (!autoScroll || !preRef.current) return;
+    preRef.current.scrollTop = preRef.current.scrollHeight;
+  }, [streamLines.length, autoScroll]);
+
   if (!job) return null;
+  const isRunning = liveStatus === 'running' || liveStatus === 'queued';
+
   return (
     <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
       <div
@@ -196,22 +289,54 @@ export const JobLogModal: React.FC<{
       >
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
-            <h3 className="font-display text-sm font-semibold truncate">
-              Execution Log — {job.title || job.job_id.slice(0, 8)}
-            </h3>
+            <div className="flex items-center gap-2.5">
+              <h3 className="font-display text-sm font-semibold truncate">
+                Execution Log — {job.title || job.job_id.slice(0, 8)}
+              </h3>
+              <span
+                className="inline-flex items-center gap-1.5 text-[11px] font-mono uppercase shrink-0"
+                style={{
+                  color:
+                    liveStatus === 'done'
+                      ? '#10b981'
+                      : liveStatus === 'failed'
+                      ? '#ef4444'
+                      : isRunning
+                      ? 'var(--mg-accent)'
+                      : 'var(--mg-muted)',
+                }}
+              >
+                {streamActive && isRunning && (
+                  <span className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: 'var(--mg-accent)' }} />
+                )}
+                <span>{streamActive && isRunning ? 'LIVE STREAM' : liveStatus.toUpperCase()}</span>
+              </span>
+            </div>
             <p className="text-xs font-mono truncate" style={{ color: 'var(--mg-muted)' }}>
               {job.url}
             </p>
           </div>
-          <button type="button" onClick={onClose} className="p-1.5 rounded-md border" style={{ borderColor: 'var(--mg-border)' }}>
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer" style={{ color: 'var(--mg-muted)' }}>
+              <input
+                type="checkbox"
+                checked={autoScroll}
+                onChange={(e) => setAutoScroll(e.target.checked)}
+                className="w-3.5 h-3.5 accent-[var(--mg-accent)]"
+              />
+              <span>Auto-scroll</span>
+            </label>
+            <button type="button" onClick={onClose} className="p-1.5 rounded-md border" style={{ borderColor: 'var(--mg-border)' }}>
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
         <pre
-          className="flex-1 p-3.5 rounded-lg border text-xs font-mono overflow-auto whitespace-pre-wrap"
+          ref={preRef}
+          className="flex-1 p-3.5 rounded-lg border text-xs font-mono overflow-auto whitespace-pre-wrap min-h-[240px]"
           style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
         >
-          {job.log.join('\n')}
+          {streamLines.length > 0 ? streamLines.join('\n') : 'Waiting for extractor output...'}
         </pre>
       </div>
     </div>
