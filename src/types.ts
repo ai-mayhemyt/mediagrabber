@@ -151,9 +151,33 @@ export interface VersionInfo {
   current: string;
   latest: string;
   update_available: boolean;
+  release_zip_url?: string | null;
   checked_at: string;
   tags: string[];
   error: string | null;
+}
+
+export interface SignedFileDownload {
+  url: string;
+  filename: string;
+  size_bytes: number;
+  expires_at: string;
+}
+
+export interface YoutubeFeedChannel {
+  channelId: string;
+  title: string;
+  addedAt: string;
+}
+
+export interface YoutubeFeedVideo {
+  videoId: string;
+  channelId: string;
+  channelTitle: string;
+  title: string;
+  url: string;
+  thumbnail: string;
+  published: string;
 }
 
 export interface NetwatchStatus {

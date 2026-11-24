@@ -51,6 +51,8 @@ const TOKENS_FILE = path.join(STATE_DIR, 'api_tokens.json');
 const NETWATCH_FILE = path.join(STATE_DIR, 'netwatch.json');
 const VAPID_FILE = path.join(STATE_DIR, 'vapid.json');
 const PUSH_SUBS_FILE = path.join(STATE_DIR, 'push_subscriptions.json');
+const YOUTUBE_FEEDS_FILE = path.join(STATE_DIR, 'youtube_feeds.json');
+const FILE_SIGN_SECRET = process.env.MEDIAGRABBER_SIGNING_SECRET || crypto.randomBytes(32).toString('hex');
 
 const DEFAULT_AVATAR = '/src/assets/images/avatar_admin_user_1795453948311.jpg';
 const DEFAULT_YT_THUMB = '/src/assets/images/cover_youtube_sample_1795453949069.jpg';
@@ -738,6 +740,153 @@ async function sendPushNotification(payload: {
     writeJson(PUSH_SUBS_FILE, validSubs);
   }
   return { sent, total: subs.length, failed };
+}
+
+function signDownloadToken(resolvedPath: string, expMs: number): string {
+  return crypto
+    .createHmac('sha256', FILE_SIGN_SECRET)
+    .update(`${expMs}:${resolvedPath}`)
+    .digest('hex');
+}
+
+function verifyDownloadToken(resolvedPath: string, expMs: number, sig: string): boolean {
+  if (!sig || !/^[a-f0-9]{64}$/i.test(sig)) return false;
+  if (!Number.isFinite(expMs) || Date.now() > expMs) return false;
+  const expected = signDownloadToken(resolvedPath, expMs);
+  const a = Buffer.from(expected, 'hex');
+  const b = Buffer.from(sig.toLowerCase(), 'hex');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+interface YoutubeFeedChannel {
+  channelId: string;
+  title: string;
+  addedAt: string;
+}
+
+interface YoutubeFeedVideo {
+  videoId: string;
+  channelId: string;
+  channelTitle: string;
+  title: string;
+  url: string;
+  published: string;
+  thumbnail: string;
+}
+
+function decodeXmlEntities(raw: string): string {
+  return raw
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/gi, "'");
+}
+
+function parseYoutubeAtomFeed(xml: string, fallbackChannelId: string): {
+  channelTitle: string;
+  videos: YoutubeFeedVideo[];
+} {
+  const topTitleMatch = xml.match(/<feed[^>]*>[\s\S]*?<title>([\s\S]*?)<\/title>/i);
+  const channelTitle = topTitleMatch ? decodeXmlEntities(topTitleMatch[1].trim()) : fallbackChannelId;
+  const entries = xml.match(/<entry>[\s\S]*?<\/entry>/gi) || [];
+  const videos: YoutubeFeedVideo[] = [];
+
+  for (const entry of entries.slice(0, 8)) {
+    const vidMatch = entry.match(/<yt:videoId>([^<]+)<\/yt:videoId>/i);
+    const titleMatch = entry.match(/<title>([\s\S]*?)<\/title>/i);
+    const pubMatch = entry.match(/<published>([^<]+)<\/published>/i);
+    const videoId = vidMatch ? vidMatch[1].trim() : '';
+    if (!videoId || !/^[a-zA-Z0-9_-]{6,}$/.test(videoId)) continue;
+    videos.push({
+      videoId,
+      channelId: fallbackChannelId,
+      channelTitle,
+      title: titleMatch ? decodeXmlEntities(titleMatch[1].trim()) : `YouTube Video ${videoId}`,
+      url: `https://www.youtube.com/watch?v=${videoId}`,
+      published: pubMatch ? pubMatch[1].trim() : new Date().toISOString(),
+      thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+    });
+  }
+  return { channelTitle, videos };
+}
+
+async function resolveYoutubeChannelId(rawInput: string): Promise<string> {
+  const input = rawInput.trim();
+  if (/^UC[a-zA-Z0-9_-]{20,}$/.test(input)) {
+    return input;
+  }
+
+  // Handle plain @handle
+  let targetUrl = '';
+  if (/^@[a-zA-Z0-9._-]{2,}$/.test(input)) {
+    targetUrl = `https://www.youtube.com/${input}`;
+  } else {
+    let parsed: URL;
+    try {
+      parsed = new URL(input.startsWith('http') ? input : `https://${input}`);
+    } catch {
+      throw new Error('Enter a valid YouTube channel URL, @handle, or UC... channel ID.');
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('Only HTTP/HTTPS YouTube URLs are supported.');
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (host !== 'youtube.com' && host !== 'www.youtube.com' && host !== 'm.youtube.com') {
+      throw new Error('Only youtube.com channel URLs, @handles, or UC... channel IDs are allowed.');
+    }
+
+    const qChannel = parsed.searchParams.get('channel_id') || '';
+    if (/^UC[a-zA-Z0-9_-]{20,}$/.test(qChannel)) {
+      return qChannel;
+    }
+    const pathChannelMatch = parsed.pathname.match(/^\/channel\/(UC[a-zA-Z0-9_-]{20,})/);
+    if (pathChannelMatch) {
+      return pathChannelMatch[1];
+    }
+    targetUrl = `https://www.youtube.com${parsed.pathname}`;
+  }
+
+  const pageRes = await fetch(targetUrl, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; MediaGrabber/2.0)',
+      Accept: 'text/html',
+    },
+    signal: AbortSignal.timeout(7000),
+  });
+  if (!pageRes.ok) {
+    throw new Error(`Unable to look up YouTube channel (HTTP ${pageRes.status}).`);
+  }
+  const html = await pageRes.text();
+  const idMatch =
+    html.match(/"channelId":"(UC[a-zA-Z0-9_-]{20,})"/) ||
+    html.match(/<link[^>]+rel="canonical"[^>]+href="https:\/\/www\.youtube\.com\/channel\/(UC[a-zA-Z0-9_-]{20,})"/i) ||
+    html.match(/channel_id=(UC[a-zA-Z0-9_-]{20,})/);
+  if (!idMatch) {
+    throw new Error('Could not find a YouTube channel ID (UC...) for that handle or URL.');
+  }
+  return idMatch[1];
+}
+
+async function fetchYoutubeChannelFeed(channelId: string): Promise<{
+  channelTitle: string;
+  videos: YoutubeFeedVideo[];
+}> {
+  if (!/^UC[a-zA-Z0-9_-]{20,}$/.test(channelId)) {
+    throw new Error('Invalid YouTube channel ID format.');
+  }
+  const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${encodeURIComponent(channelId)}`;
+  const res = await fetch(feedUrl, {
+    headers: { 'User-Agent': 'MediaGrabber/2.0' },
+    signal: AbortSignal.timeout(7000),
+  });
+  if (!res.ok) {
+    throw new Error(`YouTube RSS feed returned HTTP ${res.status}`);
+  }
+  const xml = await res.text();
+  return parseYoutubeAtomFeed(xml, channelId);
 }
 
 function walkFiles(dir: string): string[] {
@@ -2555,8 +2704,43 @@ async function startServer() {
     res.json({ deleted: id });
   });
 
-  // ---- v2.0 Version Manager (GitHub Tags) ----
+  // ---- v2.0 Version Manager (GitHub Releases + Tags) ----
   let versionCache: { data: any; ts: number } = { data: null, ts: 0 };
+
+  const parseVer = (raw: string): [number, number, number, number, number, number] => {
+    const clean = raw.trim().replace(/^[vV]/, '');
+    const m = clean.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-.]?(.*))?$/);
+    if (!m) return [0, 0, 0, 0, 0, 0];
+    const maj = parseInt(m[1] || '0', 10);
+    const min = parseInt(m[2] || '0', 10);
+    const pat = parseInt(m[3] || '0', 10);
+    const suffix = (m[4] || '').toLowerCase();
+    const fixRank = suffix.includes('fix') ? 1 : 0;
+    if (!suffix || suffix === 'final') return [maj, min, pat, 4, 0, fixRank];
+    if (suffix.startsWith('rc')) {
+      const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+      return [maj, min, pat, 3, n, fixRank];
+    }
+    if (suffix.startsWith('pre')) {
+      const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+      return [maj, min, pat, 2, n, fixRank];
+    }
+    if (suffix.startsWith('v')) {
+      const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+      return [maj, min, pat, 1, n, fixRank];
+    }
+    const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+    return [maj, min, pat, 1, n, fixRank];
+  };
+
+  const cmpVer = (a: string, b: string): number => {
+    const pa = parseVer(a);
+    const pb = parseVer(b);
+    for (let i = 0; i < pa.length; i++) {
+      if (pa[i] !== pb[i]) return pa[i] - pb[i];
+    }
+    return 0;
+  };
 
   app.get('/api/version/info', async (req, res) => {
     const force = req.query.force === '1';
@@ -2565,43 +2749,7 @@ async function startServer() {
       return res.json(versionCache.data);
     }
 
-    const current = 'v2.0-pre3fix';
-
-    const parseVer = (raw: string): [number, number, number, number, number, number] => {
-      const clean = raw.trim().replace(/^[vV]/, '');
-      const m = clean.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-.]?(.*))?$/);
-      if (!m) return [0, 0, 0, 0, 0, 0];
-      const maj = parseInt(m[1] || '0', 10);
-      const min = parseInt(m[2] || '0', 10);
-      const pat = parseInt(m[3] || '0', 10);
-      const suffix = (m[4] || '').toLowerCase();
-      const fixRank = suffix.includes('fix') ? 1 : 0;
-      if (!suffix || suffix === 'final') return [maj, min, pat, 4, 0, fixRank];
-      if (suffix.startsWith('rc')) {
-        const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
-        return [maj, min, pat, 3, n, fixRank];
-      }
-      if (suffix.startsWith('pre')) {
-        const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
-        return [maj, min, pat, 2, n, fixRank];
-      }
-      if (suffix.startsWith('v')) {
-        const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
-        return [maj, min, pat, 1, n, fixRank];
-      }
-      const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
-      return [maj, min, pat, 1, n, fixRank];
-    };
-
-    const cmpVer = (a: string, b: string): number => {
-      const pa = parseVer(a);
-      const pb = parseVer(b);
-      for (let i = 0; i < pa.length; i++) {
-        if (pa[i] !== pb[i]) return pa[i] - pb[i];
-      }
-      return 0;
-    };
-
+    const current = 'v2.0-pre4';
     let latest = current;
     let tags: string[] = [];
     let releaseZipUrl: string | null = null;
@@ -2620,7 +2768,7 @@ async function startServer() {
         if (Array.isArray(releases)) {
           for (const rel of releases) {
             const tag = String(rel?.tag_name || '').trim();
-            if (tag && !tags.includes(tag)) tags.push(tag);
+            if (tag && !tags.some((x) => x.toLowerCase() === tag.toLowerCase())) tags.push(tag);
           }
           const sortedRels = [...releases].sort((a, b) =>
             cmpVer(String(b?.tag_name || ''), String(a?.tag_name || ''))
@@ -2628,14 +2776,12 @@ async function startServer() {
           const top = sortedRels[0];
           if (top?.tag_name) {
             const topTag = String(top.tag_name).trim();
-            if (cmpVer(topTag, current) > 0) {
-              latest = topTag;
-            } else if (cmpVer(topTag, current) === 0) {
+            if (cmpVer(topTag, current) >= 0) {
               latest = topTag;
             }
             const assets = Array.isArray(top.assets) ? top.assets : [];
             const zipAsset = assets.find((a: any) => String(a?.name || '').endsWith('.zip'));
-            if (zipAsset?.browser_download_url) {
+            if (zipAsset?.browser_download_url && cmpVer(topTag, current) > 0) {
               releaseZipUrl = String(zipAsset.browser_download_url);
             }
           }
@@ -2662,8 +2808,6 @@ async function startServer() {
         tags.sort((a, b) => cmpVer(b, a));
         const newestTag = tags[0];
         if (cmpVer(newestTag, latest) > 0) {
-          latest = newestTag;
-        } else if (cmpVer(newestTag, current) === 0 && latest === current) {
           latest = newestTag;
         }
       }
@@ -2706,8 +2850,8 @@ async function startServer() {
     try {
       versionCache = { data: null, ts: 0 };
       const cwd = process.cwd();
+      const current = 'v2.0-pre4';
 
-      // Check latest GitHub release zip asset first
       let zipUrl = '';
       let targetTag = 'v2.0-app';
       try {
@@ -2721,18 +2865,24 @@ async function startServer() {
         if (ghRes.ok) {
           const releases = (await ghRes.json()) as any[];
           if (Array.isArray(releases) && releases.length > 0) {
-            const top = releases[0];
-            targetTag = String(top?.tag_name || targetTag);
-            const zipAsset = (top?.assets || []).find((a: any) =>
-              String(a?.name || '').endsWith('.zip')
+            const sorted = [...releases].sort((a, b) =>
+              cmpVer(String(b?.tag_name || ''), String(a?.tag_name || ''))
             );
-            if (zipAsset?.browser_download_url) {
-              zipUrl = String(zipAsset.browser_download_url);
+            const top = sorted[0];
+            const topTag = String(top?.tag_name || '').trim();
+            if (topTag && cmpVer(topTag, current) > 0) {
+              targetTag = topTag;
+              const zipAsset = (top?.assets || []).find((a: any) =>
+                String(a?.name || '').endsWith('.zip')
+              );
+              if (zipAsset?.browser_download_url) {
+                zipUrl = String(zipAsset.browser_download_url);
+              }
             }
           }
         }
       } catch {
-        // ignore, fallback to git pull
+        // fallback to git pull
       }
 
       if (zipUrl) {
@@ -2760,6 +2910,161 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ ok: false, error: err?.message || 'Update failed' });
     }
+  });
+
+  // ---- Health Check Endpoint ----
+  app.get('/healthz', (_req, res) => {
+    const jobs = Array.from(queue.values());
+    res.json({
+      status: 'ok',
+      version: 'v2.0-pre4',
+      uptime_seconds: Math.round(process.uptime()),
+      queue: {
+        total: jobs.length,
+        queued: jobs.filter((j) => j.status === 'queued').length,
+        running: jobs.filter((j) => j.status === 'running').length,
+        done: jobs.filter((j) => j.status === 'done').length,
+        failed: jobs.filter((j) => j.status === 'failed').length,
+      },
+      active_processes: activeProcesses.size,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
+  // ---- Signed "Send to Device" File Download (iOS / Cross-Device) ----
+  app.post('/api/files/sign', (req, res) => {
+    const active = getActiveUser();
+    if (!active) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    const jobId = String(req.body?.job_id || '').trim();
+    const rawFile = String(req.body?.file || '').trim();
+
+    let candidatePath = rawFile;
+    if (jobId) {
+      const job = queue.get(jobId);
+      if (!job || !job.file) {
+        return res.status(404).json({ error: 'Completed job file not found.' });
+      }
+      candidatePath = job.file;
+    }
+
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const safeFile = safePathWithinLibraries(candidatePath, settings);
+    if (!safeFile || !fs.existsSync(safeFile)) {
+      return res.status(404).json({ error: 'Media file not found on server.' });
+    }
+    const stat = fs.statSync(safeFile);
+    if (!stat.isFile()) {
+      return res.status(400).json({ error: 'Path is not a downloadable file.' });
+    }
+
+    const expMs = Date.now() + 3600_000; // Valid for 1 hour
+    const sig = signDownloadToken(safeFile, expMs);
+    const filename = path.basename(safeFile);
+    const url = `/api/files/download?path=${encodeURIComponent(safeFile)}&exp=${expMs}&sig=${sig}`;
+    res.json({
+      url,
+      filename,
+      size_bytes: stat.size,
+      expires_at: new Date(expMs).toISOString(),
+    });
+  });
+
+  app.get('/api/files/download', (req, res) => {
+    const rawPath = String(req.query.path || '');
+    const expMs = Number(req.query.exp || 0);
+    const sig = String(req.query.sig || '');
+
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const safeFile = safePathWithinLibraries(rawPath, settings);
+    if (!safeFile || !verifyDownloadToken(safeFile, expMs, sig)) {
+      return res.status(403).send('Invalid or expired download link.');
+    }
+    if (!fs.existsSync(safeFile) || !fs.statSync(safeFile).isFile()) {
+      return res.status(404).send('File not found.');
+    }
+    res.download(safeFile, path.basename(safeFile));
+  });
+
+  // ---- YouTube RSS Channel Feeds ----
+  let ytFeedCache: { videos: YoutubeFeedVideo[]; ts: number } = { videos: [], ts: 0 };
+
+  app.get('/api/feeds/youtube', async (req, res) => {
+    const active = getActiveUser();
+    if (!active) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    const force = req.query.force === '1';
+    const channels = readJson<YoutubeFeedChannel[]>(YOUTUBE_FEEDS_FILE, []);
+    const now = Date.now();
+
+    if (!force && ytFeedCache.videos.length > 0 && now - ytFeedCache.ts < 300_000) {
+      return res.json({ channels, videos: ytFeedCache.videos });
+    }
+
+    const results = await Promise.all(
+      channels.map(async (ch) => {
+        try {
+          const parsed = await fetchYoutubeChannelFeed(ch.channelId);
+          return parsed.videos;
+        } catch {
+          return [] as YoutubeFeedVideo[];
+        }
+      })
+    );
+
+    const videos = results
+      .flat()
+      .sort((a, b) => new Date(b.published).getTime() - new Date(a.published).getTime())
+      .slice(0, 30);
+
+    ytFeedCache = { videos, ts: now };
+    res.json({ channels, videos });
+  });
+
+  app.post('/api/feeds/youtube/add', async (req, res) => {
+    const active = getActiveUser();
+    if (!active) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    const raw = String(req.body?.channel || '').trim();
+    if (!raw) {
+      return res.status(400).json({ error: 'Enter a YouTube channel URL, @handle, or UC... ID.' });
+    }
+
+    try {
+      const channelId = await resolveYoutubeChannelId(raw);
+      const { channelTitle, videos } = await fetchYoutubeChannelFeed(channelId);
+      const channels = readJson<YoutubeFeedChannel[]>(YOUTUBE_FEEDS_FILE, []);
+      const existing = channels.find((c) => c.channelId === channelId);
+      const savedChannel: YoutubeFeedChannel = existing || {
+        channelId,
+        title: channelTitle,
+        addedAt: new Date().toISOString(),
+      };
+      if (!existing) {
+        channels.push(savedChannel);
+        writeJson(YOUTUBE_FEEDS_FILE, channels);
+      }
+      ytFeedCache = { videos: [], ts: 0 };
+      res.status(201).json({ ok: true, channel: savedChannel, sampleCount: videos.length });
+    } catch (err: any) {
+      res.status(400).json({ error: err?.message || 'Unable to resolve YouTube RSS feed.' });
+    }
+  });
+
+  app.delete('/api/feeds/youtube/:channelId', (req, res) => {
+    const active = getActiveUser();
+    if (!active) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    const channelId = String(req.params.channelId || '').trim();
+    const channels = readJson<YoutubeFeedChannel[]>(YOUTUBE_FEEDS_FILE, []);
+    const filtered = channels.filter((c) => c.channelId !== channelId);
+    writeJson(YOUTUBE_FEEDS_FILE, filtered);
+    ytFeedCache = { videos: [], ts: 0 };
+    res.json({ ok: true, channels: filtered });
   });
 
   // ---- v2.0 Network Watchdog (NetWatch) ----
@@ -2943,7 +3248,7 @@ async function startServer() {
 
     try {
       if (format === 'tar.gz') {
-        const outTar = '/tmp/mediagrabber-v2.0-pre3fix.tar.gz';
+        const outTar = '/tmp/mediagrabber-v2.0-pre4.tar.gz';
         await execFileAsync(
           'tar',
           [
@@ -2957,10 +3262,10 @@ async function startServer() {
           ],
           { cwd: process.cwd(), timeout: 15000 }
         );
-        return res.download(outTar, 'mediagrabber-v2.0-pre3fix.tar.gz');
+        return res.download(outTar, 'mediagrabber-v2.0-pre4.tar.gz');
       }
 
-      const outZip = '/tmp/mediagrabber-v2.0-pre3fix.zip';
+      const outZip = '/tmp/mediagrabber-v2.0-pre4.zip';
       const pyScript = `
 import os, sys, zipfile
 out_zip = sys.argv[1]
@@ -2985,7 +3290,7 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
         timeout: 15000,
       });
       res.setHeader('Content-Type', 'application/zip');
-      return res.download(outZip, 'mediagrabber-v2.0-pre3fix.zip');
+      return res.download(outZip, 'mediagrabber-v2.0-pre4.zip');
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to package source bundle' });
     }

@@ -268,7 +268,7 @@ export function useNotifications(options?: UseNotificationsOptions) {
       if (!localEnabled || permission !== 'granted') return;
       void showLocalNotification(
         'MediaGrabber Update Available',
-        `Version ${latest} is available on GitHub.`,
+        `Release ${latest} is now available on GitHub.`,
         `version-${latest}`
       );
     },

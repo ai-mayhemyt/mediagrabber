@@ -38,7 +38,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [storage, setStorage] = useState<StorageMap>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [appVersion, setAppVersion] = useState('v2.0-pre3fix');
+  const [appVersion, setAppVersion] = useState('v2.0-pre4');
 
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
   const [themeColors, setThemeColors] = useState<ThemeColors>(THEME_PRESETS.default.colors);
@@ -74,6 +74,7 @@ export default function App() {
 
   const notifications = useNotifications({ onNotify: notify });
   const prevJobStatusesRef = useRef<Map<string, Job['status']> | null>(null);
+  const lastNotifiedVersionRef = useRef<string | null>(null);
 
   const askConfirm = useCallback(
     (title: string, message: string, onAccept: () => void) => {
@@ -153,10 +154,11 @@ export default function App() {
               (job.status === 'done' || job.status === 'failed')
             ) {
               const label = job.title || job.url;
-              notify(
-                job.status === 'done' ? 'success' : 'error',
-                job.status === 'done' ? `Download complete: ${label}` : `Download failed: ${label}`
-              );
+              if (job.status === 'done') {
+                notify('success', `Download complete: ${label}`);
+              } else {
+                notify('error', `Download failed: ${label}`);
+              }
               notifications.notifyJobTransition(job);
             }
           }
@@ -199,20 +201,24 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.current) {
-          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre3fix';
+          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre4';
           setAppVersion(shortVer);
         }
-        if (data?.update_available && data?.latest) {
-          const seenKey = `mg_notified_ver_${data.latest}`;
-          if (!sessionStorage.getItem(seenKey)) {
-            sessionStorage.setItem(seenKey, '1');
-            notify('info', `Update available: ${data.latest} (current: ${data.current})`);
-            notifications.notifyVersionUpdate(data.latest);
-          }
+        if (
+          data?.update_available &&
+          data?.latest &&
+          lastNotifiedVersionRef.current !== data.latest
+        ) {
+          lastNotifiedVersionRef.current = data.latest;
+          notify(
+            'info',
+            `MediaGrabber ${data.latest} is available (currently on ${data.current}).`
+          );
+          notifications.notifyVersionUpdate(String(data.latest));
         }
       })
       .catch(() => {});
-  }, [fetchMe]);
+  }, [fetchMe, notifications, notify]);
 
   useEffect(() => {
     if (!user) return;
@@ -412,6 +418,8 @@ export default function App() {
         onOpenAccount={() => setAccountOpen(true)}
         onOpenTheme={() => setThemeOpen(true)}
         onLogout={handleLogout}
+        onGrab={handleGrab}
+        onNotify={notify}
       />
 
       <div className="flex-1 flex flex-col min-w-0">
@@ -460,6 +468,7 @@ export default function App() {
                 setActiveView('queue');
               }}
               onShareQr={(url) => setQrUrl(url)}
+              onNotify={notify}
             />
           )}
 

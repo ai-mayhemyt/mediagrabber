@@ -132,7 +132,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
   const [netwatch, setNetwatch] = useState<NetwatchStatus | null>(null);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [checkingVersion, setCheckingVersion] = useState(false);
-  const [applyingUpdate, setApplyingUpdate] = useState(false);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
 
   // Batch URL File Import
   const [importFileName, setImportFileName] = useState('');
@@ -227,12 +227,41 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
     try {
       const res = await fetch('/api/version/info?force=1');
       if (res.ok) {
-        setVersionInfo(await res.json());
-        onNotify('info', 'Checked GitHub tags for latest version.');
+        const info = (await res.json()) as VersionInfo;
+        setVersionInfo(info);
+        if (info.update_available) {
+          onNotify('success', `New release ${info.latest} available on GitHub.`);
+        } else {
+          onNotify('info', `Up to date (${info.current}).`);
+        }
       }
     } finally {
       setCheckingVersion(false);
     }
+  };
+
+  const installVersionUpdate = () => {
+    const target = versionInfo?.latest || 'latest release';
+    onConfirm(
+      'Install MediaGrabber Update',
+      `Download ${target}, rebuild the server, and restart MediaGrabber?`,
+      async () => {
+        setInstallingUpdate(true);
+        try {
+          const res = await fetch('/api/version/update', { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || !data.ok) {
+            onNotify('error', data.error || 'Auto-update failed.');
+            return;
+          }
+          onNotify('success', data.message || `Updated to ${target}. Restarting...`);
+        } catch {
+          onNotify('error', 'Failed to contact server for update.');
+        } finally {
+          setInstallingUpdate(false);
+        }
+      }
+    );
   };
 
   const handleNetwatchAction = async (
@@ -516,6 +545,19 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
       setServerOutput((data.stdout || '') + (data.stderr ? `\nSTDERR:\n${data.stderr}` : ''));
     } catch {
       setServerOutput('Failed to execute utility.');
+    }
+  };
+
+  const handleCheckHealthz = async () => {
+    setServerOutput('Fetching /healthz...');
+    try {
+      const res = await fetch('/healthz', { cache: 'no-store' });
+      const data = await res.json();
+      setServerOutput(JSON.stringify(data, null, 2));
+      onNotify(res.ok ? 'success' : 'error', `Health check HTTP ${res.status}`);
+    } catch {
+      setServerOutput('Failed to query /healthz.');
+      onNotify('error', 'Health check request failed.');
     }
   };
 
@@ -1472,7 +1514,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <a
                   href="/api/server/export-bundle?format=zip"
-                  download="mediagrabber-v2.0-pre3fix.zip"
+                  download="mediagrabber-v2.0-pre4.zip"
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                   style={{
                     backgroundColor: 'var(--mg-bg)',
@@ -1486,28 +1528,12 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                 {versionInfo?.update_available && (
                   <button
                     type="button"
-                    disabled={applyingUpdate}
-                    onClick={async () => {
-                      setApplyingUpdate(true);
-                      try {
-                        const res = await fetch('/api/version/update', { method: 'POST' });
-                        const data = await res.json().catch(() => ({}));
-                        if (!res.ok) {
-                          onNotify('error', data.error || 'Update failed.');
-                        } else {
-                          onNotify('success', data.message || 'Update installed. Reloading in 4s...');
-                          setTimeout(() => window.location.reload(), 4500);
-                        }
-                      } catch {
-                        onNotify('error', 'Failed to run updater.');
-                      } finally {
-                        setApplyingUpdate(false);
-                      }
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0 disabled:opacity-50 bg-emerald-600 hover:bg-emerald-500"
+                    disabled={installingUpdate}
+                    onClick={installVersionUpdate}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 whitespace-nowrap shrink-0 disabled:opacity-50"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>{applyingUpdate ? 'Updating...' : `Install ${versionInfo.latest}`}</span>
+                    <PackageCheck className="w-3.5 h-3.5" />
+                    <span>{installingUpdate ? 'Installing...' : `Install ${versionInfo.latest}`}</span>
                   </button>
                 )}
                 <button
@@ -1526,11 +1552,11 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Current Build</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre3fix'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre4'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Latest Release</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre3fix'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre4'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Last Checked</div>
@@ -1567,6 +1593,15 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                   {tool.name}
                 </button>
               ))}
+              <button
+                type="button"
+                onClick={() => void handleCheckHealthz()}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
+                style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>Health Check (/healthz)</span>
+              </button>
             </div>
 
             <pre

@@ -16,8 +16,9 @@ import {
   Loader2,
   CheckCircle2,
   Layers,
+  Smartphone,
 } from 'lucide-react';
-import { Job } from '../types';
+import { Job, SignedFileDownload } from '../types';
 
 interface QueueViewProps {
   jobs: Job[];
@@ -72,6 +73,43 @@ export const QueueView: React.FC<QueueViewProps> = ({
   const [submitting, setSubmitting] = useState(false);
   const [submittingCount, setSubmittingCount] = useState(0);
   const [activeBatchIds, setActiveBatchIds] = useState<string[]>([]);
+  const [signedLinks, setSignedLinks] = useState<Record<string, SignedFileDownload>>({});
+  const [signingJobId, setSigningJobId] = useState<string | null>(null);
+
+  const formatBytes = (bytes: number) => {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let val = bytes;
+    let idx = 0;
+    while (val >= 1024 && idx < units.length - 1) {
+      val /= 1024;
+      idx++;
+    }
+    return `${val.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+  };
+
+  const handleSignJobFile = async (jobId: string) => {
+    if (signingJobId) return;
+    setSigningJobId(jobId);
+    try {
+      const res = await fetch('/api/files/sign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: jobId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.url) {
+        onNotify('error', data.error || 'Could not generate temporary download link.');
+        return;
+      }
+      setSignedLinks((prev) => ({ ...prev, [jobId]: data as SignedFileDownload }));
+      onNotify('success', 'Signed 1-hour device download link ready.');
+    } catch {
+      onNotify('error', 'Failed to generate device download link.');
+    } finally {
+      setSigningJobId(null);
+    }
+  };
 
   const parsedUrls = useMemo(() => parseBatchUrls(urlInput), [urlInput]);
 
@@ -570,6 +608,23 @@ export const QueueView: React.FC<QueueViewProps> = ({
                             <Terminal className="w-3 h-3" />
                             <span>Log</span>
                           </button>
+                          {job.status === 'done' && job.file && (
+                            <button
+                              type="button"
+                              disabled={signingJobId === job.job_id}
+                              onClick={() => void handleSignJobFile(job.job_id)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium text-white whitespace-nowrap shrink-0 disabled:opacity-50"
+                              style={{ backgroundColor: 'var(--mg-accent)' }}
+                              title="Generate temporary 1-hour link to save directly to iPad/iPhone Files or another device"
+                            >
+                              {signingJobId === job.job_id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <Smartphone className="w-3 h-3" />
+                              )}
+                              <span>Send to Device</span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => onShareQr(job.url)}
@@ -672,6 +727,66 @@ export const QueueView: React.FC<QueueViewProps> = ({
                     >
                       <FolderCheck className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                       <span className="truncate">{job.file}</span>
+                    </div>
+                  )}
+
+                  {signedLinks[job.job_id] && (
+                    <div
+                      className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 rounded-md border text-xs"
+                      style={{
+                        backgroundColor: 'var(--mg-bg)',
+                        borderColor: 'var(--mg-accent)',
+                        color: 'var(--mg-text)',
+                      }}
+                    >
+                      <div className="flex flex-wrap items-center gap-2 min-w-0">
+                        <Smartphone className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--mg-accent)' }} />
+                        <span className="font-medium truncate max-w-xs">
+                          {signedLinks[job.job_id].filename}
+                        </span>
+                        <span className="font-mono tabular-nums" style={{ color: 'var(--mg-muted)' }}>
+                          {formatBytes(signedLinks[job.job_id].size_bytes)} · valid 1h
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <a
+                          href={signedLinks[job.job_id].url}
+                          download={signedLinks[job.job_id].filename}
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold text-white whitespace-nowrap shrink-0"
+                          style={{ backgroundColor: 'var(--mg-accent)' }}
+                        >
+                          <Download className="w-3 h-3" />
+                          <span>Save to Device</span>
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onShareQr(
+                              new URL(signedLinks[job.job_id].url, window.location.origin).toString()
+                            )
+                          }
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-xs font-medium whitespace-nowrap shrink-0"
+                          style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                        >
+                          <QrCode className="w-3 h-3" />
+                          <span>QR Link</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSignedLinks((prev) => {
+                              const next = { ...prev };
+                              delete next[job.job_id];
+                              return next;
+                            })
+                          }
+                          aria-label="Dismiss signed download link"
+                          className="p-1 rounded hover:opacity-80"
+                          style={{ color: 'var(--mg-muted)' }}
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
                   )}
                 </article>

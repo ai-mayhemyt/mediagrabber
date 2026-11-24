@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { Search, Trash2, Download, QrCode, Film } from 'lucide-react';
-import { HistoryItem } from '../types';
+import { Search, Trash2, Download, QrCode, Film, Smartphone, Loader2, X } from 'lucide-react';
+import { HistoryItem, SignedFileDownload } from '../types';
 
 interface HistoryViewProps {
   items: HistoryItem[];
@@ -8,6 +8,7 @@ interface HistoryViewProps {
   onClearHistory: () => void;
   onRegrab: (url: string) => void;
   onShareQr: (url: string) => void;
+  onNotify?: (type: 'info' | 'success' | 'error', msg: string) => void;
 }
 
 const SOURCE_FILTERS: { id: 'all' | HistoryItem['source']; label: string }[] = [
@@ -24,9 +25,47 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   onClearHistory,
   onRegrab,
   onShareQr,
+  onNotify,
 }) => {
   const [sourceFilter, setSourceFilter] = useState<'all' | HistoryItem['source']>('all');
   const [query, setQuery] = useState('');
+  const [signedLinks, setSignedLinks] = useState<Record<string, SignedFileDownload>>({});
+  const [signingId, setSigningId] = useState<string | null>(null);
+
+  const formatBytes = (bytes: number) => {
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let val = bytes;
+    let idx = 0;
+    while (val >= 1024 && idx < units.length - 1) {
+      val /= 1024;
+      idx++;
+    }
+    return `${val.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+  };
+
+  const handleSignHistoryFile = async (item: HistoryItem) => {
+    if (!item.file || signingId) return;
+    setSigningId(item.id);
+    try {
+      const res = await fetch('/api/files/sign', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: item.file }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.url) {
+        onNotify?.('error', data.error || 'File is no longer available on disk.');
+        return;
+      }
+      setSignedLinks((prev) => ({ ...prev, [item.id]: data as SignedFileDownload }));
+      onNotify?.('success', 'Signed 1-hour device download link ready.');
+    } catch {
+      onNotify?.('error', 'Failed to generate signed download link.');
+    } finally {
+      setSigningId(null);
+    }
+  };
 
   const filtered = useMemo(() => {
     const localQ = query.trim().toLowerCase();
@@ -121,62 +160,140 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
           {filtered.map((item) => (
             <div
               key={item.id}
-              className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 transition-colors"
+              className="flex flex-col gap-2.5 p-3.5 transition-colors"
               style={{ borderColor: 'var(--mg-border)' }}
             >
-              <div className="flex items-center gap-3.5 min-w-0 flex-1">
-                <div
-                  className="w-16 h-11 rounded-md overflow-hidden border shrink-0 flex items-center justify-center"
-                  style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
-                >
-                  {item.thumbnail ? (
-                    <img
-                      src={item.thumbnail}
-                      alt={item.title}
-                      referrerPolicy="no-referrer"
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <Film className="w-4 h-4" style={{ color: 'var(--mg-muted)' }} />
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3.5 min-w-0 flex-1">
+                  <div
+                    className="w-16 h-11 rounded-md overflow-hidden border shrink-0 flex items-center justify-center"
+                    style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+                  >
+                    {item.thumbnail ? (
+                      <img
+                        src={item.thumbnail}
+                        alt={item.title}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <Film className="w-4 h-4" style={{ color: 'var(--mg-muted)' }} />
+                    )}
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium truncate" style={{ color: 'var(--mg-text)' }}>
+                      {item.title}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+                      <span className="uppercase font-medium">{item.source}</span>
+                      <span aria-hidden="true">·</span>
+                      <span className="font-mono tabular-nums">
+                        {new Date(item.timestamp).toLocaleString()}
+                      </span>
+                      <span aria-hidden="true">·</span>
+                      <span className="truncate max-w-xs">{item.url}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  {item.file && (
+                    <button
+                      type="button"
+                      disabled={signingId === item.id}
+                      onClick={() => void handleSignHistoryFile(item)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-white whitespace-nowrap shrink-0 disabled:opacity-50"
+                      style={{ backgroundColor: 'var(--mg-accent)' }}
+                    >
+                      {signingId === item.id ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Smartphone className="w-3 h-3" />
+                      )}
+                      <span>Send to Device</span>
+                    </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => onRegrab(item.url)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs font-medium whitespace-nowrap shrink-0"
+                    style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                  >
+                    <Download className="w-3 h-3" />
+                    <span>Grab Again</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onShareQr(item.url)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs font-medium whitespace-nowrap shrink-0"
+                    style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                  >
+                    <QrCode className="w-3 h-3" />
+                    <span>QR</span>
+                  </button>
                 </div>
+              </div>
 
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium truncate" style={{ color: 'var(--mg-text)' }}>
-                    {item.title}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 text-xs mt-0.5" style={{ color: 'var(--mg-muted)' }}>
-                    <span className="uppercase font-medium">{item.source}</span>
-                    <span aria-hidden="true">·</span>
-                    <span className="font-mono tabular-nums">
-                      {new Date(item.timestamp).toLocaleString()}
+              {signedLinks[item.id] && (
+                <div
+                  className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 rounded-md border text-xs"
+                  style={{
+                    backgroundColor: 'var(--mg-bg)',
+                    borderColor: 'var(--mg-accent)',
+                    color: 'var(--mg-text)',
+                  }}
+                >
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    <Smartphone className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--mg-accent)' }} />
+                    <span className="font-medium truncate max-w-xs">
+                      {signedLinks[item.id].filename}
                     </span>
-                    <span aria-hidden="true">·</span>
-                    <span className="truncate max-w-xs">{item.url}</span>
+                    <span className="font-mono tabular-nums" style={{ color: 'var(--mg-muted)' }}>
+                      {formatBytes(signedLinks[item.id].size_bytes)} · valid 1h
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <a
+                      href={signedLinks[item.id].url}
+                      download={signedLinks[item.id].filename}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-semibold text-white whitespace-nowrap shrink-0"
+                      style={{ backgroundColor: 'var(--mg-accent)' }}
+                    >
+                      <Download className="w-3 h-3" />
+                      <span>Save to Device</span>
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onShareQr(
+                          new URL(signedLinks[item.id].url, window.location.origin).toString()
+                        )
+                      }
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-xs font-medium whitespace-nowrap shrink-0"
+                      style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                    >
+                      <QrCode className="w-3 h-3" />
+                      <span>QR Link</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSignedLinks((prev) => {
+                          const next = { ...prev };
+                          delete next[item.id];
+                          return next;
+                        })
+                      }
+                      aria-label="Dismiss signed download link"
+                      className="p-1 rounded hover:opacity-80"
+                      style={{ color: 'var(--mg-muted)' }}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
                   </div>
                 </div>
-              </div>
-
-              <div className="flex items-center gap-1.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => onRegrab(item.url)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs font-medium whitespace-nowrap shrink-0"
-                  style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
-                >
-                  <Download className="w-3 h-3" />
-                  <span>Grab Again</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onShareQr(item.url)}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs font-medium whitespace-nowrap shrink-0"
-                  style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
-                >
-                  <QrCode className="w-3 h-3" />
-                  <span>QR</span>
-                </button>
-              </div>
+              )}
             </div>
           ))}
         </div>
