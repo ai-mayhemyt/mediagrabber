@@ -29,7 +29,7 @@ const VIEW_LABELS: Record<ActiveView, string> = {
 export const TopBar: React.FC<TopBarProps> = ({
   activeView,
   themeMode,
-  version = 'v2.0-pre3',
+  version = 'v2.0-pre3fix',
   searchQuery,
   notificationsEnabled,
   notificationsBusy = false,

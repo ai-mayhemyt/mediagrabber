@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Job } from '../types';
 
 const STORAGE_KEY = 'mg_notifications_enabled';
@@ -245,8 +245,6 @@ export function useNotifications(options?: UseNotificationsOptions) {
   const notifyJobTransition = useCallback(
     (job: Job) => {
       if (!localEnabled || permission !== 'granted') return;
-      // Avoid duplicate alerts when server Web Push subscription handles delivery
-      if (pushSubscribed) return;
       const label = job.title || job.url;
       if (job.status === 'done') {
         void showLocalNotification(
@@ -262,22 +260,51 @@ export function useNotifications(options?: UseNotificationsOptions) {
         );
       }
     },
-    [localEnabled, permission, pushSubscribed, showLocalNotification]
+    [localEnabled, permission, showLocalNotification]
+  );
+
+  const notifyVersionUpdate = useCallback(
+    (latest: string) => {
+      if (!localEnabled || permission !== 'granted') return;
+      void showLocalNotification(
+        'MediaGrabber Update Available',
+        `Version ${latest} is available on GitHub.`,
+        `version-${latest}`
+      );
+    },
+    [localEnabled, permission, showLocalNotification]
   );
 
   const isEnabled = localEnabled && permission === 'granted';
 
-  return {
-    supported,
-    pushSupported,
-    permission,
-    pushSubscribed,
-    isEnabled,
-    busy,
-    enableNotifications,
-    disableNotifications,
-    toggleNotifications,
-    sendTestNotification,
-    notifyJobTransition,
-  };
+  return useMemo(
+    () => ({
+      supported,
+      pushSupported,
+      permission,
+      pushSubscribed,
+      isEnabled,
+      busy,
+      enableNotifications,
+      disableNotifications,
+      toggleNotifications,
+      sendTestNotification,
+      notifyJobTransition,
+      notifyVersionUpdate,
+    }),
+    [
+      supported,
+      pushSupported,
+      permission,
+      pushSubscribed,
+      isEnabled,
+      busy,
+      enableNotifications,
+      disableNotifications,
+      toggleNotifications,
+      sendTestNotification,
+      notifyJobTransition,
+      notifyVersionUpdate,
+    ]
+  );
 }

@@ -2565,10 +2565,85 @@ async function startServer() {
       return res.json(versionCache.data);
     }
 
-    const current = 'v2.0-pre3';
-    let latest = 'v2.0-pre3';
+    const current = 'v2.0-pre3fix';
+
+    const parseVer = (raw: string): [number, number, number, number, number, number] => {
+      const clean = raw.trim().replace(/^[vV]/, '');
+      const m = clean.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-.]?(.*))?$/);
+      if (!m) return [0, 0, 0, 0, 0, 0];
+      const maj = parseInt(m[1] || '0', 10);
+      const min = parseInt(m[2] || '0', 10);
+      const pat = parseInt(m[3] || '0', 10);
+      const suffix = (m[4] || '').toLowerCase();
+      const fixRank = suffix.includes('fix') ? 1 : 0;
+      if (!suffix || suffix === 'final') return [maj, min, pat, 4, 0, fixRank];
+      if (suffix.startsWith('rc')) {
+        const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+        return [maj, min, pat, 3, n, fixRank];
+      }
+      if (suffix.startsWith('pre')) {
+        const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+        return [maj, min, pat, 2, n, fixRank];
+      }
+      if (suffix.startsWith('v')) {
+        const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+        return [maj, min, pat, 1, n, fixRank];
+      }
+      const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
+      return [maj, min, pat, 1, n, fixRank];
+    };
+
+    const cmpVer = (a: string, b: string): number => {
+      const pa = parseVer(a);
+      const pb = parseVer(b);
+      for (let i = 0; i < pa.length; i++) {
+        if (pa[i] !== pb[i]) return pa[i] - pb[i];
+      }
+      return 0;
+    };
+
+    let latest = current;
     let tags: string[] = [];
+    let releaseZipUrl: string | null = null;
     let error: string | null = null;
+
+    try {
+      const ghRes = await fetch(
+        'https://api.github.com/repos/ai-mayhemyt/mediagrabber/releases?per_page=15',
+        {
+          headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'MediaGrabber' },
+          signal: AbortSignal.timeout(5000),
+        }
+      );
+      if (ghRes.ok) {
+        const releases = (await ghRes.json()) as any[];
+        if (Array.isArray(releases)) {
+          for (const rel of releases) {
+            const tag = String(rel?.tag_name || '').trim();
+            if (tag && !tags.includes(tag)) tags.push(tag);
+          }
+          const sortedRels = [...releases].sort((a, b) =>
+            cmpVer(String(b?.tag_name || ''), String(a?.tag_name || ''))
+          );
+          const top = sortedRels[0];
+          if (top?.tag_name) {
+            const topTag = String(top.tag_name).trim();
+            if (cmpVer(topTag, current) > 0) {
+              latest = topTag;
+            } else if (cmpVer(topTag, current) === 0) {
+              latest = topTag;
+            }
+            const assets = Array.isArray(top.assets) ? top.assets : [];
+            const zipAsset = assets.find((a: any) => String(a?.name || '').endsWith('.zip'));
+            if (zipAsset?.browser_download_url) {
+              releaseZipUrl = String(zipAsset.browser_download_url);
+            }
+          }
+        }
+      }
+    } catch {
+      // fallback to git ls-remote below
+    }
 
     try {
       const { stdout } = await execFileAsync(
@@ -2576,31 +2651,115 @@ async function startServer() {
         ['ls-remote', '--tags', '--refs', 'https://github.com/ai-mayhemyt/mediagrabber.git'],
         { timeout: 6000 }
       );
-      tags = stdout
+      const gitTags = stdout
         .split('\n')
         .map((line) => line.split('refs/tags/')[1]?.trim())
         .filter(Boolean) as string[];
+      for (const t of gitTags) {
+        if (!tags.some((x) => x.toLowerCase() === t.toLowerCase())) tags.push(t);
+      }
       if (tags.length > 0) {
-        if (tags.includes(current)) {
-          latest = current;
-        } else {
-          latest = tags[tags.length - 1];
+        tags.sort((a, b) => cmpVer(b, a));
+        const newestTag = tags[0];
+        if (cmpVer(newestTag, latest) > 0) {
+          latest = newestTag;
+        } else if (cmpVer(newestTag, current) === 0 && latest === current) {
+          latest = newestTag;
         }
       }
     } catch (err: any) {
-      error = err?.message || 'Unable to reach GitHub tags';
+      if (tags.length === 0) {
+        error = err?.message || 'Unable to reach GitHub tags';
+      }
     }
 
+    const updateAvailable = cmpVer(latest, current) > 0;
     const data = {
       current,
       latest,
-      update_available: Boolean(tags.length && latest !== current),
+      update_available: updateAvailable,
+      release_zip_url: releaseZipUrl,
       checked_at: new Date().toISOString(),
-      tags: tags.slice(-6).reverse(),
+      tags: tags.slice(0, 8),
       error,
     };
+
+    if (updateAvailable && versionCache.data?.latest !== latest) {
+      void sendPushNotification({
+        title: 'MediaGrabber Update Available',
+        body: `Version ${latest} is available (currently on ${current}).`,
+        tag: `version-${latest}`,
+        url: '/',
+      });
+    }
+
     versionCache = { data, ts: now };
     res.json(data);
+  });
+
+  app.post('/api/version/update', async (_req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+
+    try {
+      versionCache = { data: null, ts: 0 };
+      const cwd = process.cwd();
+
+      // Check latest GitHub release zip asset first
+      let zipUrl = '';
+      let targetTag = 'v2.0-app';
+      try {
+        const ghRes = await fetch(
+          'https://api.github.com/repos/ai-mayhemyt/mediagrabber/releases?per_page=10',
+          {
+            headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'MediaGrabber' },
+            signal: AbortSignal.timeout(6000),
+          }
+        );
+        if (ghRes.ok) {
+          const releases = (await ghRes.json()) as any[];
+          if (Array.isArray(releases) && releases.length > 0) {
+            const top = releases[0];
+            targetTag = String(top?.tag_name || targetTag);
+            const zipAsset = (top?.assets || []).find((a: any) =>
+              String(a?.name || '').endsWith('.zip')
+            );
+            if (zipAsset?.browser_download_url) {
+              zipUrl = String(zipAsset.browser_download_url);
+            }
+          }
+        }
+      } catch {
+        // ignore, fallback to git pull
+      }
+
+      if (zipUrl) {
+        const tmpZip = '/tmp/mediagrabber-auto-update.zip';
+        await execFileAsync('curl', ['-fL', zipUrl, '-o', tmpZip], { timeout: 60000 });
+        await execFileAsync(
+          'python3',
+          ['-c', 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])', tmpZip, cwd],
+          { timeout: 30000 }
+        );
+        try { fs.unlinkSync(tmpZip); } catch {}
+      } else {
+        await execFileAsync('git', ['fetch', '--all', '--tags'], { cwd, timeout: 20000 });
+        await execFileAsync('git', ['pull', '--ff-only', 'origin', 'v2.0-app'], { cwd, timeout: 20000 });
+      }
+
+      await execFileAsync('npm', ['install', '--legacy-peer-deps'], { cwd, timeout: 120000 });
+      await execFileAsync('npm', ['run', 'build'], { cwd, timeout: 120000 });
+
+      res.json({
+        ok: true,
+        message: `Updated to ${targetTag}. Restarting MediaGrabber service...`,
+      });
+      setTimeout(() => process.exit(0), 750);
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Update failed' });
+    }
   });
 
   // ---- v2.0 Network Watchdog (NetWatch) ----
@@ -2784,7 +2943,7 @@ async function startServer() {
 
     try {
       if (format === 'tar.gz') {
-        const outTar = '/tmp/mediagrabber-v2.0-pre3.tar.gz';
+        const outTar = '/tmp/mediagrabber-v2.0-pre3fix.tar.gz';
         await execFileAsync(
           'tar',
           [
@@ -2798,10 +2957,10 @@ async function startServer() {
           ],
           { cwd: process.cwd(), timeout: 15000 }
         );
-        return res.download(outTar, 'mediagrabber-v2.0-pre3.tar.gz');
+        return res.download(outTar, 'mediagrabber-v2.0-pre3fix.tar.gz');
       }
 
-      const outZip = '/tmp/mediagrabber-v2.0-pre3.zip';
+      const outZip = '/tmp/mediagrabber-v2.0-pre3fix.zip';
       const pyScript = `
 import os, sys, zipfile
 out_zip = sys.argv[1]
@@ -2826,7 +2985,7 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
         timeout: 15000,
       });
       res.setHeader('Content-Type', 'application/zip');
-      return res.download(outZip, 'mediagrabber-v2.0-pre3.zip');
+      return res.download(outZip, 'mediagrabber-v2.0-pre3fix.zip');
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to package source bundle' });
     }

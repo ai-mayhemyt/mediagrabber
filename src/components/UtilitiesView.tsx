@@ -132,6 +132,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
   const [netwatch, setNetwatch] = useState<NetwatchStatus | null>(null);
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [checkingVersion, setCheckingVersion] = useState(false);
+  const [applyingUpdate, setApplyingUpdate] = useState(false);
 
   // Batch URL File Import
   const [importFileName, setImportFileName] = useState('');
@@ -1471,7 +1472,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <a
                   href="/api/server/export-bundle?format=zip"
-                  download="mediagrabber-v2.0-pre3.zip"
+                  download="mediagrabber-v2.0-pre3fix.zip"
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                   style={{
                     backgroundColor: 'var(--mg-bg)',
@@ -1482,6 +1483,33 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                   <Download className="w-3.5 h-3.5" />
                   <span>Download Bundle (.zip)</span>
                 </a>
+                {versionInfo?.update_available && (
+                  <button
+                    type="button"
+                    disabled={applyingUpdate}
+                    onClick={async () => {
+                      setApplyingUpdate(true);
+                      try {
+                        const res = await fetch('/api/version/update', { method: 'POST' });
+                        const data = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                          onNotify('error', data.error || 'Update failed.');
+                        } else {
+                          onNotify('success', data.message || 'Update installed. Reloading in 4s...');
+                          setTimeout(() => window.location.reload(), 4500);
+                        }
+                      } catch {
+                        onNotify('error', 'Failed to run updater.');
+                      } finally {
+                        setApplyingUpdate(false);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0 disabled:opacity-50 bg-emerald-600 hover:bg-emerald-500"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>{applyingUpdate ? 'Updating...' : `Install ${versionInfo.latest}`}</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={checkingVersion}
@@ -1498,11 +1526,11 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Current Build</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre3'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre3fix'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Latest Release</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre3'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre3fix'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Last Checked</div>

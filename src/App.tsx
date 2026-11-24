@@ -38,7 +38,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [storage, setStorage] = useState<StorageMap>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [appVersion, setAppVersion] = useState('v2.0-pre3');
+  const [appVersion, setAppVersion] = useState('v2.0-pre3fix');
 
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
   const [themeColors, setThemeColors] = useState<ThemeColors>(THEME_PRESETS.default.colors);
@@ -152,6 +152,11 @@ export default function App() {
               (oldStatus === 'queued' || oldStatus === 'running') &&
               (job.status === 'done' || job.status === 'failed')
             ) {
+              const label = job.title || job.url;
+              notify(
+                job.status === 'done' ? 'success' : 'error',
+                job.status === 'done' ? `Download complete: ${label}` : `Download failed: ${label}`
+              );
               notifications.notifyJobTransition(job);
             }
           }
@@ -164,7 +169,7 @@ export default function App() {
     } catch {
       // ignore
     }
-  }, [notifications]);
+  }, [notifications, notify]);
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -194,8 +199,16 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.current) {
-          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre3';
+          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre3fix';
           setAppVersion(shortVer);
+        }
+        if (data?.update_available && data?.latest) {
+          const seenKey = `mg_notified_ver_${data.latest}`;
+          if (!sessionStorage.getItem(seenKey)) {
+            sessionStorage.setItem(seenKey, '1');
+            notify('info', `Update available: ${data.latest} (current: ${data.current})`);
+            notifications.notifyVersionUpdate(data.latest);
+          }
         }
       })
       .catch(() => {});
