@@ -1,7 +1,8 @@
 {
-  "name": "react-example",
+  "name": "mediagrabber",
   "private": true,
-  "version": "0.0.0",
+  "version": "2.0.0-pre7.fix4",
+  "description": "Self-hosted media ingestion, download queue console, metadata editor, library deduplication, and Jellyfin companion service.",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",

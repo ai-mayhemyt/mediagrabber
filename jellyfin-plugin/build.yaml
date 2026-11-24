@@ -1,7 +1,7 @@
 ---
 name: "MediaGrabber"
 guid: "c7f3a1e4-9b2d-4c6f-a810-4e92d3b17c50"
-version: "2.0.0.0"
+version: "2.0.1.0"
 targetAbi: "10.10.0.0"
 framework: "net8.0"
 owner: "ai-mayhemyt"

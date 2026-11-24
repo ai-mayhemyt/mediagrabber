@@ -17,19 +17,23 @@ interface NightlyReleaseNote {
 
 const NIGHTLY_RELEASES: NightlyReleaseNote[] = [
   {
-    version: 'v2.0-pre7fix',
+    version: 'v2.0-pre7-fix4',
     channel: 'Nightly Pre-Release',
     date: '2026-11-24',
     summary:
-      'API Token creation & HTTP clipboard fixes (iPad/LAN Safari compatibility) plus full MediaGrabber logo branding, descriptions, and repo links across the Jellyfin Edition plugin.',
+      'High-resolution vector-rendered MediaGrabber logo banner, complete main README with Linux platforms/dependencies/grab CLI setup, and Jellyfin Downloader inline API key configuration.',
     items: [
+      {
+        kind: 'fix',
+        text: 'Generated 1200×675 high-resolution Web UI MediaGrabber logo across README.md and Jellyfin plugin, plus full Linux platforms, dependencies, and grab wrapper setup docs.',
+      },
       {
         kind: 'fix',
         text: 'Fixed API Token generation form submission, inline error handling, admin store persistence, and plain-HTTP clipboard copy fallback in Account Settings.',
       },
       {
         kind: 'new',
-        text: 'Added MediaGrabber logo (catalog imageUrl, release thumb.png, and embedded /MediaGrabber/Logo), detailed descriptions, and repository link inside the Jellyfin plugin & Settings.',
+        text: 'Added inline Server URL & API Key configuration drawer directly inside the Jellyfin Downloader page plus MediaGrabber logo branding, descriptions, and copyable repository URL.',
       },
       {
         kind: 'security',

@@ -1,5 +1,5 @@
 [Unit]
-Description=MediaGrabber v2.0 Console
+Description=MediaGrabber — Self-Hosted Media Ingestion, Queue & Jellyfin Companion Service
 After=network-online.target
 Wants=network-online.target
 

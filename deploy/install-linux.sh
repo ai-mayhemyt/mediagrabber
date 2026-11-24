@@ -130,7 +130,7 @@ if command -v systemctl >/dev/null 2>&1; then
   echo "==> Installing systemd service (mediagrabber.service)..."
   sudo tee /etc/systemd/system/mediagrabber.service >/dev/null <<EOF
 [Unit]
-Description=MediaGrabber v2.0 Console
+Description=MediaGrabber — Self-Hosted Media Ingestion, Queue & Jellyfin Companion Service
 After=network-online.target
 Wants=network-online.target
 

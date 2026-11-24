@@ -3187,7 +3187,7 @@ async function startServer() {
   });
 
   // ---- v2.0 Version Manager (GitHub Full & Nightly Releases + Tags) ----
-  const CURRENT_APP_VERSION = 'v2.0-pre7fix';
+  const CURRENT_APP_VERSION = 'v2.0-pre7-fix4';
 
   // ---- MediaGrabber - Jellyfin Edition Plugin API Bridge ----
   const TOKEN_SCOPE_LEVEL: Record<string, number> = {
@@ -4060,6 +4060,7 @@ async function startServer() {
       'vite.config.ts',
       'index.html',
       'metadata.json',
+      'README.md',
       'HANDOFF.md',
       '.env.example',
       '.gitignore',
@@ -4082,6 +4083,7 @@ async function startServer() {
             '--exclude=dist',
             '--exclude=.git',
             '--exclude=.env',
+            '--exclude=public/assets/aistudio',
             ...allowlist,
           ],
           { cwd: process.cwd(), timeout: 15000 }
@@ -4094,7 +4096,7 @@ async function startServer() {
 import os, sys, zipfile
 out_zip = sys.argv[1]
 items = sys.argv[2:]
-skip_dirs = {'node_modules', 'dist', '.git', 'bin', 'obj'}
+skip_dirs = {'node_modules', 'dist', '.git', 'bin', 'obj', 'aistudio'}
 with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
     for item in items:
         if os.path.isfile(item):
