@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { QrCode, Sun, Moon, Palette, LogOut, Search, X, Bell, BellRing } from 'lucide-react';
+import { QrCode, Sun, Moon, Palette, LogOut, Search, X, Bell, BellRing, BookOpen } from 'lucide-react';
 import { ActiveView } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -14,6 +14,7 @@ interface TopBarProps {
   onToggleNotifications: () => void;
   onToggleTheme: () => void;
   onOpenTheme: () => void;
+  onOpenQuickStart: () => void;
   onShareQr: () => void;
   onLogout: () => void;
   onPwaInstalled?: () => void;
@@ -29,7 +30,7 @@ const VIEW_LABELS: Record<ActiveView, string> = {
 export const TopBar: React.FC<TopBarProps> = ({
   activeView,
   themeMode,
-  version = 'v2.0-pre4',
+  version = 'v2.0-pre5',
   searchQuery,
   notificationsEnabled,
   notificationsBusy = false,
@@ -37,6 +38,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onToggleNotifications,
   onToggleTheme,
   onOpenTheme,
+  onOpenQuickStart,
   onShareQr,
   onLogout,
   onPwaInstalled,
@@ -155,6 +157,22 @@ export const TopBar: React.FC<TopBarProps> = ({
             <Bell className="w-3.5 h-3.5" />
           )}
           <span className="hidden xl:inline">{notificationsEnabled ? 'Alerts On' : 'Alerts'}</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onOpenQuickStart}
+          title="Open Quick Start Guide"
+          aria-label="Open Quick Start Guide"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap shrink-0"
+          style={{
+            backgroundColor: 'var(--mg-card)',
+            borderColor: 'var(--mg-border)',
+            color: 'var(--mg-text)',
+          }}
+        >
+          <BookOpen className="w-3.5 h-3.5" />
+          <span className="hidden xl:inline">Guide</span>
         </button>
 
         <button

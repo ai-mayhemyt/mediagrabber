@@ -17,8 +17,9 @@ import {
   CheckCircle2,
   Layers,
   Smartphone,
+  Play,
 } from 'lucide-react';
-import { Job, SignedFileDownload } from '../types';
+import { Job, MediaPreviewItem, SignedFileDownload } from '../types';
 
 interface QueueViewProps {
   jobs: Job[];
@@ -32,6 +33,7 @@ interface QueueViewProps {
   onClearCompleted: () => void;
   onViewLog: (job: Job) => void;
   onShareQr: (url: string) => void;
+  onPreviewMedia?: (media: MediaPreviewItem) => void;
   onOpenSchedule: (prefillUrl?: string) => void;
   onNotify: (type: 'info' | 'success' | 'error', msg: string) => void;
 }
@@ -65,6 +67,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
   onClearCompleted,
   onViewLog,
   onShareQr,
+  onPreviewMedia,
   onOpenSchedule,
   onNotify,
 }) => {
@@ -75,6 +78,7 @@ export const QueueView: React.FC<QueueViewProps> = ({
   const [activeBatchIds, setActiveBatchIds] = useState<string[]>([]);
   const [signedLinks, setSignedLinks] = useState<Record<string, SignedFileDownload>>({});
   const [signingJobId, setSigningJobId] = useState<string | null>(null);
+  const [previewingJobId, setPreviewingJobId] = useState<string | null>(null);
 
   const formatBytes = (bytes: number) => {
     if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -108,6 +112,42 @@ export const QueueView: React.FC<QueueViewProps> = ({
       onNotify('error', 'Failed to generate device download link.');
     } finally {
       setSigningJobId(null);
+    }
+  };
+
+  const handlePreviewJobFile = async (job: Job) => {
+    if (!onPreviewMedia || previewingJobId) return;
+    setPreviewingJobId(job.job_id);
+    try {
+      let signed = signedLinks[job.job_id];
+      if (!signed) {
+        const res = await fetch('/api/files/sign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: job.job_id }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.url) {
+          onNotify('error', data.error || 'Media file is unavailable for playback.');
+          return;
+        }
+        signed = data as SignedFileDownload;
+        setSignedLinks((prev) => ({ ...prev, [job.job_id]: signed! }));
+      }
+      const lower = signed.filename.toLowerCase();
+      const isAudio =
+        job.mode === 'audio' || /\.(mp3|m4a|aac|flac|ogg|opus|wav)$/i.test(lower);
+      onPreviewMedia({
+        inlineUrl: `${signed.url}&inline=1`,
+        downloadUrl: signed.url,
+        filename: signed.filename,
+        size_bytes: signed.size_bytes,
+        isAudio,
+      });
+    } catch {
+      onNotify('error', 'Failed to launch media preview.');
+    } finally {
+      setPreviewingJobId(null);
     }
   };
 
@@ -609,21 +649,42 @@ export const QueueView: React.FC<QueueViewProps> = ({
                             <span>Log</span>
                           </button>
                           {job.status === 'done' && job.file && (
-                            <button
-                              type="button"
-                              disabled={signingJobId === job.job_id}
-                              onClick={() => void handleSignJobFile(job.job_id)}
-                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium text-white whitespace-nowrap shrink-0 disabled:opacity-50"
-                              style={{ backgroundColor: 'var(--mg-accent)' }}
-                              title="Generate temporary 1-hour link to save directly to iPad/iPhone Files or another device"
-                            >
-                              {signingJobId === job.job_id ? (
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                              ) : (
-                                <Smartphone className="w-3 h-3" />
+                            <>
+                              {onPreviewMedia && (
+                                <button
+                                  type="button"
+                                  disabled={previewingJobId === job.job_id}
+                                  onClick={() => void handlePreviewJobFile(job)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50"
+                                  style={{
+                                    borderColor: 'var(--mg-border)',
+                                    color: 'var(--mg-text)',
+                                  }}
+                                >
+                                  {previewingJobId === job.job_id ? (
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                  ) : (
+                                    <Play className="w-3 h-3" />
+                                  )}
+                                  <span>Preview</span>
+                                </button>
                               )}
-                              <span>Send to Device</span>
-                            </button>
+                              <button
+                                type="button"
+                                disabled={signingJobId === job.job_id}
+                                onClick={() => void handleSignJobFile(job.job_id)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium text-white whitespace-nowrap shrink-0 disabled:opacity-50"
+                                style={{ backgroundColor: 'var(--mg-accent)' }}
+                                title="Generate temporary 1-hour link to save directly to iPad/iPhone Files or another device"
+                              >
+                                {signingJobId === job.job_id ? (
+                                  <Loader2 className="w-3 h-3 animate-spin" />
+                                ) : (
+                                  <Smartphone className="w-3 h-3" />
+                                )}
+                                <span>Send to Device</span>
+                              </button>
+                            </>
                           )}
                           <button
                             type="button"

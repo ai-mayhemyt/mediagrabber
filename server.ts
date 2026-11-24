@@ -441,6 +441,9 @@ async function seedWorkspace() {
       ytdlp_extra: '',
       spotdl_extra: '',
       gallerydl_extra: '',
+      webhook_url: '',
+      stale_timeout_minutes: 120,
+      quick_start_completed: false,
       ...(importedLegacy || {}),
     };
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(defaultSettings, null, 2));
@@ -742,6 +745,121 @@ async function sendPushNotification(payload: {
   return { sent, total: subs.length, failed };
 }
 
+function validateWebhookUrl(rawInput: unknown): string {
+  const raw = String(rawInput || '').trim();
+  if (!raw) return '';
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error('Webhook URL must be a valid HTTP or HTTPS URL.');
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new Error('Webhook URL must use http:// or https://.');
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (
+    host === '169.254.169.254' ||
+    host.startsWith('169.254.') ||
+    host === 'metadata.google.internal' ||
+    host === 'metadata'
+  ) {
+    throw new Error('Webhook URL cannot target cloud metadata endpoints.');
+  }
+  return parsed.toString();
+}
+
+async function sendWebhookNotification(
+  payload: {
+    status: 'done' | 'failed' | 'test';
+    title: string;
+    url?: string;
+    engine?: string;
+    file?: string | null;
+    message?: string;
+  },
+  overrideUrl?: string
+): Promise<{ sent: boolean; error?: string }> {
+  const settings = readJson<any>(SETTINGS_FILE, {});
+  const targetRaw = overrideUrl ?? settings?.webhook_url;
+  if (!targetRaw || !String(targetRaw).trim()) {
+    return { sent: false };
+  }
+
+  let targetUrl: string;
+  try {
+    targetUrl = validateWebhookUrl(targetRaw);
+  } catch (err: any) {
+    return { sent: false, error: err?.message || 'Invalid webhook URL' };
+  }
+
+  const host = new URL(targetUrl).hostname.toLowerCase();
+  const isDiscord = host === 'discord.com' || host.endsWith('.discord.com') || host === 'discordapp.com';
+  const isSlack = host === 'hooks.slack.com' || host.endsWith('.slack.com');
+
+  const statusText =
+    payload.status === 'done'
+      ? 'Download Complete'
+      : payload.status === 'failed'
+      ? 'Download Failed'
+      : 'Webhook Test';
+  const summaryLine = payload.message || `${statusText}: ${payload.title}${payload.engine ? ` (${payload.engine})` : ''}`;
+
+  let body: Record<string, any>;
+  if (isDiscord) {
+    body = {
+      content: summaryLine,
+      embeds: [
+        {
+          title: statusText,
+          description: payload.title,
+          color: payload.status === 'failed' ? 0xdc2626 : payload.status === 'done' ? 0x16a34a : 0x5b7cfa,
+          fields: [
+            ...(payload.engine ? [{ name: 'Engine', value: payload.engine, inline: true }] : []),
+            ...(payload.url ? [{ name: 'Source', value: payload.url.slice(0, 200), inline: false }] : []),
+            ...(payload.file ? [{ name: 'Saved File', value: path.basename(payload.file), inline: true }] : []),
+          ],
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    };
+  } else if (isSlack) {
+    body = {
+      text: `${summaryLine}${payload.url ? `\n${payload.url}` : ''}`,
+    };
+  } else {
+    body = {
+      app: 'MediaGrabber',
+      event: payload.status === 'done' ? 'job.completed' : payload.status === 'failed' ? 'job.failed' : 'webhook.test',
+      status: payload.status,
+      title: payload.title,
+      url: payload.url || null,
+      engine: payload.engine || null,
+      file: payload.file || null,
+      message: summaryLine,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  try {
+    const resp = await fetch(targetUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'MediaGrabber/2.0',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(7000),
+    });
+    if (!resp.ok) {
+      return { sent: false, error: `Webhook returned HTTP ${resp.status}` };
+    }
+    return { sent: true };
+  } catch (err: any) {
+    return { sent: false, error: err?.message || 'Webhook delivery failed' };
+  }
+}
+
 function signDownloadToken(resolvedPath: string, expMs: number): string {
   return crypto
     .createHmac('sha256', FILE_SIGN_SECRET)
@@ -977,6 +1095,7 @@ interface JobRecord {
   output_dir: string | null;
   log: string[];
   created_at: string;
+  started_at?: string;
 }
 
 async function startServer() {
@@ -1177,6 +1296,7 @@ async function startServer() {
     if (!job) return;
     try {
       job.status = 'running';
+      job.started_at = new Date().toISOString();
       job.progress = 2;
       job.log.push(`[mediagrabber] Job ${jobId.slice(0, 8)} started`);
 
@@ -1359,6 +1479,13 @@ async function startServer() {
           tag: `job-${job.job_id}`,
           url: '/',
         });
+        void sendWebhookNotification({
+          status: 'done',
+          title: job.title || job.url,
+          url: job.url,
+          engine: job.engine,
+          file: job.file,
+        });
       } else {
         job.status = 'failed';
         job.progress = 0;
@@ -1368,6 +1495,12 @@ async function startServer() {
           body: `${job.title || job.url} failed (${job.engine}).`,
           tag: `job-${job.job_id}`,
           url: '/',
+        });
+        void sendWebhookNotification({
+          status: 'failed',
+          title: job.title || job.url,
+          url: job.url,
+          engine: job.engine,
         });
       }
       return;
@@ -1457,6 +1590,13 @@ async function startServer() {
           tag: `job-${job.job_id}`,
           url: '/',
         });
+        void sendWebhookNotification({
+          status: 'done',
+          title: job.title || job.url,
+          url: job.url,
+          engine: job.engine,
+          file: job.file,
+        });
       } else {
         job.status = 'failed';
         job.progress = 0;
@@ -1466,6 +1606,12 @@ async function startServer() {
           body: `${job.title || job.url} failed (${job.engine}).`,
           tag: `job-${job.job_id}`,
           url: '/',
+        });
+        void sendWebhookNotification({
+          status: 'failed',
+          title: job.title || job.url,
+          url: job.url,
+          engine: job.engine,
         });
       }
       return;
@@ -1481,6 +1627,13 @@ async function startServer() {
         tag: `job-${job.job_id}`,
         url: '/',
       });
+      void sendWebhookNotification({
+        status: 'failed',
+        title: job.title || job.url,
+        url: job.url,
+        engine: job.engine,
+        message: `Download Failed: ${job.title || job.url} (no download binary found)`,
+      });
     } catch (err: any) {
       job.status = 'failed';
       job.progress = 0;
@@ -1491,8 +1644,69 @@ async function startServer() {
         tag: `job-${job.job_id}`,
         url: '/',
       });
+      void sendWebhookNotification({
+        status: 'failed',
+        title: job.title || job.url,
+        url: job.url,
+        engine: job.engine,
+        message: `Download Failed: ${job.title || job.url} (${err?.message || 'unexpected error'})`,
+      });
     }
   }
+
+  function runStaleJobCleanup(): number {
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const timeoutMins = Math.max(5, Math.min(1440, Number(settings?.stale_timeout_minutes || 120) || 120));
+    const cutoffMs = Date.now() - timeoutMins * 60_000;
+    let cleaned = 0;
+
+    for (const job of queue.values()) {
+      if (job.status !== 'running') continue;
+      const startedMs = new Date(job.started_at || job.created_at).getTime();
+      if (!Number.isFinite(startedMs) || startedMs > cutoffMs) continue;
+
+      const proc = activeProcesses.get(job.job_id);
+      if (proc) {
+        try {
+          proc.kill('SIGTERM');
+          setTimeout(() => {
+            try {
+              proc.kill('SIGKILL');
+            } catch {
+              // already exited
+            }
+          }, 3000);
+        } catch {
+          // ignore kill error
+        }
+        activeProcesses.delete(job.job_id);
+      }
+
+      job.status = 'failed';
+      job.progress = 0;
+      job.log.push(`[janitor] Marked failed after exceeding ${timeoutMins}m stale download timeout.`);
+      cleaned++;
+
+      void sendPushNotification({
+        title: 'Stale Download Cleaned Up',
+        body: `${job.title || job.url} timed out after ${timeoutMins} minutes.`,
+        tag: `job-${job.job_id}`,
+        url: '/',
+      });
+      void sendWebhookNotification({
+        status: 'failed',
+        title: job.title || job.url,
+        url: job.url,
+        engine: job.engine,
+        message: `Stale Download Timed Out (${timeoutMins}m): ${job.title || job.url}`,
+      });
+    }
+    return cleaned;
+  }
+
+  setInterval(() => {
+    runStaleJobCleanup();
+  }, 60_000);
 
   // ---- Auth & Account Routes ----
   app.get('/api/me', (_req, res) => {
@@ -1900,6 +2114,10 @@ async function startServer() {
   });
 
   app.post('/api/settings', (req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
     const current = readJson<any>(SETTINGS_FILE, {});
     const incoming = { ...(req.body || {}) };
     const pathFields = [
@@ -1928,9 +2146,228 @@ async function startServer() {
       }
     }
 
+    if ('webhook_url' in incoming) {
+      try {
+        incoming.webhook_url = validateWebhookUrl(incoming.webhook_url);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || 'Invalid webhook URL.' });
+      }
+    }
+    if ('stale_timeout_minutes' in incoming) {
+      const mins = Number(incoming.stale_timeout_minutes);
+      incoming.stale_timeout_minutes = Number.isFinite(mins)
+        ? Math.max(5, Math.min(1440, Math.round(mins)))
+        : 120;
+    }
+
     const updated = { ...current, ...incoming };
     writeJson(SETTINGS_FILE, updated);
     res.json({ status: 'saved', settings: updated });
+  });
+
+  app.post('/api/webhook/test', async (req, res) => {
+    const active = getActiveUser();
+    if (!active) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    const candidateUrl =
+      typeof req.body?.webhook_url === 'string' && req.body.webhook_url.trim()
+        ? req.body.webhook_url.trim()
+        : undefined;
+    const result = await sendWebhookNotification(
+      {
+        status: 'test',
+        title: 'MediaGrabber Webhook Connected',
+        engine: 'SYSTEM',
+        message: 'Test alert from MediaGrabber — completion and failure webhooks are active.',
+      },
+      candidateUrl
+    );
+    if (!result.sent) {
+      return res.status(400).json({ ok: false, error: result.error || 'No webhook URL configured.' });
+    }
+    res.json({ ok: true, message: 'Test webhook delivered.' });
+  });
+
+  app.get('/api/quickstart/status', (_req, res) => {
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const users = readJson<any[]>(USERS_FILE, []);
+    res.json({
+      quick_start_completed: settings?.quick_start_completed === true,
+      has_admin: users.some((u) => u.role === 'admin'),
+      user_count: users.length,
+    });
+  });
+
+  app.post('/api/quickstart/admin', (req, res) => {
+    const users = readJson<any[]>(USERS_FILE, []);
+    const hasAdmin = users.some((u) => u.role === 'admin');
+    const active = getActiveUser();
+    if (hasAdmin && (!active || active.role !== 'admin')) {
+      return res.status(403).json({
+        error: 'Sign in as an existing administrator before creating another admin account.',
+      });
+    }
+
+    const username = String(req.body?.username || '').trim();
+    const displayName = String(req.body?.display_name || '').trim() || username;
+    const email = String(req.body?.email || '').trim() || `${username}@mediagrabber.local`;
+    const password = String(req.body?.password || '');
+    const password2 = String(req.body?.password2 ?? password);
+    const switchSession = req.body?.switch_session !== false;
+
+    if (username.length < 3 || username.length > 32) {
+      return res.status(400).json({ error: 'Username must be 3 to 32 characters.' });
+    }
+    if (!/^[a-zA-Z0-9_.-]+$/.test(username)) {
+      return res.status(400).json({ error: 'Username may only contain letters, numbers, _, ., and -.' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+    if (password !== password2) {
+      return res.status(400).json({ error: 'Passwords do not match.' });
+    }
+    if (users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
+      return res.status(409).json({
+        error: `Username "${username}" already exists — existing accounts were preserved untouched.`,
+      });
+    }
+
+    const newAdmin = {
+      id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+      username,
+      display_name: displayName,
+      email,
+      role: 'admin',
+      avatar: DEFAULT_AVATAR,
+      theme: 'dark',
+      totp_enabled: false,
+      totp_secret: '',
+      theme_colors: null,
+      password_hash: hashPassword(password),
+    };
+    const nextUsers = [...users, newAdmin];
+    writeJson(USERS_FILE, nextUsers);
+    if (switchSession || !currentUserId) {
+      currentUserId = newAdmin.id;
+    }
+
+    res.status(201).json({
+      ok: true,
+      user: sanitizeUser(newAdmin),
+      preserved_count: users.length,
+      users: nextUsers.map(sanitizeUser),
+    });
+  });
+
+  app.post('/api/quickstart/complete', (_req, res) => {
+    const active = getActiveUser();
+    if (!active) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    const current = readJson<any>(SETTINGS_FILE, {});
+    writeJson(SETTINGS_FILE, { ...current, quick_start_completed: true });
+    res.json({ ok: true });
+  });
+
+  app.post('/api/queue/cleanup-stale', (_req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const cleaned = runStaleJobCleanup();
+    res.json({ ok: true, cleaned });
+  });
+
+  app.get('/api/stats', (_req, res) => {
+    const active = getActiveUser();
+    if (!active) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const jobs = Array.from(queue.values());
+    const history = readJson<any[]>(HISTORY_FILE, []);
+    const now = Date.now();
+
+    const bySource: Record<string, number> = {
+      youtube: 0,
+      ytmusic: 0,
+      spotify: 0,
+      gallery: 0,
+      other: 0,
+    };
+    let recent24h = 0;
+    let recent7d = 0;
+    for (const h of history) {
+      const src = String(h?.source || 'other').toLowerCase();
+      if (src in bySource) bySource[src]++;
+      else bySource.other++;
+      const ts = new Date(h?.timestamp || 0).getTime();
+      if (Number.isFinite(ts)) {
+        if (now - ts <= 86_400_000) recent24h++;
+        if (now - ts <= 7 * 86_400_000) recent7d++;
+      }
+    }
+
+    const qDone = jobs.filter((j) => j.status === 'done').length;
+    const qFailed = jobs.filter((j) => j.status === 'failed').length;
+    const totalCompleted = Math.max(history.length, qDone);
+    const totalAttempts = totalCompleted + qFailed;
+    const successRate = totalAttempts > 0 ? Math.round((totalCompleted / totalAttempts) * 100) : 100;
+
+    const libDefs = [
+      { name: 'YouTube', dir: isSafeLibraryBasePath(settings?.yt_base_path) || YT_DIR },
+      { name: 'Music', dir: isSafeLibraryBasePath(settings?.music_base_path) || MUSIC_DIR },
+      { name: 'Gallery', dir: isSafeLibraryBasePath(settings?.gallery_base_path) || GALLERY_DIR },
+    ];
+    let totalBytes = 0;
+    let totalFiles = 0;
+    const libraries = libDefs.map(({ name, dir }) => {
+      let fileCount = 0;
+      let bytes = 0;
+      if (fs.existsSync(dir)) {
+        for (const f of walkFiles(dir)) {
+          const ext = path.extname(f).toLowerCase();
+          if (!MEDIA_EXTS.has(ext) && !['.jpg', '.jpeg', '.png', '.webp', '.gif'].includes(ext)) continue;
+          try {
+            const st = fs.statSync(f);
+            if (st.isFile()) {
+              fileCount++;
+              bytes += st.size;
+            }
+          } catch {
+            // ignore unreadable file
+          }
+        }
+      }
+      totalBytes += bytes;
+      totalFiles += fileCount;
+      return { name, path: dir, file_count: fileCount, size_bytes: bytes };
+    });
+
+    res.json({
+      queue: {
+        total: jobs.length,
+        queued: jobs.filter((j) => j.status === 'queued').length,
+        running: jobs.filter((j) => j.status === 'running').length,
+        done: qDone,
+        failed: qFailed,
+        cancelled: jobs.filter((j) => j.status === 'cancelled').length,
+      },
+      history: {
+        total: history.length,
+        recent_24h: recent24h,
+        recent_7d: recent7d,
+        by_source: bySource,
+      },
+      success_rate: successRate,
+      storage_summary: {
+        total_files: totalFiles,
+        total_bytes: totalBytes,
+        libraries,
+      },
+    });
   });
 
   app.post('/api/scan-media', async (_req, res) => {
@@ -2704,7 +3141,7 @@ async function startServer() {
     res.json({ deleted: id });
   });
 
-  // ---- v2.0 Version Manager (GitHub Releases + Tags) ----
+  // ---- v2.0 Version Manager (GitHub Nightly Releases + Tags) ----
   let versionCache: { data: any; ts: number } = { data: null, ts: 0 };
 
   const parseVer = (raw: string): [number, number, number, number, number, number] => {
@@ -2716,21 +3153,28 @@ async function startServer() {
     const pat = parseInt(m[3] || '0', 10);
     const suffix = (m[4] || '').toLowerCase();
     const fixRank = suffix.includes('fix') ? 1 : 0;
-    if (!suffix || suffix === 'final') return [maj, min, pat, 4, 0, fixRank];
+    if (!suffix || suffix === 'final') return [maj, min, pat, 5, 0, fixRank];
     if (suffix.startsWith('rc')) {
       const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
-      return [maj, min, pat, 3, n, fixRank];
+      return [maj, min, pat, 4, n, fixRank];
     }
-    if (suffix.startsWith('pre')) {
-      const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
-      return [maj, min, pat, 2, n, fixRank];
+    if (
+      suffix.startsWith('pre') ||
+      suffix.includes('nightly') ||
+      suffix.startsWith('beta') ||
+      suffix.startsWith('alpha') ||
+      suffix.startsWith('dev')
+    ) {
+      const nums = suffix.match(/\d+/g);
+      const n = nums ? parseInt(nums.join(''), 10) : 0;
+      return [maj, min, pat, 3, n, fixRank];
     }
     if (suffix.startsWith('v')) {
       const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
       return [maj, min, pat, 1, n, fixRank];
     }
     const n = parseInt(suffix.replace(/[^0-9]/g, '') || '0', 10);
-    return [maj, min, pat, 1, n, fixRank];
+    return [maj, min, pat, 2, n, fixRank];
   };
 
   const cmpVer = (a: string, b: string): number => {
@@ -2749,15 +3193,16 @@ async function startServer() {
       return res.json(versionCache.data);
     }
 
-    const current = 'v2.0-pre4';
+    const current = 'v2.0-pre5';
     let latest = current;
     let tags: string[] = [];
     let releaseZipUrl: string | null = null;
+    let isPrerelease = /pre|nightly|rc|alpha|beta/i.test(current);
     let error: string | null = null;
 
     try {
       const ghRes = await fetch(
-        'https://api.github.com/repos/ai-mayhemyt/mediagrabber/releases?per_page=15',
+        'https://api.github.com/repos/ai-mayhemyt/mediagrabber/releases?per_page=30',
         {
           headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'MediaGrabber' },
           signal: AbortSignal.timeout(5000),
@@ -2767,17 +3212,25 @@ async function startServer() {
         const releases = (await ghRes.json()) as any[];
         if (Array.isArray(releases)) {
           for (const rel of releases) {
+            if (rel?.draft) continue;
             const tag = String(rel?.tag_name || '').trim();
             if (tag && !tags.some((x) => x.toLowerCase() === tag.toLowerCase())) tags.push(tag);
           }
-          const sortedRels = [...releases].sort((a, b) =>
-            cmpVer(String(b?.tag_name || ''), String(a?.tag_name || ''))
-          );
+          const published = releases.filter((r) => !r?.draft && r?.tag_name);
+          const sortedRels = [...published].sort((a, b) => {
+            const cmp = cmpVer(String(b?.tag_name || ''), String(a?.tag_name || ''));
+            if (cmp !== 0) return cmp;
+            return (
+              new Date(String(b?.published_at || 0)).getTime() -
+              new Date(String(a?.published_at || 0)).getTime()
+            );
+          });
           const top = sortedRels[0];
           if (top?.tag_name) {
             const topTag = String(top.tag_name).trim();
             if (cmpVer(topTag, current) >= 0) {
               latest = topTag;
+              isPrerelease = Boolean(top.prerelease || /pre|nightly|rc|alpha|beta/i.test(topTag));
             }
             const assets = Array.isArray(top.assets) ? top.assets : [];
             const zipAsset = assets.find((a: any) => String(a?.name || '').endsWith('.zip'));
@@ -2809,6 +3262,7 @@ async function startServer() {
         const newestTag = tags[0];
         if (cmpVer(newestTag, latest) > 0) {
           latest = newestTag;
+          isPrerelease = /pre|nightly|rc|alpha|beta/i.test(newestTag);
         }
       }
     } catch (err: any) {
@@ -2821,6 +3275,8 @@ async function startServer() {
     const data = {
       current,
       latest,
+      channel: isPrerelease ? 'nightly' : 'stable',
+      is_prerelease: isPrerelease,
       update_available: updateAvailable,
       release_zip_url: releaseZipUrl,
       checked_at: new Date().toISOString(),
@@ -2830,8 +3286,8 @@ async function startServer() {
 
     if (updateAvailable && versionCache.data?.latest !== latest) {
       void sendPushNotification({
-        title: 'MediaGrabber Update Available',
-        body: `Version ${latest} is available (currently on ${current}).`,
+        title: 'MediaGrabber Nightly Update Available',
+        body: `Release ${latest} is available (currently on ${current}).`,
         tag: `version-${latest}`,
         url: '/',
       });
@@ -2850,13 +3306,13 @@ async function startServer() {
     try {
       versionCache = { data: null, ts: 0 };
       const cwd = process.cwd();
-      const current = 'v2.0-pre4';
+      const current = 'v2.0-pre5';
 
       let zipUrl = '';
       let targetTag = 'v2.0-app';
       try {
         const ghRes = await fetch(
-          'https://api.github.com/repos/ai-mayhemyt/mediagrabber/releases?per_page=10',
+          'https://api.github.com/repos/ai-mayhemyt/mediagrabber/releases?per_page=30',
           {
             headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'MediaGrabber' },
             signal: AbortSignal.timeout(6000),
@@ -2865,7 +3321,8 @@ async function startServer() {
         if (ghRes.ok) {
           const releases = (await ghRes.json()) as any[];
           if (Array.isArray(releases) && releases.length > 0) {
-            const sorted = [...releases].sort((a, b) =>
+            const published = releases.filter((r) => !r?.draft && r?.tag_name);
+            const sorted = [...published].sort((a, b) =>
               cmpVer(String(b?.tag_name || ''), String(a?.tag_name || ''))
             );
             const top = sorted[0];
@@ -2896,10 +3353,28 @@ async function startServer() {
         try { fs.unlinkSync(tmpZip); } catch {}
       } else {
         await execFileAsync('git', ['fetch', '--all', '--tags'], { cwd, timeout: 20000 });
-        await execFileAsync('git', ['pull', '--ff-only', 'origin', 'v2.0-app'], { cwd, timeout: 20000 });
+        let branch = 'v2.0';
+        try {
+          const { stdout: bOut } = await execFileAsync(
+            'git',
+            ['rev-parse', '--abbrev-ref', 'HEAD'],
+            { cwd, timeout: 5000 }
+          );
+          const trimmed = bOut.trim();
+          if (trimmed && trimmed !== 'HEAD') branch = trimmed;
+        } catch {}
+        try {
+          await execFileAsync('git', ['pull', '--ff-only', 'origin', branch], { cwd, timeout: 20000 });
+        } catch {
+          await execFileAsync('git', ['pull', '--ff-only', 'origin', 'v2.0-app'], { cwd, timeout: 20000 });
+        }
       }
 
-      await execFileAsync('npm', ['install', '--legacy-peer-deps'], { cwd, timeout: 120000 });
+      await execFileAsync(
+        'npm',
+        ['install', '--no-package-lock', '--legacy-peer-deps'],
+        { cwd, timeout: 120000 }
+      );
       await execFileAsync('npm', ['run', 'build'], { cwd, timeout: 120000 });
 
       res.json({
@@ -2917,7 +3392,7 @@ async function startServer() {
     const jobs = Array.from(queue.values());
     res.json({
       status: 'ok',
-      version: 'v2.0-pre4',
+      version: 'v2.0-pre5',
       uptime_seconds: Math.round(process.uptime()),
       queue: {
         total: jobs.length,
@@ -2975,6 +3450,7 @@ async function startServer() {
     const rawPath = String(req.query.path || '');
     const expMs = Number(req.query.exp || 0);
     const sig = String(req.query.sig || '');
+    const inline = req.query.inline === '1';
 
     const settings = readJson<any>(SETTINGS_FILE, {});
     const safeFile = safePathWithinLibraries(rawPath, settings);
@@ -2984,7 +3460,58 @@ async function startServer() {
     if (!fs.existsSync(safeFile) || !fs.statSync(safeFile).isFile()) {
       return res.status(404).send('File not found.');
     }
-    res.download(safeFile, path.basename(safeFile));
+
+    if (!inline) {
+      return res.download(safeFile, path.basename(safeFile));
+    }
+
+    const ext = path.extname(safeFile).toLowerCase();
+    const mimeMap: Record<string, string> = {
+      '.mp4': 'video/mp4',
+      '.m4v': 'video/mp4',
+      '.webm': 'video/webm',
+      '.mkv': 'video/x-matroska',
+      '.mov': 'video/quicktime',
+      '.mp3': 'audio/mpeg',
+      '.m4a': 'audio/mp4',
+      '.aac': 'audio/aac',
+      '.flac': 'audio/flac',
+      '.ogg': 'audio/ogg',
+      '.opus': 'audio/ogg',
+      '.wav': 'audio/wav',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+    };
+    const contentType = mimeMap[ext] || 'application/octet-stream';
+    const stat = fs.statSync(safeFile);
+    const total = stat.size;
+    const range = req.headers.range;
+
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `inline; filename="${path.basename(safeFile).replace(/"/g, '')}"`);
+
+    if (range) {
+      const m = range.match(/bytes=(\d+)-(\d*)/);
+      if (!m) {
+        return res.status(416).setHeader('Content-Range', `bytes */${total}`).end();
+      }
+      const start = parseInt(m[1], 10);
+      const end = m[2] ? Math.min(total - 1, parseInt(m[2], 10)) : total - 1;
+      if (start >= total || start > end) {
+        return res.status(416).setHeader('Content-Range', `bytes */${total}`).end();
+      }
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+      res.setHeader('Content-Length', String(end - start + 1));
+      fs.createReadStream(safeFile, { start, end }).pipe(res);
+      return;
+    }
+
+    res.setHeader('Content-Length', String(total));
+    fs.createReadStream(safeFile).pipe(res);
   });
 
   // ---- YouTube RSS Channel Feeds ----
@@ -3238,6 +3765,7 @@ async function startServer() {
       'vite.config.ts',
       'index.html',
       'metadata.json',
+      'HANDOFF.md',
       '.env.example',
       '.gitignore',
       'src',
@@ -3248,7 +3776,7 @@ async function startServer() {
 
     try {
       if (format === 'tar.gz') {
-        const outTar = '/tmp/mediagrabber-v2.0-pre4.tar.gz';
+        const outTar = '/tmp/mediagrabber-v2.0-pre5.tar.gz';
         await execFileAsync(
           'tar',
           [
@@ -3262,10 +3790,10 @@ async function startServer() {
           ],
           { cwd: process.cwd(), timeout: 15000 }
         );
-        return res.download(outTar, 'mediagrabber-v2.0-pre4.tar.gz');
+        return res.download(outTar, 'mediagrabber-v2.0-pre5.tar.gz');
       }
 
-      const outZip = '/tmp/mediagrabber-v2.0-pre4.zip';
+      const outZip = '/tmp/mediagrabber-v2.0-pre5.zip';
       const pyScript = `
 import os, sys, zipfile
 out_zip = sys.argv[1]
@@ -3290,7 +3818,7 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
         timeout: 15000,
       });
       res.setHeader('Content-Type', 'application/zip');
-      return res.download(outZip, 'mediagrabber-v2.0-pre4.zip');
+      return res.download(outZip, 'mediagrabber-v2.0-pre5.zip');
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to package source bundle' });
     }

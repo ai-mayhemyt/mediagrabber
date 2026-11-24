@@ -16,24 +16,27 @@ interface SettingsViewProps {
   onNotify: (type: 'info' | 'success' | 'error', msg: string) => void;
   onStorageRefresh: () => void;
   notifications?: NotificationControlProps;
+  refreshKey?: number;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   onNotify,
   onStorageRefresh,
   notifications,
+  refreshKey = 0,
 }) => {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [settings, setSettings] = useState<MediaGrabberSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [scanningJellyfin, setScanningJellyfin] = useState(false);
+  const [testingWebhook, setTestingWebhook] = useState(false);
 
   useEffect(() => {
     fetch('/api/settings')
       .then((r) => r.json())
       .then((data) => setSettings(data))
       .catch(() => onNotify('error', 'Failed to load settings'));
-  }, []);
+  }, [refreshKey]);
 
   if (!settings) {
     return (
@@ -453,6 +456,75 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
           >
             Send Test Email
+          </button>
+        </div>
+      </section>
+
+      <section
+        className="p-5 rounded-xl border flex flex-col gap-4"
+        style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+      >
+        <h2 className="font-display text-sm font-semibold border-b pb-2.5" style={{ borderColor: 'var(--mg-border)' }}>
+          Webhooks &amp; Stale Job Cleanup
+        </h2>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <label className="sm:col-span-2 flex flex-col gap-1.5 text-xs font-medium">
+            <span>Webhook URL (Discord, Slack, ntfy, or Custom JSON)</span>
+            <input
+              type="url"
+              value={settings.webhook_url || ''}
+              onChange={(e) => updateField('webhook_url', e.target.value)}
+              placeholder="https://discord.com/api/webhooks/..."
+              className={`${inputClass} font-mono`}
+              style={inputStyle}
+            />
+          </label>
+          <label className="flex flex-col gap-1.5 text-xs font-medium">
+            <span>Stale Download Timeout (mins)</span>
+            <input
+              type="number"
+              min={5}
+              max={1440}
+              value={settings.stale_timeout_minutes ?? 120}
+              onChange={(e) =>
+                updateField('stale_timeout_minutes', Math.max(5, Math.min(1440, Number(e.target.value) || 120)))
+              }
+              className={`${inputClass} font-mono tabular-nums`}
+              style={inputStyle}
+            />
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+          <span className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+            Fires on download completion or failure. Active downloads hung longer than the timeout are killed automatically.
+          </span>
+          <button
+            type="button"
+            disabled={testingWebhook || !String(settings.webhook_url || '').trim()}
+            onClick={async () => {
+              setTestingWebhook(true);
+              try {
+                const res = await fetch('/api/webhook/test', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ webhook_url: settings.webhook_url }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) onNotify('error', data.error || 'Webhook test failed');
+                else onNotify('success', data.message || 'Webhook test delivered.');
+              } catch {
+                onNotify('error', 'Failed to send test webhook.');
+              } finally {
+                setTestingWebhook(false);
+              }
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50"
+            style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+          >
+            <Send className="w-3.5 h-3.5" />
+            <span>{testingWebhook ? 'Testing...' : 'Test Webhook'}</span>
           </button>
         </div>
       </section>

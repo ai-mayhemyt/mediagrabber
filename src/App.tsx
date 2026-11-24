@@ -4,6 +4,8 @@ import {
   HistoryItem,
   Job,
   MediaFileItem,
+  MediaGrabberSettings,
+  MediaPreviewItem,
   StorageMap,
   ThemeColors,
   ToastMessage,
@@ -22,8 +24,10 @@ import {
   AccountModal,
   ConfirmDialog,
   JobLogModal,
+  MediaPlayerModal,
   MetadataEditorModal,
   QrModal,
+  QuickStartModal,
   ScheduleModal,
   THEME_PRESETS,
   ThemeModal,
@@ -38,7 +42,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [storage, setStorage] = useState<StorageMap>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [appVersion, setAppVersion] = useState('v2.0-pre4');
+  const [appVersion, setAppVersion] = useState('v2.0-pre5');
 
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
   const [themeColors, setThemeColors] = useState<ThemeColors>(THEME_PRESETS.default.colors);
@@ -46,7 +50,12 @@ export default function App() {
   // Modals
   const [logJob, setLogJob] = useState<Job | null>(null);
   const [qrUrl, setQrUrl] = useState<string | null>(null);
+  const [previewMedia, setPreviewMedia] = useState<MediaPreviewItem | null>(null);
   const [accountOpen, setAccountOpen] = useState(false);
+  const [accountInitialTab, setAccountInitialTab] = useState<'profile' | 'security' | 'tokens' | 'register'>('profile');
+  const [quickStartOpen, setQuickStartOpen] = useState(false);
+  const [quickStartSettings, setQuickStartSettings] = useState<MediaGrabberSettings | null>(null);
+  const [settingsRefreshKey, setSettingsRefreshKey] = useState(0);
   const [themeOpen, setThemeOpen] = useState(false);
   const [scheduleModal, setScheduleModal] = useState<{ open: boolean; prefillUrl?: string }>({
     open: false,
@@ -201,7 +210,7 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.current) {
-          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre4';
+          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre5';
           setAppVersion(shortVer);
         }
         if (
@@ -219,6 +228,39 @@ export default function App() {
       })
       .catch(() => {});
   }, [fetchMe, notifications, notify]);
+
+  const quickStartCheckedRef = useRef(false);
+  useEffect(() => {
+    if (!authChecked || quickStartCheckedRef.current) return;
+    if (!user) {
+      fetch('/api/quickstart/status')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((st) => {
+          if (st && st.has_admin === false && st.quick_start_completed !== true) {
+            quickStartCheckedRef.current = true;
+            setQuickStartOpen(true);
+          }
+        })
+        .catch(() => {});
+      return;
+    }
+    quickStartCheckedRef.current = true;
+    fetch('/api/settings')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((s: MediaGrabberSettings | null) => {
+        if (s) setQuickStartSettings(s);
+        let dismissedLocally = false;
+        try {
+          dismissedLocally = localStorage.getItem('mg_quickstart_dismissed') === '1';
+        } catch {
+          // ignore
+        }
+        if (s && s.quick_start_completed !== true && !dismissedLocally) {
+          setQuickStartOpen(true);
+        }
+      })
+      .catch(() => {});
+  }, [authChecked, user]);
 
   useEffect(() => {
     if (!user) return;
@@ -396,6 +438,35 @@ export default function App() {
           }}
           onClose={() => setThemeOpen(false)}
         />
+        <QuickStartModal
+          open={quickStartOpen}
+          user={null}
+          settings={quickStartSettings}
+          notificationsEnabled={notifications.isEnabled}
+          onEnableNotifications={notifications.enableNotifications}
+          onNavigate={(v) => setActiveView(v)}
+          onOpenAccountSecurity={() => {
+            setAccountInitialTab('security');
+            setAccountOpen(true);
+          }}
+          onUserUpdated={handleAuthSuccess}
+          onSettingsSaved={(s) => {
+            setQuickStartSettings(s);
+            setSettingsRefreshKey((k) => k + 1);
+          }}
+          onNotify={notify}
+          onFinish={(dontShowAgain) => {
+            setQuickStartOpen(false);
+            if (dontShowAgain) {
+              try {
+                localStorage.setItem('mg_quickstart_dismissed', '1');
+              } catch {
+                // ignore
+              }
+              fetch('/api/quickstart/complete', { method: 'POST' }).catch(() => {});
+            }
+          }}
+        />
         <ToastContainer
           toasts={toasts}
           onDismiss={(id) => setToasts((prev) => prev.filter((t) => t.id !== id))}
@@ -415,7 +486,10 @@ export default function App() {
         user={user}
         storage={storage}
         version={appVersion}
-        onOpenAccount={() => setAccountOpen(true)}
+        onOpenAccount={() => {
+          setAccountInitialTab('profile');
+          setAccountOpen(true);
+        }}
         onOpenTheme={() => setThemeOpen(true)}
         onLogout={handleLogout}
         onGrab={handleGrab}
@@ -434,6 +508,7 @@ export default function App() {
           onToggleNotifications={() => void notifications.toggleNotifications()}
           onToggleTheme={handleToggleTheme}
           onOpenTheme={() => setThemeOpen(true)}
+          onOpenQuickStart={() => setQuickStartOpen(true)}
           onShareQr={() => setQrUrl(window.location.href)}
           onLogout={handleLogout}
           onPwaInstalled={() => notify('success', 'MediaGrabber installed as an app.')}
@@ -453,6 +528,7 @@ export default function App() {
               onClearCompleted={handleClearCompleted}
               onViewLog={(job) => setLogJob(job)}
               onShareQr={(url) => setQrUrl(url)}
+              onPreviewMedia={(media) => setPreviewMedia(media)}
               onOpenSchedule={(prefillUrl) => setScheduleModal({ open: true, prefillUrl })}
               onNotify={notify}
             />
@@ -468,6 +544,7 @@ export default function App() {
                 setActiveView('queue');
               }}
               onShareQr={(url) => setQrUrl(url)}
+              onPreviewMedia={(media) => setPreviewMedia(media)}
               onNotify={notify}
             />
           )}
@@ -497,6 +574,7 @@ export default function App() {
             <SettingsView
               onNotify={notify}
               onStorageRefresh={() => void fetchStorage()}
+              refreshKey={settingsRefreshKey}
               notifications={{
                 isEnabled: notifications.isEnabled,
                 pushSubscribed: notifications.pushSubscribed,
@@ -514,6 +592,43 @@ export default function App() {
 
       <JobLogModal job={logJob} onClose={() => setLogJob(null)} />
       <QrModal url={qrUrl} onClose={() => setQrUrl(null)} />
+      <MediaPlayerModal media={previewMedia} onClose={() => setPreviewMedia(null)} />
+      <QuickStartModal
+        open={quickStartOpen}
+        user={user}
+        settings={quickStartSettings}
+        notificationsEnabled={notifications.isEnabled}
+        onEnableNotifications={notifications.enableNotifications}
+        onNavigate={(v) => setActiveView(v)}
+        onOpenAccountSecurity={() => {
+          setAccountInitialTab('security');
+          setAccountOpen(true);
+        }}
+        onUserUpdated={(updated) => {
+          setUser(updated);
+          applyUserTheme(updated);
+        }}
+        onSettingsSaved={(s) => {
+          setQuickStartSettings(s);
+          setSettingsRefreshKey((k) => k + 1);
+          void fetchStorage();
+        }}
+        onNotify={notify}
+        onFinish={(dontShowAgain) => {
+          setQuickStartOpen(false);
+          if (dontShowAgain) {
+            try {
+              localStorage.setItem('mg_quickstart_dismissed', '1');
+            } catch {
+              // ignore
+            }
+            setQuickStartSettings((prev) =>
+              prev ? { ...prev, quick_start_completed: true } : prev
+            );
+            fetch('/api/quickstart/complete', { method: 'POST' }).catch(() => {});
+          }
+        }}
+      />
       <ScheduleModal
         open={scheduleModal.open}
         prefillUrl={scheduleModal.prefillUrl}
@@ -523,6 +638,7 @@ export default function App() {
       <AccountModal
         open={accountOpen}
         user={user}
+        initialTab={accountInitialTab}
         onClose={() => setAccountOpen(false)}
         onUpdated={(updated) => setUser(updated)}
         onLogout={handleLogout}

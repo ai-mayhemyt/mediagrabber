@@ -20,12 +20,14 @@ import {
   PackageCheck,
   FileUp,
   Download,
+  BarChart3,
 } from 'lucide-react';
 import {
   ArchiveEntry,
   MediaFileItem,
   NetwatchStatus,
   RadioStation,
+  StatsOverview,
   UserAccount,
   VersionInfo,
 } from '../types';
@@ -43,6 +45,7 @@ interface UtilitiesViewProps {
 type UtilityTab =
   | 'library'
   | 'batch'
+  | 'stats'
   | 'metadata'
   | 'archive'
   | 'radio'
@@ -133,6 +136,8 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [checkingVersion, setCheckingVersion] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [stats, setStats] = useState<StatsOverview | null>(null);
+  const [loadingStats, setLoadingStats] = useState(false);
 
   // Batch URL File Import
   const [importFileName, setImportFileName] = useState('');
@@ -203,6 +208,20 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
       setUsers(Array.isArray(data) ? data : []);
     } catch {
       // ignore
+    }
+  };
+
+  const loadStats = async () => {
+    setLoadingStats(true);
+    try {
+      const res = await fetch('/api/stats', { cache: 'no-store' });
+      if (res.ok) {
+        setStats(await res.json());
+      }
+    } catch {
+      onNotify('error', 'Failed to load download stats.');
+    } finally {
+      setLoadingStats(false);
     }
   };
 
@@ -301,6 +320,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
   useEffect(() => {
     if (activeTab === 'metadata' && mediaFiles.length === 0) void scanEditorFiles();
     if (activeTab === 'archive') void loadArchive();
+    if (activeTab === 'stats') void loadStats();
     if (activeTab === 'radio') {
       void listRadios();
       void checkRadioStatus();
@@ -561,6 +581,21 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
     }
   };
 
+  const handleCleanupStaleJobs = async () => {
+    try {
+      const res = await fetch('/api/queue/cleanup-stale', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        onNotify('error', data.error || 'Failed to run stale cleanup');
+        return;
+      }
+      onNotify('info', `Stale cleanup finished (${data.cleaned ?? 0} job(s) cleaned).`);
+      void loadStats();
+    } catch {
+      onNotify('error', 'Stale cleanup request failed.');
+    }
+  };
+
   const handleBatchFileRead = async (file: File) => {
     try {
       const text = await file.text();
@@ -596,6 +631,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
   const TABS: { id: UtilityTab; label: string; adminOnly: boolean }[] = [
     { id: 'library', label: 'Library & Deduplicate', adminOnly: true },
     { id: 'batch', label: 'Batch URL Import', adminOnly: false },
+    { id: 'stats', label: 'Stats', adminOnly: false },
     { id: 'metadata', label: 'Metadata Editor', adminOnly: true },
     { id: 'archive', label: 'Archive Manager', adminOnly: true },
     { id: 'radio', label: 'Radio Manager', adminOnly: false },
@@ -1401,6 +1437,150 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
         </section>
       )}
 
+      {activeTab === 'stats' && (
+        <section
+          className="p-5 rounded-xl border flex flex-col gap-5"
+          style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+                <BarChart3 className="w-4 h-4" />
+                <span>Download &amp; Library Stats</span>
+              </h2>
+              <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
+                Aggregated queue throughput, completion rate, source breakdown, and storage consumption.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => void handleCleanupStaleJobs()}
+                  className="px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
+                  style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                >
+                  Clean Stale Jobs
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={loadingStats}
+                onClick={() => void loadStats()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0 disabled:opacity-50"
+                style={{ backgroundColor: 'var(--mg-accent)' }}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingStats ? 'animate-spin' : ''}`} />
+                <span>Refresh</span>
+              </button>
+            </div>
+          </div>
+
+          {!stats ? (
+            <div className="p-8 text-center text-xs" style={{ color: 'var(--mg-muted)' }}>
+              {loadingStats ? 'Calculating library & download metrics...' : 'No stats loaded yet.'}
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="p-3.5 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+                  <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Completed (History)</div>
+                  <div className="font-mono tabular-nums text-xl font-semibold mt-1">{stats.history.total}</div>
+                  <div className="text-[11px] font-mono tabular-nums mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+                    {stats.history.recent_24h} in 24h · {stats.history.recent_7d} in 7d
+                  </div>
+                </div>
+                <div className="p-3.5 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+                  <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Success Rate</div>
+                  <div className="font-mono tabular-nums text-xl font-semibold mt-1 text-emerald-500">
+                    {stats.success_rate}%
+                  </div>
+                  <div className="text-[11px] font-mono tabular-nums mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+                    {stats.queue.failed} failed in session
+                  </div>
+                </div>
+                <div className="p-3.5 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+                  <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Active Queue</div>
+                  <div className="font-mono tabular-nums text-xl font-semibold mt-1">
+                    {stats.queue.running + stats.queue.queued}
+                  </div>
+                  <div className="text-[11px] font-mono tabular-nums mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+                    {stats.queue.running} running · {stats.queue.queued} queued
+                  </div>
+                </div>
+                <div className="p-3.5 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+                  <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Library Usage</div>
+                  <div className="font-mono tabular-nums text-xl font-semibold mt-1">
+                    {(stats.storage_summary.total_bytes / (1024 ** 3)).toFixed(2)} GB
+                  </div>
+                  <div className="text-[11px] font-mono tabular-nums mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+                    {stats.storage_summary.total_files} media file(s)
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="p-4 rounded-lg border flex flex-col gap-3" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+                  <h3 className="text-xs font-semibold">Downloads by Source</h3>
+                  <div className="flex flex-col gap-2.5">
+                    {Object.entries(stats.history.by_source).map(([src, count]) => {
+                      const pct = stats.history.total > 0 ? Math.round((count / stats.history.total) * 100) : 0;
+                      return (
+                        <div key={src} className="text-xs">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="uppercase font-medium">{src}</span>
+                            <span className="font-mono tabular-nums" style={{ color: 'var(--mg-muted)' }}>
+                              {count} ({pct}%)
+                            </span>
+                          </div>
+                          <div className="h-1.5 rounded-full overflow-hidden" style={{ backgroundColor: 'var(--mg-border)' }}>
+                            <div
+                              className="h-full rounded-full"
+                              style={{ width: `${pct}%`, backgroundColor: 'var(--mg-accent)' }}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-lg border flex flex-col gap-3" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+                  <h3 className="text-xs font-semibold">Media Folders</h3>
+                  <div className="flex flex-col gap-2.5">
+                    {stats.storage_summary.libraries.map((lib) => {
+                      const mb = lib.size_bytes / (1024 ** 2);
+                      const sizeLabel =
+                        mb >= 1024 ? `${(lib.size_bytes / (1024 ** 3)).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+                      return (
+                        <div
+                          key={lib.name}
+                          className="p-2.5 rounded-md border flex items-center justify-between gap-2 text-xs"
+                          style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+                        >
+                          <div className="min-w-0">
+                            <div className="font-medium">{lib.name}</div>
+                            <div className="font-mono text-[11px] truncate" style={{ color: 'var(--mg-muted)' }}>
+                              {lib.path}
+                            </div>
+                          </div>
+                          <div className="text-right shrink-0 font-mono tabular-nums">
+                            <div>{sizeLabel}</div>
+                            <div className="text-[11px]" style={{ color: 'var(--mg-muted)' }}>
+                              {lib.file_count} files
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
       {activeTab === 'server' && isAdmin && (
         <div className="flex flex-col gap-5">
           <section
@@ -1514,7 +1694,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <a
                   href="/api/server/export-bundle?format=zip"
-                  download="mediagrabber-v2.0-pre4.zip"
+                  download="mediagrabber-v2.0-pre5.zip"
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                   style={{
                     backgroundColor: 'var(--mg-bg)',
@@ -1551,12 +1731,12 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
 
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
-                <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Current Build</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre4'}</div>
+                <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Current Build ({versionInfo?.channel === 'nightly' ? 'Nightly' : 'Release'})</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre5'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
-                <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Latest Release</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre4'}</div>
+                <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Latest {versionInfo?.is_prerelease ? 'Nightly Pre-Release' : 'Release'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre5'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Last Checked</div>
@@ -1601,6 +1781,15 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               >
                 <Activity className="w-3.5 h-3.5" />
                 <span>Health Check (/healthz)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCleanupStaleJobs()}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
+                style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Clean Stale Jobs</span>
               </button>
             </div>
 

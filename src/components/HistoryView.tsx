@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
-import { Search, Trash2, Download, QrCode, Film, Smartphone, Loader2, X } from 'lucide-react';
-import { HistoryItem, SignedFileDownload } from '../types';
+import { Search, Trash2, Download, QrCode, Film, Smartphone, Loader2, X, Play } from 'lucide-react';
+import { HistoryItem, MediaPreviewItem, SignedFileDownload } from '../types';
 
 interface HistoryViewProps {
   items: HistoryItem[];
@@ -8,6 +8,7 @@ interface HistoryViewProps {
   onClearHistory: () => void;
   onRegrab: (url: string) => void;
   onShareQr: (url: string) => void;
+  onPreviewMedia?: (media: MediaPreviewItem) => void;
   onNotify?: (type: 'info' | 'success' | 'error', msg: string) => void;
 }
 
@@ -25,12 +26,14 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
   onClearHistory,
   onRegrab,
   onShareQr,
+  onPreviewMedia,
   onNotify,
 }) => {
   const [sourceFilter, setSourceFilter] = useState<'all' | HistoryItem['source']>('all');
   const [query, setQuery] = useState('');
   const [signedLinks, setSignedLinks] = useState<Record<string, SignedFileDownload>>({});
   const [signingId, setSigningId] = useState<string | null>(null);
+  const [previewingId, setPreviewingId] = useState<string | null>(null);
 
   const formatBytes = (bytes: number) => {
     if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
@@ -64,6 +67,40 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
       onNotify?.('error', 'Failed to generate signed download link.');
     } finally {
       setSigningId(null);
+    }
+  };
+
+  const handlePreviewHistoryFile = async (item: HistoryItem) => {
+    if (!item.file || !onPreviewMedia || previewingId) return;
+    setPreviewingId(item.id);
+    try {
+      let signed = signedLinks[item.id];
+      if (!signed) {
+        const res = await fetch('/api/files/sign', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file: item.file }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.url) {
+          onNotify?.('error', data.error || 'File is no longer available on disk.');
+          return;
+        }
+        signed = data as SignedFileDownload;
+        setSignedLinks((prev) => ({ ...prev, [item.id]: signed! }));
+      }
+      const isAudio = /\.(mp3|m4a|aac|flac|ogg|opus|wav)$/i.test(signed.filename.toLowerCase());
+      onPreviewMedia({
+        inlineUrl: `${signed.url}&inline=1`,
+        downloadUrl: signed.url,
+        filename: signed.filename,
+        size_bytes: signed.size_bytes,
+        isAudio,
+      });
+    } catch {
+      onNotify?.('error', 'Failed to launch media preview.');
+    } finally {
+      setPreviewingId(null);
     }
   };
 
@@ -199,20 +236,38 @@ export const HistoryView: React.FC<HistoryViewProps> = ({
 
                 <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                   {item.file && (
-                    <button
-                      type="button"
-                      disabled={signingId === item.id}
-                      onClick={() => void handleSignHistoryFile(item)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-white whitespace-nowrap shrink-0 disabled:opacity-50"
-                      style={{ backgroundColor: 'var(--mg-accent)' }}
-                    >
-                      {signingId === item.id ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <Smartphone className="w-3 h-3" />
+                    <>
+                      {onPreviewMedia && (
+                        <button
+                          type="button"
+                          disabled={previewingId === item.id}
+                          onClick={() => void handlePreviewHistoryFile(item)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50"
+                          style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                        >
+                          {previewingId === item.id ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <Play className="w-3 h-3" />
+                          )}
+                          <span>Preview</span>
+                        </button>
                       )}
-                      <span>Send to Device</span>
-                    </button>
+                      <button
+                        type="button"
+                        disabled={signingId === item.id}
+                        onClick={() => void handleSignHistoryFile(item)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-medium text-white whitespace-nowrap shrink-0 disabled:opacity-50"
+                        style={{ backgroundColor: 'var(--mg-accent)' }}
+                      >
+                        {signingId === item.id ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Smartphone className="w-3 h-3" />
+                        )}
+                        <span>Send to Device</span>
+                      </button>
+                    </>
                   )}
                   <button
                     type="button"

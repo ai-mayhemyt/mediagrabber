@@ -54,6 +54,9 @@ export interface MediaGrabberSettings {
   ytdlp_extra: string;
   spotdl_extra: string;
   gallerydl_extra: string;
+  webhook_url?: string;
+  stale_timeout_minutes?: number;
+  quick_start_completed?: boolean;
 }
 
 export interface StorageMount {
@@ -150,6 +153,8 @@ export interface ApiToken {
 export interface VersionInfo {
   current: string;
   latest: string;
+  channel?: 'nightly' | 'stable';
+  is_prerelease?: boolean;
   update_available: boolean;
   release_zip_url?: string | null;
   checked_at: string;
@@ -178,6 +183,42 @@ export interface YoutubeFeedVideo {
   url: string;
   thumbnail: string;
   published: string;
+}
+
+export interface MediaPreviewItem {
+  inlineUrl: string;
+  downloadUrl: string;
+  filename: string;
+  size_bytes: number;
+  isAudio: boolean;
+}
+
+export interface StatsOverview {
+  queue: {
+    total: number;
+    queued: number;
+    running: number;
+    done: number;
+    failed: number;
+    cancelled: number;
+  };
+  history: {
+    total: number;
+    recent_24h: number;
+    recent_7d: number;
+    by_source: Record<string, number>;
+  };
+  success_rate: number;
+  storage_summary: {
+    total_files: number;
+    total_bytes: number;
+    libraries: {
+      name: string;
+      path: string;
+      file_count: number;
+      size_bytes: number;
+    }[];
+  };
 }
 
 export interface NetwatchStatus {

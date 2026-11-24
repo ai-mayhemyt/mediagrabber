@@ -15,11 +15,29 @@ import {
   Moon,
   LogOut,
   RotateCcw,
+  ExternalLink,
+  Download,
+  Play,
+  BookOpen,
+  Bell,
+  FolderOpen,
+  Rss,
+  Smartphone,
+  UserPlus,
+  UserCheck,
+  Sliders,
+  Server,
+  ChevronLeft,
+  ChevronRight,
+  Send,
 } from 'lucide-react';
 import {
+  ActiveView,
   ApiToken,
   Job,
   MediaFileItem,
+  MediaGrabberSettings,
+  MediaPreviewItem,
   ScheduledJob,
   ThemeColors,
   ToastMessage,
@@ -372,17 +390,20 @@ export const MetadataEditorModal: React.FC<{
 export const AccountModal: React.FC<{
   open: boolean;
   user: UserAccount | null;
+  initialTab?: 'profile' | 'security' | 'tokens' | 'register';
   onClose: () => void;
   onUpdated: (user: UserAccount) => void;
   onLogout: () => void;
   onNotify: (type: 'info' | 'success' | 'error', msg: string) => void;
-}> = ({ open, user, onClose, onUpdated, onLogout, onNotify }) => {
-  const [tab, setTab] = useState<'profile' | 'security' | 'tokens' | 'register'>('profile');
+}> = ({ open, user, initialTab = 'profile', onClose, onUpdated, onLogout, onNotify }) => {
+  const [tab, setTab] = useState<'profile' | 'security' | 'tokens' | 'register'>(initialTab);
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const [totpQr, setTotpQr] = useState('');
+  const [totpUri, setTotpUri] = useState('');
+  const [totpSecret, setTotpSecret] = useState('');
   const [totpCode, setTotpCode] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -411,17 +432,20 @@ export const AccountModal: React.FC<{
 
   useEffect(() => {
     if (!user || !open) return;
+    setTab(initialTab);
     setDisplayName(user.display_name);
     setEmail(user.email);
     setNewPassword('');
     setAvatarFile(null);
     setTotpQr('');
+    setTotpUri('');
+    setTotpSecret('');
     setTotpCode('');
     setCreatedToken(null);
     if (user.role === 'admin') {
       void loadTokens();
     }
-  }, [user, open]);
+  }, [user, open, initialTab]);
 
   if (!open || !user) return null;
 
@@ -452,6 +476,8 @@ export const AccountModal: React.FC<{
     const res = await fetch('/api/me/2fa/setup', { method: 'POST' });
     const data = await res.json();
     if (data.otpauth_uri) {
+      setTotpUri(String(data.otpauth_uri));
+      setTotpSecret(String(data.secret || ''));
       const qr = await QRCode.toDataURL(data.otpauth_uri, { width: 180, margin: 2 });
       setTotpQr(qr);
     }
@@ -470,6 +496,8 @@ export const AccountModal: React.FC<{
     }
     onUpdated({ ...user, totp_enabled: true });
     setTotpQr('');
+    setTotpUri('');
+    setTotpSecret('');
     onNotify('success', 'Two-factor authentication enabled.');
   };
 
@@ -833,10 +861,61 @@ export const AccountModal: React.FC<{
                       </button>
                     </div>
                   ) : totpQr ? (
-                    <div className="flex flex-col items-center gap-2.5">
+                    <div className="flex flex-col items-center gap-3">
                       <div className="p-2 bg-white rounded-lg">
                         <img src={totpQr} alt="2FA QR" className="w-36 h-36" />
                       </div>
+
+                      {totpUri && (
+                        <div className="w-full flex flex-col gap-2">
+                          <div className="flex flex-wrap gap-2">
+                            <a
+                              href={totpUri}
+                              className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0"
+                              style={{ backgroundColor: 'var(--mg-accent)' }}
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span>Open in Authenticator App</span>
+                            </a>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void navigator.clipboard.writeText(totpUri);
+                                onNotify('success', 'Copied 2FA setup link.');
+                              }}
+                              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
+                              style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                              <span>Copy 2FA Link</span>
+                            </button>
+                          </div>
+
+                          {totpSecret && (
+                            <div
+                              className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg border text-xs"
+                              style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+                            >
+                              <span className="truncate font-mono" style={{ color: 'var(--mg-muted)' }}>
+                                Key: <strong style={{ color: 'var(--mg-text)' }}>{totpSecret}</strong>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void navigator.clipboard.writeText(totpSecret);
+                                  onNotify('success', 'Copied 2FA secret key.');
+                                }}
+                                className="inline-flex items-center gap-1 text-[11px] font-medium hover:underline shrink-0"
+                                style={{ color: 'var(--mg-accent)' }}
+                              >
+                                <Copy className="w-3 h-3" />
+                                <span>Copy Key</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
                       <div className="flex gap-2 w-full">
                         <input
                           type="text"
@@ -1305,4 +1384,1238 @@ export const ScheduleModal: React.FC<{
     </div>
   );
 };
+
+function formatPreviewBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let val = bytes;
+  let idx = 0;
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024;
+    idx++;
+  }
+  return `${val.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+export const MediaPlayerModal: React.FC<{
+  media: MediaPreviewItem | null;
+  onClose: () => void;
+}> = ({ media, onClose }) => {
+  if (!media) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+      <div
+        className="w-full max-w-2xl rounded-xl border p-5 flex flex-col gap-4"
+        style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+      >
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="font-display text-sm font-semibold flex items-center gap-2 truncate">
+              <Play className="w-4 h-4 shrink-0" style={{ color: 'var(--mg-accent)' }} />
+              <span className="truncate">{media.filename}</span>
+            </h3>
+            <p className="text-xs font-mono tabular-nums mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+              {formatPreviewBytes(media.size_bytes)} · signed 1h stream
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <a
+              href={media.downloadUrl}
+              download={media.filename}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0"
+              style={{ backgroundColor: 'var(--mg-accent)' }}
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Save to Device</span>
+            </a>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg border"
+              style={{ borderColor: 'var(--mg-border)' }}
+              aria-label="Close media preview"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        <div
+          className="rounded-lg border overflow-hidden flex items-center justify-center p-2"
+          style={{ backgroundColor: '#000000', borderColor: 'var(--mg-border)' }}
+        >
+          {media.isAudio ? (
+            <div className="w-full p-4">
+              <audio
+                key={media.inlineUrl}
+                src={media.inlineUrl}
+                controls
+                autoPlay
+                className="w-full"
+              />
+            </div>
+          ) : (
+            <video
+              key={media.inlineUrl}
+              src={media.inlineUrl}
+              controls
+              playsInline
+              autoPlay
+              className="w-full max-h-[65vh] rounded"
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export const QuickStartModal: React.FC<{
+  open: boolean;
+  user: UserAccount | null;
+  settings: MediaGrabberSettings | null;
+  notificationsEnabled: boolean;
+  onEnableNotifications: () => Promise<boolean>;
+  onNavigate: (view: ActiveView) => void;
+  onOpenAccountSecurity: () => void;
+  onUserUpdated: (user: UserAccount) => void;
+  onSettingsSaved: (settings: MediaGrabberSettings) => void;
+  onNotify: (type: 'info' | 'success' | 'error', msg: string) => void;
+  onFinish: (dontShowAgain: boolean) => void;
+}> = ({
+  open,
+  user,
+  settings,
+  notificationsEnabled,
+  onEnableNotifications,
+  onNavigate,
+  onOpenAccountSecurity,
+  onUserUpdated,
+  onSettingsSaved,
+  onNotify,
+  onFinish,
+}) => {
+  const isAdmin = !user || user.role === 'admin';
+  const [step, setStep] = useState(0);
+  const [dontShowAgain, setDontShowAgain] = useState(true);
+  const [existingUsers, setExistingUsers] = useState<UserAccount[]>([]);
+  const [busy, setBusy] = useState(false);
+
+  // Step 1: Account mode (preserve existing vs add new admin)
+  const [accountAction, setAccountAction] = useState<'keep' | 'create'>('keep');
+  const [newAdminUser, setNewAdminUser] = useState('');
+  const [newAdminDisplay, setNewAdminDisplay] = useState('');
+  const [newAdminEmail, setNewAdminEmail] = useState('');
+  const [newAdminPass, setNewAdminPass] = useState('');
+  const [newAdminPass2, setNewAdminPass2] = useState('');
+  const [switchToNewAdmin, setSwitchToNewAdmin] = useState(true);
+
+  // Step 1: Existing account quick update & inline 2FA
+  const [editDisplay, setEditDisplay] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editPassword, setEditPassword] = useState('');
+  const [qsTotpQr, setQsTotpQr] = useState('');
+  const [qsTotpUri, setQsTotpUri] = useState('');
+  const [qsTotpSecret, setQsTotpSecret] = useState('');
+  const [qsTotpCode, setQsTotpCode] = useState('');
+
+  // Steps 2–4: Settings draft
+  const [draft, setDraft] = useState<Partial<MediaGrabberSettings>>({});
+  const [testingWebhook, setTestingWebhook] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setStep(0);
+    setAccountAction(user ? 'keep' : 'create');
+    setNewAdminUser('');
+    setNewAdminDisplay('');
+    setNewAdminEmail('');
+    setNewAdminPass('');
+    setNewAdminPass2('');
+    setSwitchToNewAdmin(true);
+    setEditDisplay(user?.display_name || '');
+    setEditEmail(user?.email || '');
+    setEditPassword('');
+    setQsTotpQr('');
+    setQsTotpUri('');
+    setQsTotpSecret('');
+    setQsTotpCode('');
+
+    if (settings) {
+      setDraft(settings);
+    } else if (user) {
+      fetch('/api/settings')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((s) => {
+          if (s) setDraft(s);
+        })
+        .catch(() => {});
+    }
+
+    if (user) {
+      fetch('/api/users')
+        .then((r) => (r.ok ? r.json() : []))
+        .then((list) => {
+          if (Array.isArray(list)) setExistingUsers(list);
+        })
+        .catch(() => {});
+    } else {
+      setExistingUsers([]);
+    }
+  }, [open, user, settings]);
+
+  if (!open) return null;
+
+  const steps = isAdmin
+    ? [
+        { id: 'admin', label: 'Admin Account' },
+        { id: 'libraries', label: 'Media Libraries' },
+        { id: 'quality', label: 'Format & Cleanup' },
+        { id: 'connections', label: 'Alerts & Sync' },
+        { id: 'finish', label: 'Finish' },
+      ]
+    : [
+        { id: 'account', label: 'Account & 2FA' },
+        { id: 'finish', label: 'Alerts & Tips' },
+      ];
+
+  const updateDraft = <K extends keyof MediaGrabberSettings>(
+    key: K,
+    value: MediaGrabberSettings[K]
+  ) => {
+    setDraft((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleStartInline2FA = async () => {
+    try {
+      const res = await fetch('/api/me/2fa/setup', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok || !data.otpauth_uri) {
+        onNotify('error', data.error || 'Could not start 2FA setup.');
+        return;
+      }
+      setQsTotpUri(String(data.otpauth_uri));
+      setQsTotpSecret(String(data.secret || ''));
+      const qr = await QRCode.toDataURL(data.otpauth_uri, { width: 156, margin: 2 });
+      setQsTotpQr(qr);
+    } catch {
+      onNotify('error', 'Failed to initialize 2FA setup.');
+    }
+  };
+
+  const handleVerifyInline2FA = async () => {
+    if (!user) return;
+    try {
+      const res = await fetch('/api/me/2fa/enable', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: qsTotpCode.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        onNotify('error', data.error || 'Invalid 6-digit verification code.');
+        return;
+      }
+      onUserUpdated({ ...user, totp_enabled: true });
+      setQsTotpQr('');
+      setQsTotpUri('');
+      setQsTotpSecret('');
+      setQsTotpCode('');
+      onNotify('success', 'Two-factor authentication enabled.');
+    } catch {
+      onNotify('error', 'Failed to verify 2FA code.');
+    }
+  };
+
+  const handleStep1Continue = async () => {
+    setBusy(true);
+    try {
+      if (accountAction === 'create') {
+        const res = await fetch('/api/quickstart/admin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: newAdminUser.trim(),
+            display_name: newAdminDisplay.trim() || undefined,
+            email: newAdminEmail.trim() || undefined,
+            password: newAdminPass,
+            password2: newAdminPass2,
+            switch_session: switchToNewAdmin,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          onNotify('error', data.error || 'Failed to create admin account.');
+          return;
+        }
+        if (Array.isArray(data.users)) {
+          setExistingUsers(data.users);
+        }
+        if (data.user && (switchToNewAdmin || !user)) {
+          onUserUpdated(data.user);
+        }
+        // Load settings now that an authenticated session is guaranteed
+        fetch('/api/settings')
+          .then((r) => (r.ok ? r.json() : null))
+          .then((s) => {
+            if (s) setDraft((prev) => ({ ...s, ...prev }));
+          })
+          .catch(() => {});
+
+        onNotify(
+          'success',
+          `Created admin "${data.user?.username}" — ${data.preserved_count ?? 0} existing account(s) preserved.`
+        );
+        setStep(1);
+        return;
+      }
+
+      // Keeping current user: save optional profile/password edits if changed
+      if (user) {
+        const changedProfile =
+          editDisplay.trim() !== user.display_name ||
+          editEmail.trim() !== user.email ||
+          editPassword.length > 0;
+        if (changedProfile) {
+          const fd = new FormData();
+          fd.append('display_name', editDisplay.trim() || user.display_name);
+          fd.append('email', editEmail.trim());
+          if (editPassword) fd.append('new_password', editPassword);
+          const res = await fetch('/api/me/update', { method: 'POST', body: fd });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            onNotify('error', data.error || 'Failed to update account.');
+            return;
+          }
+          if (data.user) onUserUpdated(data.user);
+          setEditPassword('');
+          onNotify('success', 'Account details saved.');
+        }
+      }
+      setStep(1);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const savePartialSettings = async (patch: Partial<MediaGrabberSettings>, nextStep: number) => {
+    setBusy(true);
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        onNotify('error', data.error || 'Failed to save settings.');
+        return;
+      }
+      if (data.settings) {
+        setDraft(data.settings);
+        onSettingsSaved(data.settings);
+      }
+      setStep(nextStep);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleTestWizardWebhook = async () => {
+    setTestingWebhook(true);
+    try {
+      const res = await fetch('/api/webhook/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ webhook_url: draft.webhook_url || '' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        onNotify('error', data.error || 'Webhook test failed.');
+      } else {
+        onNotify('success', data.message || 'Test webhook delivered.');
+      }
+    } finally {
+      setTestingWebhook(false);
+    }
+  };
+
+  const inputClass = 'w-full px-3 py-2 rounded-lg border text-sm outline-none';
+  const inputStyle: React.CSSProperties = {
+    backgroundColor: 'var(--mg-bg)',
+    borderColor: 'var(--mg-border)',
+    color: 'var(--mg-text)',
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4">
+      <div
+        className="w-full max-w-2xl rounded-xl border p-5 flex flex-col gap-4 max-h-[92vh] overflow-y-auto"
+        style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+      >
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3 border-b pb-3" style={{ borderColor: 'var(--mg-border)' }}>
+          <div>
+            <h3 className="font-display text-base font-semibold flex items-center gap-2">
+              <BookOpen className="w-4 h-4" style={{ color: 'var(--mg-accent)' }} />
+              <span>MediaGrabber Setup Wizard</span>
+            </h3>
+            <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
+              {isAdmin
+                ? 'Set up your admin account, media library paths, quality defaults, and alerts — existing accounts are always preserved.'
+                : 'Quick setup for your account security, 2FA, and browser alerts.'}
+            </p>
+          </div>
+          {user && (
+            <button
+              type="button"
+              onClick={() => onFinish(false)}
+              className="p-1.5 rounded-lg border shrink-0"
+              style={{ borderColor: 'var(--mg-border)' }}
+              aria-label="Close Setup Wizard"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+
+        {/* Jellyfin-style Stepper */}
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+          {steps.map((s, idx) => {
+            const active = idx === step;
+            const completed = idx < step;
+            return (
+              <button
+                key={s.id}
+                type="button"
+                disabled={!user && idx > 0}
+                onClick={() => {
+                  if (user || idx === 0) setStep(idx);
+                }}
+                className="flex items-center gap-1.5 px-2.5 py-2 rounded-lg border text-left text-xs font-medium transition-colors disabled:opacity-45"
+                style={{
+                  backgroundColor: active ? 'var(--mg-accent)' : 'var(--mg-bg)',
+                  borderColor: active || completed ? 'var(--mg-accent)' : 'var(--mg-border)',
+                  color: active ? '#ffffff' : completed ? 'var(--mg-text)' : 'var(--mg-muted)',
+                }}
+              >
+                <span className="font-mono text-[11px] shrink-0">
+                  {completed ? '✓' : `${idx + 1}.`}
+                </span>
+                <span className="truncate">{s.label}</span>
+              </button>
+            );
+          })}
+        </div>
+
+        {/* STEP 1: ADMIN ACCOUNT / USER ACCOUNT */}
+        {step === 0 && (
+          <div className="flex flex-col gap-3.5">
+            {existingUsers.length > 0 && (
+              <div
+                className="p-3 rounded-lg border flex flex-col gap-1.5"
+                style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+              >
+                <div className="text-xs font-semibold flex items-center gap-1.5 text-emerald-400">
+                  <UserCheck className="w-3.5 h-3.5" />
+                  <span>Existing Accounts Preserved ({existingUsers.length})</span>
+                </div>
+                <p className="text-[11px]" style={{ color: 'var(--mg-muted)' }}>
+                  Your existing accounts are safe and will never be deleted or overwritten:
+                </p>
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                  {existingUsers.map((u) => (
+                    <span
+                      key={u.id}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] font-mono"
+                      style={{
+                        borderColor: user?.id === u.id ? 'var(--mg-accent)' : 'var(--mg-border)',
+                        color: 'var(--mg-text)',
+                      }}
+                    >
+                      @{u.username} ({u.role})
+                      {user?.id === u.id ? ' · active' : ''}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {isAdmin && (
+              <div
+                className="grid grid-cols-2 gap-1.5 p-1 rounded-lg border"
+                style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+              >
+                {user && (
+                  <button
+                    type="button"
+                    onClick={() => setAccountAction('keep')}
+                    className="flex items-center justify-center gap-1.5 py-2 px-2 rounded-md text-xs font-medium whitespace-nowrap"
+                    style={{
+                      backgroundColor: accountAction === 'keep' ? 'var(--mg-accent)' : 'transparent',
+                      color: accountAction === 'keep' ? '#ffffff' : 'var(--mg-muted)',
+                    }}
+                  >
+                    <UserCheck className="w-3.5 h-3.5" />
+                    <span>Keep @{user.username}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setAccountAction('create')}
+                  className={`flex items-center justify-center gap-1.5 py-2 px-2 rounded-md text-xs font-medium whitespace-nowrap ${
+                    !user ? 'col-span-2' : ''
+                  }`}
+                  style={{
+                    backgroundColor: accountAction === 'create' ? 'var(--mg-accent)' : 'transparent',
+                    color: accountAction === 'create' ? '#ffffff' : 'var(--mg-muted)',
+                  }}
+                >
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>Create New Admin</span>
+                </button>
+              </div>
+            )}
+
+            {accountAction === 'create' && isAdmin ? (
+              <div className="flex flex-col gap-3">
+                <p className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+                  Add an administrator account just like Jellyfin&apos;s initial user setup. Any existing accounts remain intact.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1 text-xs font-medium">
+                    <span>Admin Username (3–32 chars)</span>
+                    <input
+                      type="text"
+                      value={newAdminUser}
+                      onChange={(e) => setNewAdminUser(e.target.value)}
+                      placeholder="e.g. media_admin"
+                      className={inputClass}
+                      style={inputStyle}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs font-medium">
+                    <span>Display Name (optional)</span>
+                    <input
+                      type="text"
+                      value={newAdminDisplay}
+                      onChange={(e) => setNewAdminDisplay(e.target.value)}
+                      placeholder="Media Admin"
+                      className={inputClass}
+                      style={inputStyle}
+                    />
+                  </label>
+                </div>
+                <label className="flex flex-col gap-1 text-xs font-medium">
+                  <span>Email (optional)</span>
+                  <input
+                    type="email"
+                    value={newAdminEmail}
+                    onChange={(e) => setNewAdminEmail(e.target.value)}
+                    placeholder="admin@example.com"
+                    className={inputClass}
+                    style={inputStyle}
+                  />
+                </label>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="flex flex-col gap-1 text-xs font-medium">
+                    <span>Password (min 8 chars)</span>
+                    <input
+                      type="password"
+                      value={newAdminPass}
+                      onChange={(e) => setNewAdminPass(e.target.value)}
+                      placeholder="••••••••"
+                      className={inputClass}
+                      style={inputStyle}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-xs font-medium">
+                    <span>Confirm Password</span>
+                    <input
+                      type="password"
+                      value={newAdminPass2}
+                      onChange={(e) => setNewAdminPass2(e.target.value)}
+                      placeholder="••••••••"
+                      className={inputClass}
+                      style={inputStyle}
+                    />
+                  </label>
+                </div>
+                {user && (
+                  <label className="inline-flex items-center gap-2 text-xs cursor-pointer" style={{ color: 'var(--mg-muted)' }}>
+                    <input
+                      type="checkbox"
+                      checked={switchToNewAdmin}
+                      onChange={(e) => setSwitchToNewAdmin(e.target.checked)}
+                      className="w-4 h-4 accent-[var(--mg-accent)]"
+                    />
+                    <span>Switch active session to this new admin account</span>
+                  </label>
+                )}
+              </div>
+            ) : (
+              user && (
+                <div className="flex flex-col gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <label className="flex flex-col gap-1 text-xs font-medium">
+                      <span>Display Name</span>
+                      <input
+                        type="text"
+                        value={editDisplay}
+                        onChange={(e) => setEditDisplay(e.target.value)}
+                        className={inputClass}
+                        style={inputStyle}
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1 text-xs font-medium">
+                      <span>Email Address</span>
+                      <input
+                        type="email"
+                        value={editEmail}
+                        onChange={(e) => setEditEmail(e.target.value)}
+                        className={inputClass}
+                        style={inputStyle}
+                      />
+                    </label>
+                  </div>
+
+                  <label className="flex flex-col gap-1 text-xs font-medium">
+                    <span>Update Password (optional, leave blank to keep current)</span>
+                    <input
+                      type="password"
+                      value={editPassword}
+                      onChange={(e) => setEditPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className={inputClass}
+                      style={inputStyle}
+                    />
+                  </label>
+
+                  {/* Inline 2FA Setup with QR + Direct Link */}
+                  <div
+                    className="p-3 rounded-lg border flex flex-col gap-2.5"
+                    style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-semibold">
+                        <ShieldCheck className="w-4 h-4" style={{ color: 'var(--mg-accent)' }} />
+                        <span>Two-Factor Authentication (2FA)</span>
+                      </div>
+                      {user.totp_enabled ? (
+                        <span className="text-xs font-medium text-emerald-400">Active</span>
+                      ) : (
+                        !qsTotpUri && (
+                          <button
+                            type="button"
+                            onClick={() => void handleStartInline2FA()}
+                            className="px-2.5 py-1 rounded-md border text-xs font-medium whitespace-nowrap"
+                            style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                          >
+                            Set Up 2FA Link / QR
+                          </button>
+                        )
+                      )}
+                    </div>
+
+                    {user.totp_enabled ? (
+                      <p className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+                        2FA is active on @{user.username}. You can manage or reset it anytime in Account Settings.
+                      </p>
+                    ) : qsTotpUri ? (
+                      <div className="flex flex-col sm:flex-row items-center gap-3 pt-1">
+                        {qsTotpQr && (
+                          <div className="p-1.5 bg-white rounded-lg shrink-0">
+                            <img src={qsTotpQr} alt="2FA QR Code" className="w-28 h-28" />
+                          </div>
+                        )}
+                        <div className="flex-1 w-full flex flex-col gap-2">
+                          <div className="flex flex-wrap gap-2">
+                            <a
+                              href={qsTotpUri}
+                              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0"
+                              style={{ backgroundColor: 'var(--mg-accent)' }}
+                            >
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span>Open in Authenticator App</span>
+                            </a>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void navigator.clipboard.writeText(qsTotpUri);
+                                onNotify('success', 'Copied 2FA setup link.');
+                              }}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
+                              style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                            >
+                              <Copy className="w-3 h-3" />
+                              <span>Copy 2FA Link</span>
+                            </button>
+                          </div>
+                          {qsTotpSecret && (
+                            <div className="flex items-center justify-between gap-2 text-[11px] font-mono" style={{ color: 'var(--mg-muted)' }}>
+                              <span className="truncate">Key: {qsTotpSecret}</span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  void navigator.clipboard.writeText(qsTotpSecret);
+                                  onNotify('success', 'Copied 2FA key.');
+                                }}
+                                className="hover:underline shrink-0"
+                                style={{ color: 'var(--mg-accent)' }}
+                              >
+                                Copy Key
+                              </button>
+                            </div>
+                          )}
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              maxLength={6}
+                              value={qsTotpCode}
+                              onChange={(e) => setQsTotpCode(e.target.value)}
+                              placeholder="6-digit code"
+                              className="flex-1 px-3 py-1.5 rounded-lg border text-xs font-mono text-center outline-none"
+                              style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => void handleVerifyInline2FA()}
+                              className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap"
+                              style={{ backgroundColor: 'var(--mg-accent)' }}
+                            >
+                              Verify
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+                        Generate a QR code or direct authenticator link (<code className="font-mono">otpauth://</code>) to secure your account on iPad or desktop.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )
+            )}
+          </div>
+        )}
+
+        {/* STEP 2: MEDIA LIBRARIES (ADMIN) */}
+        {isAdmin && step === 1 && (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-2 text-xs font-semibold">
+              <FolderOpen className="w-4 h-4" style={{ color: 'var(--mg-accent)' }} />
+              <span>Configure Media Library Folders</span>
+            </div>
+            <p className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+              Point each download engine to your server storage folders. Directories are created automatically if needed.
+            </p>
+            <label className="flex flex-col gap-1 text-xs font-medium">
+              <span>YouTube Video Base Path</span>
+              <input
+                type="text"
+                value={draft.yt_base_path || ''}
+                onChange={(e) => updateDraft('yt_base_path', e.target.value)}
+                placeholder="/media/YouTube"
+                className={`${inputClass} font-mono`}
+                style={inputStyle}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-medium">
+              <span>Music Library Path (YT Music &amp; Spotify)</span>
+              <input
+                type="text"
+                value={draft.music_base_path || ''}
+                onChange={(e) => updateDraft('music_base_path', e.target.value)}
+                placeholder="/opt/navidrome/music/navidrome/music"
+                className={`${inputClass} font-mono`}
+                style={inputStyle}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-medium">
+              <span>Gallery Base Path</span>
+              <input
+                type="text"
+                value={draft.gallery_base_path || ''}
+                onChange={(e) => updateDraft('gallery_base_path', e.target.value)}
+                placeholder="/media/Gallery"
+                className={`${inputClass} font-mono`}
+                style={inputStyle}
+              />
+            </label>
+            <label className="flex flex-col gap-1 text-xs font-medium">
+              <span>Folder Organization</span>
+              <select
+                value={draft.folder_structure || 'default'}
+                onChange={(e) => updateDraft('folder_structure', e.target.value as 'default' | 'flat')}
+                className={inputClass}
+                style={inputStyle}
+              >
+                <option value="default">Creator / Year Subfolders (Recommended)</option>
+                <option value="flat">Single Flat Folder</option>
+              </select>
+            </label>
+          </div>
+        )}
+
+        {/* STEP 3: FORMAT & STALE CLEANUP (ADMIN) */}
+        {isAdmin && step === 2 && (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-2 text-xs font-semibold">
+              <Sliders className="w-4 h-4" style={{ color: 'var(--mg-accent)' }} />
+              <span>Preferred Quality &amp; Auto-Cleanup</span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <label className="flex flex-col gap-1 text-xs font-medium">
+                <span>Max Video Resolution</span>
+                <select
+                  value={draft.video_res || '1080'}
+                  onChange={(e) => updateDraft('video_res', e.target.value)}
+                  className={inputClass}
+                  style={inputStyle}
+                >
+                  <option value="2160">4K (2160p)</option>
+                  <option value="1440">1440p</option>
+                  <option value="1080">1080p</option>
+                  <option value="720">720p</option>
+                  <option value="480">480p</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium">
+                <span>Video Container</span>
+                <select
+                  value={draft.container || 'mp4'}
+                  onChange={(e) => updateDraft('container', e.target.value)}
+                  className={inputClass}
+                  style={inputStyle}
+                >
+                  <option value="mp4">MP4 (Best iOS/iPad compatibility)</option>
+                  <option value="mkv">MKV</option>
+                  <option value="webm">WebM</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium">
+                <span>Audio Format</span>
+                <select
+                  value={draft.audio_format || 'mp3'}
+                  onChange={(e) => updateDraft('audio_format', e.target.value)}
+                  className={inputClass}
+                  style={inputStyle}
+                >
+                  <option value="mp3">MP3</option>
+                  <option value="flac">FLAC (Lossless)</option>
+                  <option value="m4a">M4A (AAC)</option>
+                  <option value="opus">Opus</option>
+                </select>
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium">
+                <span>Audio Bitrate</span>
+                <select
+                  value={draft.audio_bitrate || '320'}
+                  onChange={(e) => updateDraft('audio_bitrate', e.target.value)}
+                  className={inputClass}
+                  style={inputStyle}
+                >
+                  <option value="320">320 kbps</option>
+                  <option value="256">256 kbps</option>
+                  <option value="192">192 kbps</option>
+                  <option value="128">128 kbps</option>
+                </select>
+              </label>
+            </div>
+            <label className="flex flex-col gap-1 text-xs font-medium">
+              <span>Stale Download Timeout (minutes, 5–1440)</span>
+              <input
+                type="number"
+                min={5}
+                max={1440}
+                value={draft.stale_timeout_minutes ?? 120}
+                onChange={(e) => updateDraft('stale_timeout_minutes', Number(e.target.value) || 120)}
+                className={`${inputClass} font-mono`}
+                style={inputStyle}
+              />
+            </label>
+            <label className="inline-flex items-center gap-2 text-xs cursor-pointer" style={{ color: 'var(--mg-muted)' }}>
+              <input
+                type="checkbox"
+                checked={Boolean(draft.generate_lrc)}
+                onChange={(e) => updateDraft('generate_lrc', e.target.checked)}
+                className="w-4 h-4 accent-[var(--mg-accent)]"
+              />
+              <span>Generate synced `.lrc` lyrics files alongside music downloads</span>
+            </label>
+          </div>
+        )}
+
+        {/* STEP 4: ALERTS, WEBHOOKS & MEDIA SERVER SYNC (ADMIN) */}
+        {isAdmin && step === 3 && (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-2 text-xs font-semibold">
+              <Server className="w-4 h-4" style={{ color: 'var(--mg-accent)' }} />
+              <span>Alerts, Webhooks &amp; Media Servers</span>
+            </div>
+            <div
+              className="p-3 rounded-lg border flex flex-wrap items-center justify-between gap-3"
+              style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+            >
+              <div>
+                <div className="text-xs font-semibold flex items-center gap-1.5">
+                  <Bell className="w-3.5 h-3.5" style={{ color: 'var(--mg-accent)' }} />
+                  <span>Browser / PWA Push Notifications</span>
+                </div>
+                <p className="text-[11px] mt-0.5" style={{ color: 'var(--mg-muted)' }}>
+                  Receive download completion alerts directly on this device.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void onEnableNotifications()}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0"
+                style={{ backgroundColor: notificationsEnabled ? '#16a34a' : 'var(--mg-accent)' }}
+              >
+                {notificationsEnabled ? 'Alerts Enabled' : 'Enable Alerts'}
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-xs font-medium">
+                Webhook URL (Discord, Slack, ntfy, or Apple Shortcut — optional)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="url"
+                  value={draft.webhook_url || ''}
+                  onChange={(e) => updateDraft('webhook_url', e.target.value)}
+                  placeholder="https://discord.com/api/webhooks/..."
+                  className={`${inputClass} flex-1 font-mono`}
+                  style={inputStyle}
+                />
+                <button
+                  type="button"
+                  disabled={testingWebhook}
+                  onClick={() => void handleTestWizardWebhook()}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
+                  style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>{testingWebhook ? 'Testing...' : 'Test'}</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <label className="flex flex-col gap-1 text-xs font-medium">
+                <span>Jellyfin URL (optional)</span>
+                <input
+                  type="url"
+                  value={draft.jellyfin_url || ''}
+                  onChange={(e) => updateDraft('jellyfin_url', e.target.value)}
+                  placeholder="http://localhost:8096"
+                  className={`${inputClass} font-mono`}
+                  style={inputStyle}
+                />
+              </label>
+              <label className="flex flex-col gap-1 text-xs font-medium">
+                <span>Jellyfin API Key (optional)</span>
+                <input
+                  type="password"
+                  value={draft.jellyfin_api_key || ''}
+                  onChange={(e) => updateDraft('jellyfin_api_key', e.target.value)}
+                  placeholder="Paste API key"
+                  className={`${inputClass} font-mono`}
+                  style={inputStyle}
+                />
+              </label>
+            </div>
+            <label className="flex flex-col gap-1 text-xs font-medium">
+              <span>Navidrome URL (optional)</span>
+              <input
+                type="url"
+                value={draft.navidrome_url || ''}
+                onChange={(e) => updateDraft('navidrome_url', e.target.value)}
+                placeholder="http://localhost:4533"
+                className={`${inputClass} font-mono`}
+                style={inputStyle}
+              />
+            </label>
+          </div>
+        )}
+
+        {/* FINAL STEP: SUMMARY & FINISH (Admin step 4 / User step 1) */}
+        {((isAdmin && step === 4) || (!isAdmin && step === 1)) && (
+          <div className="flex flex-col gap-3">
+            {!isAdmin && (
+              <div
+                className="p-3 rounded-lg border flex flex-wrap items-center justify-between gap-3"
+                style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+              >
+                <div>
+                  <div className="text-xs font-semibold flex items-center gap-1.5">
+                    <Bell className="w-3.5 h-3.5" style={{ color: 'var(--mg-accent)' }} />
+                    <span>Device Push Alerts</span>
+                  </div>
+                  <p className="text-[11px]" style={{ color: 'var(--mg-muted)' }}>
+                    Get notified on this device when downloads finish.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void onEnableNotifications()}
+                  className="px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0"
+                  style={{ backgroundColor: notificationsEnabled ? '#16a34a' : 'var(--mg-accent)' }}
+                >
+                  {notificationsEnabled ? 'Alerts Enabled' : 'Enable Alerts'}
+                </button>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="p-3 rounded-lg border flex flex-col gap-1" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+                <div className="text-xs font-semibold flex items-center gap-1.5">
+                  <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Active Account</span>
+                </div>
+                <p className="text-xs font-mono" style={{ color: 'var(--mg-text)' }}>
+                  @{user?.username || 'admin'} ({user?.role || 'admin'})
+                </p>
+                <p className="text-[11px]" style={{ color: 'var(--mg-muted)' }}>
+                  {existingUsers.length > 0
+                    ? `${existingUsers.length} account(s) on server — all existing accounts preserved.`
+                    : '2FA & profile ready.'}
+                </p>
+              </div>
+
+              {isAdmin && (
+                <div className="p-3 rounded-lg border flex flex-col gap-1" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+                  <div className="text-xs font-semibold flex items-center gap-1.5">
+                    <FolderOpen className="w-3.5 h-3.5" style={{ color: 'var(--mg-accent)' }} />
+                    <span>Library &amp; Formats</span>
+                  </div>
+                  <p className="text-[11px] font-mono truncate" style={{ color: 'var(--mg-text)' }}>
+                    {draft.yt_base_path || '/media/YouTube'}
+                  </p>
+                  <p className="text-[11px]" style={{ color: 'var(--mg-muted)' }}>
+                    {draft.video_res || '1080'}p {(draft.container || 'mp4').toUpperCase()} · {(draft.audio_format || 'mp3').toUpperCase()} {draft.audio_bitrate || '320'}k · {draft.stale_timeout_minutes ?? 120}m cleanup
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="p-3 rounded-lg border flex items-start gap-2.5 text-xs" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+              <Smartphone className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--mg-accent)' }} />
+              <div style={{ color: 'var(--mg-muted)' }}>
+                <strong style={{ color: 'var(--mg-text)' }}>Ready for iPad &amp; Desktop:</strong> Completed jobs include{' '}
+                <strong style={{ color: 'var(--mg-text)' }}>Preview</strong> for instant streaming and{' '}
+                <strong style={{ color: 'var(--mg-text)' }}>Send to Device</strong> for 1-hour Files app downloads. Follow YouTube channels in the sidebar RSS widget anytime.
+              </div>
+            </div>
+
+            <div className="p-3 rounded-lg border flex items-start gap-2.5 text-xs" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
+              <Rss className="w-4 h-4 shrink-0 mt-0.5" style={{ color: 'var(--mg-accent)' }} />
+              <div className="flex-1 flex flex-wrap items-center justify-between gap-2" style={{ color: 'var(--mg-muted)' }}>
+                <span>Want to fine-tune cookies, SMTP email, or custom yt-dlp flags later?</span>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onNavigate('settings');
+                      onFinish(dontShowAgain);
+                    }}
+                    className="px-2.5 py-1 rounded-md border text-xs font-medium whitespace-nowrap"
+                    style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                  >
+                    Open Full Settings
+                  </button>
+                )}
+                {user && !user.totp_enabled && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onFinish(false);
+                      onOpenAccountSecurity();
+                    }}
+                    className="px-2.5 py-1 rounded-md border text-xs font-medium whitespace-nowrap"
+                    style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                  >
+                    Open 2FA Settings
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Footer Controls */}
+        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t" style={{ borderColor: 'var(--mg-border)' }}>
+          {((isAdmin && step === 4) || (!isAdmin && step === 1)) ? (
+            <label className="inline-flex items-center gap-2 text-xs cursor-pointer" style={{ color: 'var(--mg-muted)' }}>
+              <input
+                type="checkbox"
+                checked={dontShowAgain}
+                onChange={(e) => setDontShowAgain(e.target.checked)}
+                className="w-4 h-4 accent-[var(--mg-accent)]"
+              />
+              <span>Don&apos;t automatically open on startup</span>
+            </label>
+          ) : (
+            <div className="text-[11px]" style={{ color: 'var(--mg-muted)' }}>
+              Step {step + 1} of {steps.length}
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 ml-auto">
+            {step > 0 && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setStep((s) => Math.max(0, s - 1))}
+                className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border text-xs font-medium whitespace-nowrap"
+                style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                <span>Back</span>
+              </button>
+            )}
+
+            {step === 0 && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void handleStep1Continue()}
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap disabled:opacity-50"
+                style={{ backgroundColor: 'var(--mg-accent)' }}
+              >
+                <span>
+                  {busy
+                    ? 'Saving...'
+                    : accountAction === 'create' && isAdmin
+                    ? 'Create Admin & Next'
+                    : 'Next'}
+                </span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+
+            {isAdmin && step === 1 && (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setStep(2)}
+                  className="px-3 py-2 rounded-lg border text-xs font-medium whitespace-nowrap"
+                  style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-muted)' }}
+                >
+                  Skip
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    void savePartialSettings(
+                      {
+                        yt_base_path: draft.yt_base_path,
+                        music_base_path: draft.music_base_path,
+                        gallery_base_path: draft.gallery_base_path,
+                        folder_structure: draft.folder_structure,
+                      },
+                      2
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap disabled:opacity-50"
+                  style={{ backgroundColor: 'var(--mg-accent)' }}
+                >
+                  <span>{busy ? 'Saving...' : 'Save Libraries & Next'}</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </>
+            )}
+
+            {isAdmin && step === 2 && (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setStep(3)}
+                  className="px-3 py-2 rounded-lg border text-xs font-medium whitespace-nowrap"
+                  style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-muted)' }}
+                >
+                  Skip
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    void savePartialSettings(
+                      {
+                        video_res: draft.video_res,
+                        container: draft.container,
+                        audio_format: draft.audio_format,
+                        audio_bitrate: draft.audio_bitrate,
+                        generate_lrc: Boolean(draft.generate_lrc),
+                        stale_timeout_minutes: draft.stale_timeout_minutes,
+                      },
+                      3
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap disabled:opacity-50"
+                  style={{ backgroundColor: 'var(--mg-accent)' }}
+                >
+                  <span>{busy ? 'Saving...' : 'Save Quality & Next'}</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </>
+            )}
+
+            {isAdmin && step === 3 && (
+              <>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setStep(4)}
+                  className="px-3 py-2 rounded-lg border text-xs font-medium whitespace-nowrap"
+                  style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-muted)' }}
+                >
+                  Skip
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() =>
+                    void savePartialSettings(
+                      {
+                        webhook_url: draft.webhook_url || '',
+                        jellyfin_url: draft.jellyfin_url || '',
+                        jellyfin_api_key: draft.jellyfin_api_key || '',
+                        navidrome_url: draft.navidrome_url || '',
+                      },
+                      4
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap disabled:opacity-50"
+                  style={{ backgroundColor: 'var(--mg-accent)' }}
+                >
+                  <span>{busy ? 'Saving...' : 'Save Connections & Next'}</span>
+                  <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </>
+            )}
+
+            {((isAdmin && step === 4) || (!isAdmin && step === 1)) && (
+              <button
+                type="button"
+                onClick={() => onFinish(dontShowAgain)}
+                className="px-4 py-2 rounded-lg text-xs font-semibold text-white whitespace-nowrap"
+                style={{ backgroundColor: 'var(--mg-accent)' }}
+              >
+                Finish Setup
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 
