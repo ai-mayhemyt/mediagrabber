@@ -1470,8 +1470,8 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               </div>
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <a
-                  href="/api/server/export-bundle"
-                  download="mediagrabber-v2.0-v1.tar.gz"
+                  href="/api/server/export-bundle?format=zip"
+                  download="mediagrabber-v2.0-pre3.zip"
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                   style={{
                     backgroundColor: 'var(--mg-bg)',
@@ -1480,7 +1480,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                   }}
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Download Bundle (.tar.gz)</span>
+                  <span>Download Bundle (.zip)</span>
                 </a>
                 <button
                   type="button"
@@ -1498,11 +1498,11 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Current Build</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0 (v2.0-pre2)'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre3'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Latest Release</div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre2'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre3'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Last Checked</div>

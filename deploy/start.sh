@@ -10,7 +10,7 @@ export MEDIAGRABBER_DATA_DIR="${MEDIAGRABBER_DATA_DIR:-/var/lib/mediagrabber}"
 mkdir -p "$MEDIAGRABBER_DATA_DIR"
 
 if [ ! -d node_modules ]; then
-  npm install
+  npm install || npm install --legacy-peer-deps
 fi
 
 if [ ! -d dist ]; then

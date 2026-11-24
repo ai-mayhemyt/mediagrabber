@@ -1,20 +1,30 @@
 import express from 'express';
 import http from 'http';
-import os from 'os';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { execFile, spawn, ChildProcess } from 'child_process';
 import { promisify } from 'util';
 import multer from 'multer';
 import dotenv from 'dotenv';
+import * as webpush from 'web-push';
 import { createServer as createViteServer } from 'vite';
 
 dotenv.config();
 
 const execFileAsync = promisify(execFile);
 
-const PORT = Number(process.env.PORT) || 3000;
+function resolvePort(): number {
+  const idx = process.argv.indexOf('--port');
+  if (idx !== -1 && process.argv[idx + 1]) {
+    const cliPort = Number(process.argv[idx + 1]);
+    if (Number.isFinite(cliPort) && cliPort > 0) return cliPort;
+  }
+  return Number(process.env.PORT) || 3000;
+}
+
+const PORT = resolvePort();
 const HOST = '0.0.0.0';
 const WORKSPACE_ROOT = process.env.MEDIAGRABBER_DATA_DIR
   ? path.resolve(process.env.MEDIAGRABBER_DATA_DIR)
@@ -27,7 +37,11 @@ const TRASH_DIR = path.join(WORKSPACE_ROOT, 'duplicates_trash');
 const COVERS_DIR = path.join(WORKSPACE_ROOT, 'covers');
 const AVATARS_DIR = path.join(WORKSPACE_ROOT, 'avatars');
 const STATE_DIR = path.join(WORKSPACE_ROOT, '.mediagrabber');
-const ARCHIVE_FILE = path.join(STATE_DIR, 'archive.txt');
+const USER_HOME_ARCHIVE = path.join(os.homedir(), '.mediagrabber', 'archive.txt');
+const ARCHIVE_FILE =
+  process.env.NODE_ENV === 'production' && fs.existsSync(USER_HOME_ARCHIVE)
+    ? USER_HOME_ARCHIVE
+    : path.join(STATE_DIR, 'archive.txt');
 const SETTINGS_FILE = path.join(STATE_DIR, 'settings.json');
 const RADIOS_FILE = path.join(STATE_DIR, 'radios.json');
 const HISTORY_FILE = path.join(STATE_DIR, 'history.json');
@@ -35,6 +49,8 @@ const USERS_FILE = path.join(STATE_DIR, 'users.json');
 const SCHEDULE_FILE = path.join(STATE_DIR, 'scheduled_jobs.json');
 const TOKENS_FILE = path.join(STATE_DIR, 'api_tokens.json');
 const NETWATCH_FILE = path.join(STATE_DIR, 'netwatch.json');
+const VAPID_FILE = path.join(STATE_DIR, 'vapid.json');
+const PUSH_SUBS_FILE = path.join(STATE_DIR, 'push_subscriptions.json');
 
 const DEFAULT_AVATAR = '/src/assets/images/avatar_admin_user_1795453948311.jpg';
 const DEFAULT_YT_THUMB = '/src/assets/images/cover_youtube_sample_1795453949069.jpg';
@@ -73,8 +89,19 @@ function verifyPassword(password: string, stored: string): boolean {
 }
 
 const BLOCKED_SYSTEM_ROOTS = new Set([
-  '/', '/bin', '/boot', '/dev', '/etc', '/lib', '/lib64',
-  '/proc', '/root', '/run', '/sbin', '/sys', '/usr',
+  '/',
+  '/bin',
+  '/boot',
+  '/dev',
+  '/etc',
+  '/lib',
+  '/lib64',
+  '/proc',
+  '/root',
+  '/run',
+  '/sbin',
+  '/sys',
+  '/usr',
 ]);
 
 function isSafeLibraryBasePath(dirPath: unknown): string | null {
@@ -105,6 +132,7 @@ function getAllowedLibraryRoots(settings?: any): string[] {
   const s = settings || readJson<any>(SETTINGS_FILE, {});
   const candidates = [
     WORKSPACE_ROOT,
+    '/tmp/mediagrabber',
     isSafeLibraryBasePath(s?.yt_base_path) || YT_DIR,
     isSafeLibraryBasePath(s?.music_base_path) || MUSIC_DIR,
     isSafeLibraryBasePath(s?.gallery_base_path) || GALLERY_DIR,
@@ -135,6 +163,166 @@ function moveFileSafe(src: string, dest: string) {
       throw err;
     }
   }
+}
+
+function buildToolEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+  const localBin = path.join(os.homedir(), '.local', 'bin');
+  const basePath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
+  const mergedPath = [localBin, '/usr/local/bin', basePath].filter(Boolean).join(':');
+  return {
+    ...process.env,
+    PATH: mergedPath,
+    ...(extra || {}),
+  };
+}
+
+function resolveExecutable(name: string, extraPaths: string[] = []): string | null {
+  const candidates = [
+    ...extraPaths,
+    path.join(os.homedir(), '.local', 'bin', name),
+    path.join('/usr/local/bin', name),
+    path.join('/usr/bin', name),
+    path.join('/bin', name),
+  ];
+  for (const c of candidates) {
+    if (!c) continue;
+    try {
+      fs.accessSync(c, fs.constants.X_OK);
+      return c;
+    } catch {
+      // continue
+    }
+  }
+  const pathDirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const dir of pathDirs) {
+    const full = path.join(dir, name);
+    try {
+      fs.accessSync(full, fs.constants.X_OK);
+      return full;
+    } catch {
+      // continue
+    }
+  }
+  return null;
+}
+
+interface ResolvedGrabCommand {
+  bin: string;
+  prefixArgs: string[];
+  scriptPath: string;
+}
+
+function getGrabCandidatePaths(): string[] {
+  return [
+    process.env.MEDIAGRABBER_GRAB_BIN || '',
+    '/usr/local/bin/grab',
+    path.join(process.cwd(), 'grab'),
+    '/opt/mediagrabber/grab',
+    '/opt/mediagrabber.v1-backup/grab',
+  ].filter(Boolean);
+}
+
+function resolveGrabCommand(): ResolvedGrabCommand | null {
+  for (const candidate of getGrabCandidatePaths()) {
+    if (!fs.existsSync(candidate)) continue;
+    try {
+      if (fs.statSync(candidate).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return { bin: candidate, prefixArgs: [], scriptPath: candidate };
+    } catch {
+      try {
+        fs.chmodSync(candidate, 0o755);
+        return { bin: candidate, prefixArgs: [], scriptPath: candidate };
+      } catch {
+        const bashBin = resolveExecutable('bash', ['/bin/bash', '/usr/bin/bash']);
+        if (bashBin) {
+          return { bin: bashBin, prefixArgs: [candidate], scriptPath: candidate };
+        }
+      }
+    }
+  }
+  const pathGrab = resolveExecutable('grab');
+  if (pathGrab) {
+    return { bin: pathGrab, prefixArgs: [], scriptPath: pathGrab };
+  }
+  return null;
+}
+
+function ensureGrabInitialized(): string | null {
+  const localGrab = path.join(process.cwd(), 'grab');
+  if (fs.existsSync(localGrab)) {
+    try {
+      fs.chmodSync(localGrab, 0o755);
+    } catch {
+      // ignore if read-only or owned by another user
+    }
+  }
+
+  const sysGrab = '/usr/local/bin/grab';
+  if (!fs.existsSync(sysGrab) && fs.existsSync(localGrab)) {
+    try {
+      fs.copyFileSync(localGrab, sysGrab);
+      fs.chmodSync(sysGrab, 0o755);
+    } catch {
+      // non-root runtime cannot write to /usr/local/bin; localGrab remains usable
+    }
+  } else if (fs.existsSync(sysGrab)) {
+    try {
+      fs.accessSync(sysGrab, fs.constants.X_OK);
+    } catch {
+      try {
+        fs.chmodSync(sysGrab, 0o755);
+      } catch {
+        // ignore if lacking permission; resolveGrabCommand falls back to bash
+      }
+    }
+  }
+
+  try {
+    fs.mkdirSync('/tmp/mediagrabber', { recursive: true });
+  } catch {
+    // ignore if /tmp/mediagrabber cannot be created
+  }
+
+  const cmd = resolveGrabCommand();
+  return cmd ? cmd.scriptPath : null;
+}
+
+function resolveGrabBinary(): string | null {
+  return resolveGrabCommand()?.scriptPath || null;
+}
+
+function scanForLocalThumbnail(filePath?: string | null, outputDir?: string | null): string | null {
+  const thumbExts = ['.jpg', '.jpeg', '.png', '.webp'];
+  if (filePath) {
+    const base = filePath.replace(/\.[^.]+$/, '');
+    for (const ext of thumbExts) {
+      if (fs.existsSync(base + ext)) return base + ext;
+    }
+  }
+  const dirs = [filePath ? path.dirname(filePath) : null, outputDir || null].filter(Boolean) as string[];
+  for (const dir of dirs) {
+    if (!fs.existsSync(dir)) continue;
+    for (const f of walkFiles(dir)) {
+      if (thumbExts.includes(path.extname(f).toLowerCase())) return f;
+    }
+  }
+  return null;
+}
+
+function toClientThumbUrl(thumb: string | null): string | null {
+  if (!thumb) return null;
+  if (thumb.startsWith('http://') || thumb.startsWith('https://') || thumb.startsWith('/api/') || thumb.startsWith('/src/')) {
+    return thumb;
+  }
+  if (fs.existsSync(thumb)) {
+    return `/api/media-cover?path=${encodeURIComponent(thumb)}`;
+  }
+  return null;
 }
 
 function sanitizeSegment(input: string, fallback = 'Unknown'): string {
@@ -203,25 +391,44 @@ async function createSampleMediaFile(filePath: string, title: string, artist: st
 
 async function seedWorkspace() {
   ensureDirs();
+  ensureGrabInitialized();
 
   if (!fs.existsSync(SETTINGS_FILE)) {
+    const legacyCandidates = [
+      '/opt/mediagrabber/settings.json',
+      '/opt/mediagrabber.v1-backup/settings.json',
+    ];
+    let importedLegacy: Record<string, any> | null = null;
+    for (const cand of legacyCandidates) {
+      if (fs.existsSync(cand)) {
+        try {
+          importedLegacy = JSON.parse(fs.readFileSync(cand, 'utf-8'));
+          break;
+        } catch {
+          // ignore malformed legacy settings
+        }
+      }
+    }
+
     const defaultSettings = {
       video_res: '1080',
       container: 'mp4',
       audio_format: 'mp3',
       audio_bitrate: '320k',
-      generate_lrc: true,
+      generate_lrc: false,
       folder_structure: 'default',
-      yt_base_path: YT_DIR,
-      music_base_path: MUSIC_DIR,
-      gallery_base_path: GALLERY_DIR,
+      yt_base_path: fs.existsSync('/media') ? '/media/YouTube' : YT_DIR,
+      music_base_path: fs.existsSync('/opt/navidrome/music/navidrome/music')
+        ? '/opt/navidrome/music/navidrome/music'
+        : MUSIC_DIR,
+      gallery_base_path: fs.existsSync('/media') ? '/media/Gallery' : GALLERY_DIR,
       cookies_youtube_path: '',
       cookies_gallery_path: '',
       jellyfin_url: 'http://localhost:8096',
       jellyfin_api_key: '',
       navidrome_url: 'http://localhost:4533',
       navidrome_api_key: '',
-      plex_url: 'http://localhost:32400',
+      plex_url: '',
       plex_token: '',
       plex_section_id: '',
       smtp_host: '',
@@ -229,9 +436,10 @@ async function seedWorkspace() {
       smtp_user: '',
       smtp_pass: '',
       smtp_from: 'MediaGrabber <noreply@mediagrabber.local>',
-      ytdlp_extra: '-S vcodec:h264,res,br',
+      ytdlp_extra: '',
       spotdl_extra: '',
-      gallerydl_extra: '--retries 5',
+      gallerydl_extra: '',
+      ...(importedLegacy || {}),
     };
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(defaultSettings, null, 2));
   }
@@ -441,6 +649,95 @@ function readJson<T>(file: string, fallback: T): T {
 
 function writeJson(file: string, data: unknown) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+interface StoredVapidKeys {
+  publicKey: string;
+  privateKey: string;
+}
+
+let cachedVapidKeys: StoredVapidKeys | null = null;
+
+function getVapidKeys(): StoredVapidKeys {
+  if (cachedVapidKeys) return cachedVapidKeys;
+  const envPublic = String(process.env.VAPID_PUBLIC_KEY || '').trim();
+  const envPrivate = String(process.env.VAPID_PRIVATE_KEY || '').trim();
+  if (envPublic && envPrivate) {
+    cachedVapidKeys = { publicKey: envPublic, privateKey: envPrivate };
+    return cachedVapidKeys;
+  }
+
+  ensureDirs();
+  const existing = readJson<Partial<StoredVapidKeys>>(VAPID_FILE, {});
+  if (existing.publicKey && existing.privateKey) {
+    cachedVapidKeys = { publicKey: existing.publicKey, privateKey: existing.privateKey };
+    return cachedVapidKeys;
+  }
+
+  const generated = webpush.generateVAPIDKeys();
+  cachedVapidKeys = { publicKey: generated.publicKey, privateKey: generated.privateKey };
+  writeJson(VAPID_FILE, cachedVapidKeys);
+  return cachedVapidKeys;
+}
+
+function getWebPushSubject(): string {
+  return String(process.env.VAPID_SUBJECT || '').trim() || 'mailto:admin@mediagrabber.local';
+}
+
+function ensureWebPushConfigured(): StoredVapidKeys {
+  const keys = getVapidKeys();
+  webpush.setVapidDetails(getWebPushSubject(), keys.publicKey, keys.privateKey);
+  return keys;
+}
+
+async function sendPushNotification(payload: {
+  title: string;
+  body: string;
+  url?: string;
+  tag?: string;
+}): Promise<{ sent: number; total: number; failed: number }> {
+  const subs = readJson<webpush.PushSubscription[]>(PUSH_SUBS_FILE, []);
+  if (!Array.isArray(subs) || subs.length === 0) {
+    return { sent: 0, total: 0, failed: 0 };
+  }
+
+  ensureWebPushConfigured();
+  const bodyPayload = JSON.stringify({
+    title: payload.title,
+    body: payload.body,
+    icon: '/pwa-192x192.png',
+    badge: '/pwa-192x192.png',
+    tag: payload.tag || 'mediagrabber-update',
+    url: payload.url || '/',
+  });
+
+  let sent = 0;
+  let failed = 0;
+  const validSubs: webpush.PushSubscription[] = [];
+
+  await Promise.all(
+    subs.map(async (sub) => {
+      if (!sub || !sub.endpoint) return;
+      try {
+        await webpush.sendNotification(sub, bodyPayload);
+        sent++;
+        validSubs.push(sub);
+      } catch (err: any) {
+        const statusCode = Number(err?.statusCode || 0);
+        if (statusCode === 404 || statusCode === 410) {
+          failed++;
+        } else {
+          failed++;
+          validSubs.push(sub);
+        }
+      }
+    })
+  );
+
+  if (validSubs.length !== subs.length) {
+    writeJson(PUSH_SUBS_FILE, validSubs);
+  }
+  return { sent, total: subs.length, failed };
 }
 
 function walkFiles(dir: string): string[] {
@@ -654,77 +951,42 @@ async function startServer() {
     fs.writeFileSync(ARCHIVE_FILE, filtered.length ? filtered.join('\n') + '\n' : '');
   }
 
-  const _mgMediaExts = new Set(['.mp4', '.webm', '.mkv', '.mp3', '.flac', '.m4a', '.opus']);
-
-  function _mgWalkFiles(dir: string): string[] {
-    if (!fs.existsSync(dir)) return [];
-    const out: string[] = [];
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) out.push(..._mgWalkFiles(full));
-      else out.push(full);
-    }
-    return out;
-  }
-
-  function _mgBuildToolEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
-    const localBin = path.join(os.homedir(), '.local', 'bin');
-    const basePath = process.env.PATH || '/usr/local/bin:/usr/bin:/bin';
-    return {
-      ...process.env,
-      PATH: [localBin, '/usr/local/bin', basePath].filter(Boolean).join(':'),
-      ...(extra || {}),
-    };
-  }
-
-  function _mgResolveExec(name: string, extraPaths: string[] = []): string | null {
-    const candidates = [
-      ...extraPaths,
-      path.join(os.homedir(), '.local', 'bin', name),
-      path.join('/usr/local/bin', name),
-      path.join('/usr/bin', name),
-      path.join('/bin', name),
-    ];
-    for (const c of candidates) {
-      if (!c) continue;
+  async function triggerMediaRefresh(dirPath: string, settings: any) {
+    const jfUrl = String(settings?.jellyfin_url || '').trim();
+    const jfKey = String(settings?.jellyfin_api_key || '').trim();
+    if (jfUrl && jfKey) {
       try {
-        fs.accessSync(c, fs.constants.X_OK);
-        return c;
-      } catch {}
-    }
-    for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
-      const full = path.join(dir, name);
-      try {
-        fs.accessSync(full, fs.constants.X_OK);
-        return full;
-      } catch {}
-    }
-    return null;
-  }
-
-  function _mgResolveGrab(): { bin: string; prefixArgs: string[]; scriptPath: string } | null {
-    const candidates = [
-      process.env.MEDIAGRABBER_GRAB_BIN || '',
-      '/usr/local/bin/grab',
-      path.join(process.cwd(), 'grab'),
-      '/opt/mediagrabber/grab',
-    ].filter(Boolean);
-    for (const c of candidates) {
-      if (!fs.existsSync(c)) continue;
-      try {
-        if (fs.statSync(c).isDirectory()) continue;
-        fs.accessSync(c, fs.constants.X_OK);
-        return { bin: c, prefixArgs: [], scriptPath: c };
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        await fetch(`${jfUrl.replace(/\/+$/, '')}/Library/Refresh?path=${encodeURIComponent(dirPath)}`, {
+          method: 'POST',
+          headers: { 'X-Emby-Token': jfKey },
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
       } catch {
-        const bashBin = _mgResolveExec('bash', ['/bin/bash', '/usr/bin/bash']);
-        if (bashBin) return { bin: bashBin, prefixArgs: [c], scriptPath: c };
+        // ignore offline media server
       }
     }
-    const inPath = _mgResolveExec('grab');
-    return inPath ? { bin: inPath, prefixArgs: [], scriptPath: inPath } : null;
+    const plexUrl = String(settings?.plex_url || '').trim();
+    const plexToken = String(settings?.plex_token || '').trim();
+    const plexSection = String(settings?.plex_section_id || '').trim();
+    if (plexUrl && plexToken && plexSection) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5000);
+        await fetch(
+          `${plexUrl.replace(/\/+$/, '')}/library/sections/${encodeURIComponent(plexSection)}/refresh?X-Plex-Token=${encodeURIComponent(plexToken)}`,
+          { method: 'GET', signal: controller.signal }
+        );
+        clearTimeout(timer);
+      } catch {
+        // ignore
+      }
+    }
   }
 
-  function _mgRunStreaming(
+  function runCommandStreaming(
     jobId: string,
     cmd: string,
     args: string[],
@@ -734,16 +996,18 @@ async function startServer() {
     return new Promise((resolve) => {
       const child = spawn(cmd, args, { env });
       activeProcesses.set(jobId, child);
-      let buf = '';
+      let buffer = '';
+
       const handleChunk = (chunk: Buffer) => {
-        buf += chunk.toString('utf-8');
-        const parts = buf.split(/[\r\n]+/);
-        buf = parts.pop() || '';
+        buffer += chunk.toString('utf-8');
+        const parts = buffer.split(/[\r\n]+/);
+        buffer = parts.pop() || '';
         for (const raw of parts) {
           const line = raw.trim();
           if (line) onLine(line);
         }
       };
+
       child.stdout?.on('data', handleChunk);
       child.stderr?.on('data', handleChunk);
       child.on('error', (err) => {
@@ -752,7 +1016,7 @@ async function startServer() {
         resolve(1);
       });
       child.on('close', (code) => {
-        if (buf.trim()) onLine(buf.trim());
+        if (buffer.trim()) onLine(buffer.trim());
         activeProcesses.delete(jobId);
         resolve(typeof code === 'number' ? code : 1);
       });
@@ -779,17 +1043,23 @@ async function startServer() {
         return;
       }
 
-      const ytDir = String(settings.yt_base_path || '').trim() || YT_DIR;
-      const musicDir = String(settings.music_base_path || '').trim() || MUSIC_DIR;
-      const galleryDir = String(settings.gallery_base_path || '').trim() || GALLERY_DIR;
-      const grabCmd = _mgResolveGrab();
+      const ytDir = isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR;
+      const musicDir = isSafeLibraryBasePath(settings.music_base_path) || MUSIC_DIR;
+      const galleryDir = isSafeLibraryBasePath(settings.gallery_base_path) || GALLERY_DIR;
 
+      const grabCmd = resolveGrabCommand();
+      const ytdlpBin = resolveExecutable('yt-dlp');
+      const spotdlBin = resolveExecutable('spotdl');
+      const gallerydlBin = resolveExecutable('gallery-dl');
+
+      // Use real `grab` wrapper when available on the host or workspace
       if (grabCmd) {
         let tempJobDir = job.output_dir || path.join('/tmp/mediagrabber', jobId);
         try {
           fs.mkdirSync(tempJobDir, { recursive: true });
           fs.accessSync(tempJobDir, fs.constants.W_OK);
-        } catch {
+        } catch (err: any) {
+          job.log.push(`[mediagrabber] Failed to initialize ${tempJobDir}: ${err?.message || err}`);
           tempJobDir = path.join(TMP_DIR, jobId);
           fs.mkdirSync(tempJobDir, { recursive: true });
         }
@@ -800,7 +1070,7 @@ async function startServer() {
           extraYt = `${extraYt} -S vcodec:h264,res,br`.trim();
         }
 
-        const env = _mgBuildToolEnv({
+        const env = buildToolEnv({
           MEDIAGRABBER_JOB_ID: jobId,
           GRAB_OUTPUT_DIR: tempJobDir,
           GRAB_YT_DIR: ytDir,
@@ -819,101 +1089,259 @@ async function startServer() {
           ...(settings.gallerydl_extra ? { GRAB_EXTRA_GALLERY: String(settings.gallerydl_extra) } : {}),
         });
 
+        const launchArgs = [...grabCmd.prefixArgs, job.url];
         job.log.push(`[mediagrabber] Launching ${grabCmd.scriptPath} (${job.mode})`);
         let lastProgress = 2;
-        const exitCode = await _mgRunStreaming(jobId, grabCmd.bin, [...grabCmd.prefixArgs, job.url], env, (line) => {
-          job.log.push(line);
-          if (job.log.length > 500) job.log.shift();
-          if (line.includes('Engine → SPOTIFY')) job.engine = 'SPOTIFY';
-          else if (line.includes('Engine → YT MUSIC')) job.engine = 'YT MUSIC';
-          else if (line.includes('Engine → GALLERY')) job.engine = 'GALLERY';
-          else if (line.includes('Engine → YOUTUBE')) job.engine = 'YOUTUBE';
-          if (line.includes('[download]') && line.includes('%')) {
-            const m = line.match(/(\d{1,3}(?:\.\d+)?)%/);
-            if (m) {
-              const v = parseFloat(m[1]);
-              if (!Number.isNaN(v) && v >= lastProgress) {
-                lastProgress = Math.min(99, v);
-                job.progress = lastProgress;
-              }
+        let detectedEngine: string = job.engine;
+        let galleryDownloadStarted = false;
+
+        const exitCode = await runCommandStreaming(jobId, grabCmd.bin, launchArgs, env, (line) => {
+        job.log.push(line);
+        if (job.log.length > 500) job.log.shift();
+
+        if (line.includes('Engine → SPOTIFY')) {
+          detectedEngine = 'SPOTIFY';
+          job.engine = 'SPOTIFY';
+        } else if (line.includes('Engine → YT MUSIC')) {
+          detectedEngine = 'YT MUSIC';
+          job.engine = 'YT MUSIC';
+        } else if (line.includes('Engine → GALLERY')) {
+          detectedEngine = 'GALLERY';
+          job.engine = 'GALLERY';
+        } else if (line.includes('Engine → YOUTUBE')) {
+          detectedEngine = 'YOUTUBE';
+          job.engine = 'YOUTUBE';
+        }
+
+        if (line.includes('[download]') && line.includes('%')) {
+          const m = line.match(/(\d{1,3}(?:\.\d+)?)%/);
+          if (m) {
+            const val = parseFloat(m[1]);
+            if (!Number.isNaN(val) && val >= lastProgress) {
+              lastProgress = Math.min(99, val);
+              job.progress = lastProgress;
             }
           }
-          if (line.includes('PROGRESS:')) {
-            const m = line.match(/PROGRESS:\s*(\d+)\/(\d+)\s*(?:\((\d+)%\))?/);
-            if (m) {
-              const pct = m[3] ? parseInt(m[3], 10) : Math.round((parseInt(m[1], 10) / Math.max(1, parseInt(m[2], 10))) * 100);
-              if (pct >= lastProgress) {
-                lastProgress = Math.min(99, pct);
-                job.progress = lastProgress;
-              }
+        }
+        if (line.includes('PROGRESS:')) {
+          const m = line.match(/PROGRESS:\s*(\d+)\/(\d+)\s*(?:\((\d+)%\))?/);
+          if (m) {
+            const downloaded = parseInt(m[1], 10);
+            const total = parseInt(m[2], 10);
+            const pct = m[3] ? parseInt(m[3], 10) : total > 0 ? Math.round((downloaded / total) * 100) : 0;
+            if (pct >= lastProgress) {
+              lastProgress = Math.min(99, pct);
+              job.progress = lastProgress;
             }
           }
-          if (line.includes('FINAL_FILE:')) {
-            job.file = line.split('FINAL_FILE:', 2)[1].trim();
-          }
-          if (line.includes('FINAL_THUMB:')) {
-            const t = line.split('FINAL_THUMB:', 2)[1].trim();
-            if (t.startsWith('http')) job.thumbnail = t;
-            else if (fs.existsSync(t)) job.thumbnail = `/api/media-cover?path=${encodeURIComponent(t)}`;
-          }
-        });
-
-        if (cancelledJobs.has(jobId)) {
-          job.status = 'cancelled';
-          job.log.push('[mediagrabber] Job cancelled by user.');
-          return;
         }
-
-        if (!job.file && fs.existsSync(tempJobDir)) {
-          const found = _mgWalkFiles(tempJobDir)
-            .filter((f) => _mgMediaExts.has(path.extname(f).toLowerCase()))
-            .sort((a, b) => fs.statSync(b).ctimeMs - fs.statSync(a).ctimeMs);
-          if (found.length > 0) job.file = found[0];
+        if (detectedEngine === 'GALLERY' && line.includes('Downloading') && !galleryDownloadStarted) {
+          galleryDownloadStarted = true;
+          lastProgress = Math.max(lastProgress, 50);
+          job.progress = lastProgress;
         }
-
-        if (job.file) {
-          const infoFile = job.file.replace(/\.[^.]+$/, '.info.json');
-          if (fs.existsSync(infoFile)) {
-            const info = readJson<any>(infoFile, {});
-            if (info.title) job.title = info.title;
-            if (info.uploader || info.artist) job.uploader = info.uploader || info.artist;
-          } else {
-            job.title = path.basename(job.file, path.extname(job.file));
-          }
+        if (line.includes('FINAL_FILE:')) {
+          job.file = line.split('FINAL_FILE:', 2)[1].trim();
         }
-
-        if (job.file || exitCode === 0) {
-          job.status = 'done';
-          job.progress = 100;
-          if (job.engine === 'SPOTIFY') appendArchiveEntry('spotify', job.url);
-          else if (job.engine === 'GALLERY') appendArchiveEntry(job.url.includes('tiktok.com') ? 'tiktok' : 'instagram', job.url);
-          const history = readJson<any[]>(HISTORY_FILE, []);
-          history.unshift({
-            id: `hist-${Date.now()}-${jobId.slice(0, 4)}`,
-            url: job.url,
-            title: job.title || path.basename(job.file || job.url),
-            thumbnail: job.thumbnail,
-            timestamp: new Date().toISOString(),
-            source: engineToHistorySource(job.engine, job.url),
-            file: job.file,
-          });
-          writeJson(HISTORY_FILE, history.slice(0, 200));
-          job.log.push('[mediagrabber] Completed successfully.');
-        } else {
-          job.status = 'failed';
-          job.progress = 0;
-          job.log.push(`[mediagrabber] Download failed (exit code ${exitCode}).`);
+        if (line.includes('FINAL_THUMB:')) {
+          const rawThumb = line.split('FINAL_THUMB:', 2)[1].trim();
+          job.thumbnail = toClientThumbUrl(rawThumb) || job.thumbnail;
         }
+      });
+
+      if (cancelledJobs.has(jobId)) {
+        job.status = 'cancelled';
+        job.log.push('[mediagrabber] Job cancelled by user.');
         return;
       }
 
+      if (!job.file && fs.existsSync(tempJobDir)) {
+        const found = walkFiles(tempJobDir)
+          .filter((f) => MEDIA_EXTS.has(path.extname(f).toLowerCase()))
+          .sort((a, b) => fs.statSync(b).ctimeMs - fs.statSync(a).ctimeMs);
+        if (found.length > 0) {
+          job.file = found[0];
+        }
+      }
+
+      if (job.file) {
+        const infoFile = job.file.replace(/\.[^.]+$/, '.info.json');
+        if (fs.existsSync(infoFile)) {
+          const info = readJson<any>(infoFile, {});
+          if (info.title) job.title = info.title;
+          if (info.uploader || info.artist) job.uploader = info.uploader || info.artist;
+        } else {
+          job.title = path.basename(job.file, path.extname(job.file));
+        }
+      }
+
+      const localThumb = scanForLocalThumbnail(job.file, tempJobDir);
+      if (localThumb) {
+        job.thumbnail = toClientThumbUrl(localThumb) || job.thumbnail;
+      }
+
+      if (job.file || exitCode === 0) {
+        job.status = 'done';
+        job.progress = 100;
+        if (detectedEngine === 'SPOTIFY') {
+          appendArchiveEntry('spotify', job.url);
+        } else if (detectedEngine === 'GALLERY') {
+          if (job.url.includes('instagram.com')) appendArchiveEntry('instagram', job.url);
+          else if (job.url.includes('tiktok.com')) appendArchiveEntry('tiktok', job.url);
+        }
+        if (job.file) {
+          void triggerMediaRefresh(path.dirname(job.file), settings);
+        }
+        const history = readJson<any[]>(HISTORY_FILE, []);
+        history.unshift({
+          id: `hist-${Date.now()}-${jobId.slice(0, 4)}`,
+          url: job.url,
+          title: job.title || path.basename(job.file || job.url),
+          thumbnail: job.thumbnail,
+          timestamp: new Date().toISOString(),
+          source: engineToHistorySource(job.engine, job.url),
+          file: job.file,
+        });
+        writeJson(HISTORY_FILE, history.slice(0, 200));
+        job.log.push('[mediagrabber] Completed successfully.');
+        void sendPushNotification({
+          title: 'Download Complete',
+          body: `${job.title || job.url} finished (${job.engine}).`,
+          tag: `job-${job.job_id}`,
+          url: '/',
+        });
+      } else {
+        job.status = 'failed';
+        job.progress = 0;
+        job.log.push(`[mediagrabber] Download failed (exit code ${exitCode}).`);
+        void sendPushNotification({
+          title: 'Download Failed',
+          body: `${job.title || job.url} failed (${job.engine}).`,
+          tag: `job-${job.job_id}`,
+          url: '/',
+        });
+      }
+      return;
+    }
+
+    // Fallback: direct yt-dlp / spotdl / gallery-dl execution if `grab` wrapper is absent
+    const directTool =
+      job.engine === 'SPOTIFY' ? spotdlBin : job.engine === 'GALLERY' ? gallerydlBin || ytdlpBin : ytdlpBin;
+
+    if (directTool) {
+      const targetRoot = resolveJobBaseDir(job.engine, settings);
+      const safeUploader = sanitizeSegment(meta.uploader, 'Unknown');
+      const year = String(new Date().getFullYear());
+      const outDir = settings.folder_structure === 'flat' ? targetRoot : path.join(targetRoot, safeUploader, year);
+      fs.mkdirSync(outDir, { recursive: true });
+      job.output_dir = outDir;
+
+      const args: string[] = [];
+      const toolName = path.basename(directTool);
+      if (toolName.includes('yt-dlp')) {
+        const isAudio = job.mode === 'audio' || job.engine === 'YT MUSIC';
+        args.push('--newline', '--write-info-json', '--write-thumbnail', '--download-archive', ARCHIVE_FILE);
+        if (settings.cookies_youtube_path && fs.existsSync(String(settings.cookies_youtube_path))) {
+          args.push('--cookies', String(settings.cookies_youtube_path));
+        }
+        if (isAudio) {
+          args.push('-x', '--audio-format', String(settings.audio_format || 'mp3'), '--audio-quality', String(settings.audio_bitrate || '320k'));
+        } else {
+          const resNum = String(settings.video_res || '1080');
+          const container = String(settings.container || 'mp4');
+          args.push('-f', `bestvideo[height<=${resNum}]+bestaudio/best[height<=${resNum}]/best`, '--merge-output-format', container);
+        }
+        args.push('-o', path.join(outDir, '%(title).120s.%(ext)s'), job.url);
+      } else if (toolName.includes('spotdl')) {
+        args.push('download', job.url, '--output', path.join(outDir, '{artist} - {title}.{output-ext}'));
+      } else {
+        args.push('-D', outDir, job.url);
+      }
+
+      job.log.push(`[mediagrabber] Launching direct ${toolName}...`);
+      const beforeSet = new Set(walkFiles(outDir));
+      const exitCode = await runCommandStreaming(jobId, directTool, args, buildToolEnv(), (line) => {
+        job.log.push(line);
+        if (job.log.length > 500) job.log.shift();
+        const m = line.match(/(\d{1,3}(?:\.\d+)?)%/);
+        if (m && line.includes('[download]')) {
+          job.progress = Math.min(99, parseFloat(m[1]));
+        }
+      });
+
+      if (cancelledJobs.has(jobId)) {
+        job.status = 'cancelled';
+        job.log.push('[mediagrabber] Job cancelled by user.');
+        return;
+      }
+
+      const afterFiles = walkFiles(outDir).filter(
+        (f) => !beforeSet.has(f) && MEDIA_EXTS.has(path.extname(f).toLowerCase())
+      );
+      if (afterFiles.length > 0) {
+        job.file = afterFiles[0];
+        job.title = path.basename(job.file, path.extname(job.file));
+      }
+
+      const localThumb = scanForLocalThumbnail(job.file, outDir);
+      if (localThumb) job.thumbnail = toClientThumbUrl(localThumb) || job.thumbnail;
+
+      if (job.file || exitCode === 0) {
+        job.status = 'done';
+        job.progress = 100;
+        if (job.file) void triggerMediaRefresh(path.dirname(job.file), settings);
+        const history = readJson<any[]>(HISTORY_FILE, []);
+        history.unshift({
+          id: `hist-${Date.now()}-${jobId.slice(0, 4)}`,
+          url: job.url,
+          title: job.title || job.url,
+          thumbnail: job.thumbnail,
+          timestamp: new Date().toISOString(),
+          source: engineToHistorySource(job.engine, job.url),
+          file: job.file,
+        });
+        writeJson(HISTORY_FILE, history.slice(0, 200));
+        job.log.push('[mediagrabber] Completed successfully.');
+        void sendPushNotification({
+          title: 'Download Complete',
+          body: `${job.title || job.url} finished (${job.engine}).`,
+          tag: `job-${job.job_id}`,
+          url: '/',
+        });
+      } else {
+        job.status = 'failed';
+        job.progress = 0;
+        job.log.push(`[mediagrabber] ${toolName} failed (exit code ${exitCode}).`);
+        void sendPushNotification({
+          title: 'Download Failed',
+          body: `${job.title || job.url} failed (${job.engine}).`,
+          tag: `job-${job.job_id}`,
+          url: '/',
+        });
+      }
+      return;
+    }
+
       job.status = 'failed';
       job.progress = 0;
-      job.log.push('[mediagrabber] ERROR: /usr/local/bin/grab not found or not executable.');
+      job.log.push('[mediagrabber] ERROR: No grab script or downloading binary found.');
+      job.log.push('[mediagrabber] Ensure /usr/local/bin/grab or yt-dlp is installed and in PATH.');
+      void sendPushNotification({
+        title: 'Download Failed',
+        body: `${job.title || job.url} failed: no download binary found.`,
+        tag: `job-${job.job_id}`,
+        url: '/',
+      });
     } catch (err: any) {
       job.status = 'failed';
       job.progress = 0;
       job.log.push(`[mediagrabber] Unexpected job error: ${err?.message || String(err)}`);
+      void sendPushNotification({
+        title: 'Download Failed',
+        body: `${job.title || job.url} encountered an unexpected error.`,
+        tag: `job-${job.job_id}`,
+        url: '/',
+      });
     }
   }
 
@@ -1109,7 +1537,7 @@ async function startServer() {
     res.json(list);
   });
 
-  app.post('/api/grab', (req, res) => {
+  function handleGrabRequest(req: express.Request, res: express.Response) {
     const mode = req.body?.mode === 'audio' ? 'audio' : 'video';
     let urlList: string[] = [];
     if (Array.isArray(req.body?.urls)) {
@@ -1155,28 +1583,71 @@ async function startServer() {
     }
 
     res.json({ job_id: jobIds[0], job_ids: jobIds, count: jobIds.length });
-  });
+  }
 
+  app.post('/api/grab', handleGrabRequest);
+  app.post('/grab', handleGrabRequest);
 
   app.post('/api/grab/notify', (req, res) => {
     const jobId = String(req.body?.job_id || '').trim();
     const rawUrl = String(req.body?.url || '').trim();
+    if (!jobId) return res.status(400).json({ error: 'job_id is required' });
+
+    const statusRaw = String(req.body?.status || '').trim().toLowerCase();
+    const status: JobRecord['status'] =
+      statusRaw === 'done' || statusRaw === 'failed' || statusRaw === 'cancelled' || statusRaw === 'queued'
+        ? statusRaw
+        : 'running';
+    const progressNum = Number(req.body?.progress);
     const message = String(req.body?.message || '').trim();
     const file = String(req.body?.file || '').trim();
-    const progressNum = Number(req.body?.progress);
-    const job = queue.get(jobId);
-    if (!job && rawUrl && jobId) {
-      queue.set(jobId, {
-        job_id: jobId, url: rawUrl, mode: 'video', engine: detectEngine(rawUrl),
-        status: 'running', progress: Number.isFinite(progressNum) ? progressNum : 2,
-        file: file || null, thumbnail: DEFAULT_YT_THUMB,
+
+    let job = queue.get(jobId);
+    if (!job && rawUrl) {
+      const engine = detectEngine(rawUrl);
+      job = {
+        job_id: jobId,
+        url: rawUrl,
+        mode: 'video',
+        engine,
+        status,
+        progress: Number.isFinite(progressNum) ? progressNum : 2,
+        file: file || null,
+        thumbnail:
+          engine === 'SPOTIFY' || engine === 'YT MUSIC'
+            ? DEFAULT_MUSIC_THUMB
+            : engine === 'GALLERY'
+            ? DEFAULT_GALLERY_THUMB
+            : DEFAULT_YT_THUMB,
         output_dir: file ? path.dirname(file) : null,
-        log: message ? [message] : [], created_at: new Date().toISOString(),
-      });
-    } else if (job && jobId.startsWith('cli-')) {
-      if (Number.isFinite(progressNum) && progressNum >= job.progress) job.progress = Math.min(100, progressNum);
-      if (message) job.log.push(message);
-      if (file) job.file = file;
+        log: message ? [message] : [`[cli] Started ${rawUrl}`],
+        created_at: new Date().toISOString(),
+      };
+      queue.set(jobId, job);
+      return res.json({ ok: true });
+    }
+
+    if (job) {
+      if (jobId.startsWith('cli-')) {
+        const prevStatus = job.status;
+        job.status = status;
+        if (Number.isFinite(progressNum) && progressNum >= job.progress) {
+          job.progress = Math.min(100, progressNum);
+        }
+        if (message) {
+          job.log.push(message);
+          if (job.log.length > 500) job.log.shift();
+        }
+        if (file) job.file = file;
+        if (prevStatus !== status && (status === 'done' || status === 'failed')) {
+          void sendPushNotification({
+            title: status === 'done' ? 'Download Complete' : 'Download Failed',
+            body: `${job.title || job.url} ${status === 'done' ? 'finished' : 'failed'} (${job.engine}).`,
+            tag: `job-${job.job_id}`,
+            url: '/',
+          });
+        }
+      }
     }
     res.json({ ok: true });
   });
@@ -1191,6 +1662,21 @@ async function startServer() {
     const job = queue.get(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     cancelledJobs.add(job.job_id);
+    const proc = activeProcesses.get(job.job_id);
+    if (proc) {
+      try {
+        proc.kill('SIGTERM');
+        setTimeout(() => {
+          try {
+            if (!proc.killed) proc.kill('SIGKILL');
+          } catch {
+            // ignore
+          }
+        }, 2000);
+      } catch {
+        // ignore
+      }
+    }
     if (job.status === 'queued' || job.status === 'running') {
       job.status = 'cancelled';
       job.log.push('[mediagrabber] Cancelled by user.');
@@ -1909,45 +2395,62 @@ async function startServer() {
   }
 
   function runScheduledTick() {
-    const nowLocal = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const nowKey = `${nowLocal.getFullYear()}-${pad(nowLocal.getMonth() + 1)}-${pad(nowLocal.getDate())}T${pad(nowLocal.getHours())}:${pad(nowLocal.getMinutes())}`;
-    const jobs = readJson<any[]>(SCHEDULE_FILE, []);
-    let changed = false;
-    for (const item of jobs) {
-      if (item.status === 'pending' && item.scheduled_time <= nowKey) {
-        const jobId = crypto.randomUUID();
-        const engine = detectEngine(item.url);
-        const qJob: JobRecord = {
-          job_id: jobId,
-          url: item.url,
-          mode: item.mode === 'audio' ? 'audio' : 'video',
-          engine,
-          status: 'queued',
-          progress: 0,
-          file: null,
-          thumbnail:
-            engine === 'SPOTIFY' || engine === 'YT MUSIC'
-              ? DEFAULT_MUSIC_THUMB
-              : engine === 'GALLERY'
-              ? DEFAULT_GALLERY_THUMB
-              : DEFAULT_YT_THUMB,
-          output_dir: null,
-          log: [`[scheduler] Fired scheduled job #${item.id}: ${item.url}`],
-          created_at: new Date().toISOString(),
-        };
-        queue.set(jobId, qJob);
-        void processJob(jobId);
-        item.status = 'fired';
-        item.fired_at = new Date().toISOString();
-        item.job_id = jobId;
-        changed = true;
+    try {
+      const nowLocal = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const nowKey = `${nowLocal.getFullYear()}-${pad(nowLocal.getMonth() + 1)}-${pad(nowLocal.getDate())}T${pad(nowLocal.getHours())}:${pad(nowLocal.getMinutes())}`;
+      const jobs = readJson<any[]>(SCHEDULE_FILE, []);
+      let changed = false;
+      for (const item of jobs) {
+        if (item.status === 'pending' && item.scheduled_time <= nowKey) {
+          try {
+            const jobId = crypto.randomUUID();
+            const engine = detectEngine(item.url);
+            const qJob: JobRecord = {
+              job_id: jobId,
+              url: item.url,
+              mode: item.mode === 'audio' ? 'audio' : 'video',
+              engine,
+              status: 'queued',
+              progress: 0,
+              file: null,
+              thumbnail:
+                engine === 'SPOTIFY' || engine === 'YT MUSIC'
+                  ? DEFAULT_MUSIC_THUMB
+                  : engine === 'GALLERY'
+                  ? DEFAULT_GALLERY_THUMB
+                  : DEFAULT_YT_THUMB,
+              output_dir: null,
+              log: [`[scheduler] Fired scheduled job #${item.id}: ${item.url}`],
+              created_at: new Date().toISOString(),
+            };
+            queue.set(jobId, qJob);
+            void processJob(jobId);
+            item.status = 'fired';
+            item.fired_at = new Date().toISOString();
+            item.job_id = jobId;
+            changed = true;
+            console.log(`[scheduler] fired job ${item.id}: ${item.url}`);
+          } catch (err: any) {
+            console.error(`[scheduler] failed to fire job ${item.id}:`, err);
+            item.status = 'failed';
+            item.fired_at = new Date().toISOString();
+            item.error = err?.message || String(err);
+            changed = true;
+          }
+        }
       }
+      if (changed) writeJson(SCHEDULE_FILE, jobs);
+    } catch (err) {
+      console.error('[scheduler] loop error:', err);
     }
-    if (changed) writeJson(SCHEDULE_FILE, jobs);
   }
 
-  setInterval(runScheduledTick, 15_000);
+  // Startup delay (v1.9.6 fix) so server finishes booting before running scheduled jobs
+  setTimeout(() => {
+    runScheduledTick();
+    setInterval(runScheduledTick, 15_000);
+  }, 5_000);
 
   app.get('/api/schedule', (_req, res) => {
     const jobs = readJson<any[]>(SCHEDULE_FILE, []);
@@ -2062,8 +2565,8 @@ async function startServer() {
       return res.json(versionCache.data);
     }
 
-    const current = 'v2.0-pre2';
-    let latest = 'v2.0-pre2';
+    const current = 'v2.0-pre3';
+    let latest = 'v2.0-pre3';
     let tags: string[] = [];
     let error: string | null = null;
 
@@ -2078,11 +2581,10 @@ async function startServer() {
         .map((line) => line.split('refs/tags/')[1]?.trim())
         .filter(Boolean) as string[];
       if (tags.length > 0) {
-        const latestTag = tags[tags.length - 1];
         if (tags.includes(current)) {
           latest = current;
         } else {
-          latest = latestTag;
+          latest = tags[tags.length - 1];
         }
       }
     } catch (err: any) {
@@ -2189,12 +2691,82 @@ async function startServer() {
     });
   });
 
+  // ---- Web Push Notifications ----
+  app.get('/api/notifications/vapid-public-key', (_req, res) => {
+    try {
+      const keys = ensureWebPushConfigured();
+      res.json({ publicKey: keys.publicKey });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to load VAPID public key' });
+    }
+  });
+
+  app.get('/api/notifications/status', (_req, res) => {
+    try {
+      const keys = ensureWebPushConfigured();
+      const subs = readJson<webpush.PushSubscription[]>(PUSH_SUBS_FILE, []);
+      res.json({
+        configured: true,
+        publicKey: keys.publicKey,
+        subscriptionCount: Array.isArray(subs) ? subs.length : 0,
+      });
+    } catch (err: any) {
+      res.status(500).json({ configured: false, error: err?.message || 'Push unavailable' });
+    }
+  });
+
+  const handlePushSubscribe = (req: express.Request, res: express.Response) => {
+    const sub = req.body as webpush.PushSubscription | undefined;
+    if (!sub || typeof sub.endpoint !== 'string' || !sub.endpoint) {
+      return res.status(400).json({ error: 'Valid PushSubscription payload is required.' });
+    }
+    ensureDirs();
+    const subs = readJson<webpush.PushSubscription[]>(PUSH_SUBS_FILE, []);
+    const filtered = Array.isArray(subs)
+      ? subs.filter((item) => item && item.endpoint !== sub.endpoint)
+      : [];
+    filtered.push(sub);
+    writeJson(PUSH_SUBS_FILE, filtered);
+    res.status(201).json({ ok: true, subscriptionCount: filtered.length });
+  };
+
+  app.post('/api/notifications/subscribe', handlePushSubscribe);
+  app.post('/api/subscribe', handlePushSubscribe);
+
+  app.post('/api/notifications/unsubscribe', (req, res) => {
+    const endpoint = String(req.body?.endpoint || '').trim();
+    if (!endpoint) {
+      return res.status(400).json({ error: 'endpoint is required' });
+    }
+    const subs = readJson<webpush.PushSubscription[]>(PUSH_SUBS_FILE, []);
+    const filtered = Array.isArray(subs)
+      ? subs.filter((item) => item && item.endpoint !== endpoint)
+      : [];
+    writeJson(PUSH_SUBS_FILE, filtered);
+    res.json({ ok: true, subscriptionCount: filtered.length });
+  });
+
+  app.post('/api/notifications/test', async (_req, res) => {
+    try {
+      const result = await sendPushNotification({
+        title: 'MediaGrabber',
+        body: 'Push notifications are active for completed and failed downloads.',
+        tag: 'mediagrabber-test',
+        url: '/',
+      });
+      res.json({ ok: true, ...result });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to send test push notification' });
+    }
+  });
+
   // ---- v2.0-v1 Source Bundle Export for Linux SSH Deployment ----
-  app.get('/api/server/export-bundle', async (_req, res) => {
+  app.get('/api/server/export-bundle', async (req, res) => {
     const active = getActiveUser();
     if (!active || active.role !== 'admin') {
       return res.status(403).json({ error: 'Administrator privileges required.' });
     }
+    const format = req.query.format === 'tar.gz' ? 'tar.gz' : 'zip';
     const allowlist = [
       'package.json',
       'server.ts',
@@ -2207,24 +2779,54 @@ async function startServer() {
       'src',
       'public',
       'deploy',
+      'grab',
     ].filter((item) => fs.existsSync(path.join(process.cwd(), item)));
 
-    const outTar = '/tmp/mediagrabber-v2.0-v1.tar.gz';
     try {
-      await execFileAsync(
-        'tar',
-        [
-          '-czf',
-          outTar,
-          '--exclude=node_modules',
-          '--exclude=dist',
-          '--exclude=.git',
-          '--exclude=.env',
-          ...allowlist,
-        ],
-        { cwd: process.cwd(), timeout: 15000 }
-      );
-      res.download(outTar, 'mediagrabber-v2.0-v1.tar.gz');
+      if (format === 'tar.gz') {
+        const outTar = '/tmp/mediagrabber-v2.0-pre3.tar.gz';
+        await execFileAsync(
+          'tar',
+          [
+            '-czf',
+            outTar,
+            '--exclude=node_modules',
+            '--exclude=dist',
+            '--exclude=.git',
+            '--exclude=.env',
+            ...allowlist,
+          ],
+          { cwd: process.cwd(), timeout: 15000 }
+        );
+        return res.download(outTar, 'mediagrabber-v2.0-pre3.tar.gz');
+      }
+
+      const outZip = '/tmp/mediagrabber-v2.0-pre3.zip';
+      const pyScript = `
+import os, sys, zipfile
+out_zip = sys.argv[1]
+items = sys.argv[2:]
+skip_dirs = {'node_modules', 'dist', '.git'}
+with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
+    for item in items:
+        if os.path.isfile(item):
+            if item != '.env':
+                zf.write(item, item)
+        elif os.path.isdir(item):
+            for root, dirs, files in os.walk(item):
+                dirs[:] = [d for d in dirs if d not in skip_dirs]
+                for f in files:
+                    if f == '.env':
+                        continue
+                    fp = os.path.join(root, f)
+                    zf.write(fp, fp)
+`;
+      await execFileAsync('python3', ['-c', pyScript, outZip, ...allowlist], {
+        cwd: process.cwd(),
+        timeout: 15000,
+      });
+      res.setHeader('Content-Type', 'application/zip');
+      return res.download(outZip, 'mediagrabber-v2.0-pre3.zip');
     } catch (err: any) {
       res.status(500).json({ error: err?.message || 'Failed to package source bundle' });
     }
@@ -2245,16 +2847,33 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    const indexHtml = path.join(distPath, 'index.html');
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+    }
     app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      if (fs.existsSync(indexHtml)) {
+        return res.sendFile(indexHtml);
+      }
+      return res.status(503).send('MediaGrabber frontend build not found. Run: npm run build');
     });
   }
+
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    console.error(`HTTP server error on ${HOST}:${PORT}:`, err.message);
+    if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
+      process.exit(1);
+    }
+  });
 
   httpServer.listen(PORT, HOST, () => {
     console.log(`MediaGrabber listening on http://${HOST}:${PORT}`);
   });
 }
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection:', reason);
+});
 
 startServer().catch((err) => {
   console.error('Failed to start MediaGrabber server:', err);

@@ -1,0 +1,38 @@
+[
+  {
+    "id": "hist-1795458996613-b231",
+    "url": "https://example.com/custom-dir-check",
+    "title": "custom dir check",
+    "thumbnail": "/src/assets/images/cover_youtube_sample_1795453949069.jpg",
+    "timestamp": "2026-11-23T18:36:36.613Z",
+    "source": "youtube",
+    "file": "/tmp/mg-custom-test/yt/example.com/2026/custom dir check.mp4"
+  },
+  {
+    "id": "hist-1",
+    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    "title": "Analog Synth Mastering Session",
+    "thumbnail": "/src/assets/images/cover_youtube_sample_1795453949069.jpg",
+    "timestamp": "2026-11-23T12:58:27.506Z",
+    "source": "youtube",
+    "file": "/app/applet/3188/YouTube/Studio_Sessions/2026/Analog_Synth_Mastering_Session.mp4"
+  },
+  {
+    "id": "hist-2",
+    "url": "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+    "title": "Klangwerk — Beam Study",
+    "thumbnail": "/src/assets/images/cover_music_album_1795453947963.jpg",
+    "timestamp": "2026-11-23T14:58:27.508Z",
+    "source": "spotify",
+    "file": "/app/applet/3188/Music/Klangwerk/Cobalt_Architecture/01_Beam_Study.mp3"
+  },
+  {
+    "id": "hist-3",
+    "url": "https://www.instagram.com/reel/CxampleReel01/",
+    "title": "Dawn Ridge Sequence",
+    "thumbnail": "/src/assets/images/cover_gallery_sample_1795453948674.jpg",
+    "timestamp": "2026-11-23T16:58:27.508Z",
+    "source": "gallery",
+    "file": "/app/applet/3188/Gallery/Alpine_Archive/2026/Dawn_Ridge_Sequence.mp4"
+  }
+]

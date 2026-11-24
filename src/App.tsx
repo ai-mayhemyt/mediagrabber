@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActiveView,
   HistoryItem,
@@ -16,6 +16,8 @@ import { HistoryView } from './components/HistoryView';
 import { UtilitiesView } from './components/UtilitiesView';
 import { SettingsView } from './components/SettingsView';
 import { AuthScreen } from './components/AuthScreen';
+import { OfflineIndicator } from './components/OfflineIndicator';
+import { useNotifications } from './hooks/useNotifications';
 import {
   AccountModal,
   ConfirmDialog,
@@ -36,7 +38,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [storage, setStorage] = useState<StorageMap>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [appVersion, setAppVersion] = useState('v2.0-v1');
+  const [appVersion, setAppVersion] = useState('v2.0-pre3');
 
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
   const [themeColors, setThemeColors] = useState<ThemeColors>(THEME_PRESETS.default.colors);
@@ -69,6 +71,9 @@ export default function App() {
       setToasts((prev) => prev.filter((t) => t.id !== id));
     }, 4000);
   }, []);
+
+  const notifications = useNotifications({ onNotify: notify });
+  const prevJobStatusesRef = useRef<Map<string, Job['status']> | null>(null);
 
   const askConfirm = useCallback(
     (title: string, message: string, onAccept: () => void) => {
@@ -136,13 +141,30 @@ export default function App() {
       const res = await fetch('/api/queue', { cache: 'no-store' });
       if (res.ok) {
         const data = (await res.json()) as Job[];
+        const nextStatuses = new Map<string, Job['status']>();
+        const prevStatuses = prevJobStatusesRef.current;
+
+        for (const job of data) {
+          nextStatuses.set(job.job_id, job.status);
+          if (prevStatuses) {
+            const oldStatus = prevStatuses.get(job.job_id);
+            if (
+              (oldStatus === 'queued' || oldStatus === 'running') &&
+              (job.status === 'done' || job.status === 'failed')
+            ) {
+              notifications.notifyJobTransition(job);
+            }
+          }
+        }
+        prevJobStatusesRef.current = nextStatuses;
+
         setJobs(data);
         setLogJob((curr) => (curr ? data.find((j) => j.job_id === curr.job_id) || curr : null));
       }
     } catch {
       // ignore
     }
-  }, []);
+  }, [notifications]);
 
   const fetchHistory = useCallback(async () => {
     try {
@@ -172,7 +194,7 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.current) {
-          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre2';
+          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0-pre3';
           setAppVersion(shortVer);
         }
       })
@@ -385,11 +407,15 @@ export default function App() {
           themeMode={themeMode}
           version={appVersion}
           searchQuery={searchQuery}
+          notificationsEnabled={notifications.isEnabled}
+          notificationsBusy={notifications.busy}
           onSearchChange={setSearchQuery}
+          onToggleNotifications={() => void notifications.toggleNotifications()}
           onToggleTheme={handleToggleTheme}
           onOpenTheme={() => setThemeOpen(true)}
           onShareQr={() => setQrUrl(window.location.href)}
           onLogout={handleLogout}
+          onPwaInstalled={() => notify('success', 'MediaGrabber installed as an app.')}
         />
 
         <main className="flex-1 p-5 sm:p-6 overflow-y-auto">
@@ -446,7 +472,20 @@ export default function App() {
           )}
 
           {activeView === 'settings' && user?.role === 'admin' && (
-            <SettingsView onNotify={notify} onStorageRefresh={() => void fetchStorage()} />
+            <SettingsView
+              onNotify={notify}
+              onStorageRefresh={() => void fetchStorage()}
+              notifications={{
+                isEnabled: notifications.isEnabled,
+                pushSubscribed: notifications.pushSubscribed,
+                permission: notifications.permission,
+                busy: notifications.busy,
+                onToggle: async () => {
+                  await notifications.toggleNotifications();
+                },
+                onTest: notifications.sendTestNotification,
+              }}
+            />
           )}
         </main>
       </div>
@@ -496,6 +535,7 @@ export default function App() {
         toasts={toasts}
         onDismiss={(id) => setToasts((prev) => prev.filter((t) => t.id !== id))}
       />
+      <OfflineIndicator />
     </div>
   );
 }

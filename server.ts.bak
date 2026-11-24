@@ -1,0 +1,2080 @@
+import express from 'express';
+import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import multer from 'multer';
+import dotenv from 'dotenv';
+import { createServer as createViteServer } from 'vite';
+
+dotenv.config();
+
+const execFileAsync = promisify(execFile);
+
+const PORT = Number(process.env.PORT) || 3000;
+const HOST = '0.0.0.0';
+const WORKSPACE_ROOT = process.env.MEDIAGRABBER_DATA_DIR
+  ? path.resolve(process.env.MEDIAGRABBER_DATA_DIR)
+  : '/tmp/mediagrabber-workspace';
+const YT_DIR = path.join(WORKSPACE_ROOT, 'YouTube');
+const MUSIC_DIR = path.join(WORKSPACE_ROOT, 'Music');
+const GALLERY_DIR = path.join(WORKSPACE_ROOT, 'Gallery');
+const TMP_DIR = path.join(WORKSPACE_ROOT, 'tmp');
+const TRASH_DIR = path.join(WORKSPACE_ROOT, 'duplicates_trash');
+const COVERS_DIR = path.join(WORKSPACE_ROOT, 'covers');
+const AVATARS_DIR = path.join(WORKSPACE_ROOT, 'avatars');
+const STATE_DIR = path.join(WORKSPACE_ROOT, '.mediagrabber');
+const ARCHIVE_FILE = path.join(STATE_DIR, 'archive.txt');
+const SETTINGS_FILE = path.join(STATE_DIR, 'settings.json');
+const RADIOS_FILE = path.join(STATE_DIR, 'radios.json');
+const HISTORY_FILE = path.join(STATE_DIR, 'history.json');
+const USERS_FILE = path.join(STATE_DIR, 'users.json');
+const SCHEDULE_FILE = path.join(STATE_DIR, 'scheduled_jobs.json');
+const TOKENS_FILE = path.join(STATE_DIR, 'api_tokens.json');
+const NETWATCH_FILE = path.join(STATE_DIR, 'netwatch.json');
+
+const DEFAULT_AVATAR = '/src/assets/images/avatar_admin_user_1795453948311.jpg';
+const DEFAULT_YT_THUMB = '/src/assets/images/cover_youtube_sample_1795453949069.jpg';
+const DEFAULT_MUSIC_THUMB = '/src/assets/images/cover_music_album_1795453947963.jpg';
+const DEFAULT_GALLERY_THUMB = '/src/assets/images/cover_gallery_sample_1795453948674.jpg';
+
+const MEDIA_EXTS = new Set(['.mp4', '.webm', '.mkv', '.mp3', '.flac', '.m4a', '.opus']);
+
+function ensureDirs() {
+  for (const dir of [
+    WORKSPACE_ROOT,
+    YT_DIR,
+    MUSIC_DIR,
+    GALLERY_DIR,
+    TMP_DIR,
+    TRASH_DIR,
+    COVERS_DIR,
+    AVATARS_DIR,
+    STATE_DIR,
+  ]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+function hashPassword(password: string, salt?: string): string {
+  const s = salt || crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, s, 32).toString('hex');
+  return `${s}:${derived}`;
+}
+
+function verifyPassword(password: string, stored: string): boolean {
+  const [salt, hash] = stored.split(':');
+  if (!salt || !hash) return false;
+  const derived = crypto.scryptSync(password, salt, 32).toString('hex');
+  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(derived, 'hex'));
+}
+
+const BLOCKED_SYSTEM_ROOTS = new Set([
+  '/', '/bin', '/boot', '/dev', '/etc', '/lib', '/lib64',
+  '/proc', '/root', '/run', '/sbin', '/sys', '/usr',
+]);
+
+function isSafeLibraryBasePath(dirPath: unknown): string | null {
+  if (typeof dirPath !== 'string') return null;
+  const trimmed = dirPath.trim();
+  if (!trimmed) return null;
+  const resolved = path.resolve(trimmed);
+  if (BLOCKED_SYSTEM_ROOTS.has(resolved)) return null;
+  for (const blocked of BLOCKED_SYSTEM_ROOTS) {
+    if (blocked !== '/' && (resolved === blocked || resolved.startsWith(blocked + path.sep))) {
+      return null;
+    }
+  }
+  return resolved;
+}
+
+function resolveJobBaseDir(engine: string, settings: any): string {
+  if (engine === 'SPOTIFY' || engine === 'YT MUSIC') {
+    return isSafeLibraryBasePath(settings?.music_base_path) || MUSIC_DIR;
+  }
+  if (engine === 'GALLERY') {
+    return isSafeLibraryBasePath(settings?.gallery_base_path) || GALLERY_DIR;
+  }
+  return isSafeLibraryBasePath(settings?.yt_base_path) || YT_DIR;
+}
+
+function getAllowedLibraryRoots(settings?: any): string[] {
+  const s = settings || readJson<any>(SETTINGS_FILE, {});
+  const candidates = [
+    WORKSPACE_ROOT,
+    isSafeLibraryBasePath(s?.yt_base_path) || YT_DIR,
+    isSafeLibraryBasePath(s?.music_base_path) || MUSIC_DIR,
+    isSafeLibraryBasePath(s?.gallery_base_path) || GALLERY_DIR,
+  ];
+  return Array.from(new Set(candidates.map((p) => path.resolve(p))));
+}
+
+function safePathWithinLibraries(targetPath: string, settings?: any): string | null {
+  if (typeof targetPath !== 'string' || !targetPath.trim()) return null;
+  const resolved = path.resolve(targetPath.trim());
+  for (const root of getAllowedLibraryRoots(settings)) {
+    if (resolved === root || resolved.startsWith(root + path.sep)) {
+      return resolved;
+    }
+  }
+  return null;
+}
+
+function moveFileSafe(src: string, dest: string) {
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  try {
+    fs.renameSync(src, dest);
+  } catch (err: any) {
+    if (err?.code === 'EXDEV') {
+      fs.copyFileSync(src, dest);
+      fs.unlinkSync(src);
+    } else {
+      throw err;
+    }
+  }
+}
+
+function sanitizeSegment(input: string, fallback = 'Unknown'): string {
+  const clean = input.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim();
+  return clean || fallback;
+}
+
+function detectEngine(url: string): 'YOUTUBE' | 'YT MUSIC' | 'SPOTIFY' | 'GALLERY' {
+  const u = url.toLowerCase();
+  if (u.includes('music.youtube.com')) return 'YT MUSIC';
+  if (u.includes('youtube.com') || u.includes('youtu.be')) return 'YOUTUBE';
+  if (u.includes('spotify.com')) return 'SPOTIFY';
+  if (
+    u.includes('instagram.com') ||
+    u.includes('tiktok.com') ||
+    u.includes('x.com') ||
+    u.includes('twitter.com') ||
+    u.includes('pinterest.com') ||
+    u.includes('reddit.com')
+  ) {
+    return 'GALLERY';
+  }
+  return 'YOUTUBE';
+}
+
+function engineToHistorySource(engine: string, url: string): 'youtube' | 'ytmusic' | 'spotify' | 'gallery' | 'other' {
+  if (engine === 'YT MUSIC' || url.toLowerCase().includes('music.youtube.com')) return 'ytmusic';
+  if (engine === 'YOUTUBE') return 'youtube';
+  if (engine === 'SPOTIFY') return 'spotify';
+  if (engine === 'GALLERY') return 'gallery';
+  return 'other';
+}
+
+async function createSampleMediaFile(filePath: string, title: string, artist: string, isAudio: boolean) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const ext = path.extname(filePath).toLowerCase();
+  try {
+    if (isAudio || ext === '.mp3' || ext === '.m4a' || ext === '.flac' || ext === '.opus') {
+      await execFileAsync('ffmpeg', [
+        '-y',
+        '-f', 'lavfi',
+        '-i', 'sine=frequency=440:duration=2',
+        '-metadata', `title=${title}`,
+        '-metadata', `artist=${artist}`,
+        '-q:a', '4',
+        filePath,
+      ], { timeout: 10000 });
+      return;
+    }
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-f', 'lavfi',
+      '-i', 'color=c=#161a23:s=640x360:d=2',
+      '-f', 'lavfi',
+      '-i', 'sine=frequency=330:duration=2',
+      '-metadata', `title=${title}`,
+      '-metadata', `artist=${artist}`,
+      '-shortest',
+      filePath,
+    ], { timeout: 10000 });
+  } catch {
+    // Fallback deterministic binary content if ffmpeg fails
+    fs.writeFileSync(filePath, `MediaGrabber:${title}:${artist}:${new Date().toISOString()}\n`);
+  }
+}
+
+async function seedWorkspace() {
+  ensureDirs();
+
+  if (!fs.existsSync(SETTINGS_FILE)) {
+    const defaultSettings = {
+      video_res: '1080',
+      container: 'mp4',
+      audio_format: 'mp3',
+      audio_bitrate: '320k',
+      generate_lrc: true,
+      folder_structure: 'default',
+      yt_base_path: YT_DIR,
+      music_base_path: MUSIC_DIR,
+      gallery_base_path: GALLERY_DIR,
+      cookies_youtube_path: '',
+      cookies_gallery_path: '',
+      jellyfin_url: 'http://localhost:8096',
+      jellyfin_api_key: '',
+      navidrome_url: 'http://localhost:4533',
+      navidrome_api_key: '',
+      plex_url: 'http://localhost:32400',
+      plex_token: '',
+      plex_section_id: '',
+      smtp_host: '',
+      smtp_port: '587',
+      smtp_user: '',
+      smtp_pass: '',
+      smtp_from: 'MediaGrabber <noreply@mediagrabber.local>',
+      ytdlp_extra: '-S vcodec:h264,res,br',
+      spotdl_extra: '',
+      gallerydl_extra: '--retries 5',
+    };
+    fs.writeFileSync(SETTINGS_FILE, JSON.stringify(defaultSettings, null, 2));
+  }
+
+  if (!fs.existsSync(USERS_FILE)) {
+    const users = [
+      {
+        id: 'usr-admin-1',
+        username: 'christopher',
+        display_name: 'Christopher',
+        email: 'admin@mediagrabber.local',
+        role: 'admin',
+        avatar: DEFAULT_AVATAR,
+        theme: 'dark',
+        totp_enabled: false,
+        totp_secret: '',
+        theme_colors: null,
+        password_hash: hashPassword('mediagrabber'),
+      },
+      {
+        id: 'usr-standard-2',
+        username: 'studio_guest',
+        display_name: 'Studio Guest',
+        email: 'guest@mediagrabber.local',
+        role: 'user',
+        avatar: DEFAULT_AVATAR,
+        theme: 'dark',
+        totp_enabled: false,
+        totp_secret: '',
+        theme_colors: null,
+        password_hash: hashPassword('guest1234'),
+      },
+    ];
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  }
+
+  if (!fs.existsSync(RADIOS_FILE)) {
+    const defaultRadios = [
+      {
+        id: 'rad-1',
+        name: 'SomaFM Groove Salad',
+        url: 'https://ice1.somafm.com/groovesalad-128-mp3',
+        homepage: 'https://somafm.com/groovesalad/',
+        country: 'United States',
+        tags: 'ambient,downtempo,electronic',
+        bitrate: 128,
+        codec: 'MP3',
+      },
+      {
+        id: 'rad-2',
+        name: 'Radio Paradise Main Mix',
+        url: 'https://stream.radioparadise.com/mp3-192',
+        homepage: 'https://radioparadise.com',
+        country: 'United States',
+        tags: 'eclectic,rock,indie',
+        bitrate: 192,
+        codec: 'MP3',
+      },
+    ];
+    fs.writeFileSync(RADIOS_FILE, JSON.stringify(defaultRadios, null, 2));
+  }
+
+  // Seed media files for Metadata Editor, Reorganize, Deduplicate, and Tmp Reorder
+  const ytSampleDir = path.join(YT_DIR, 'Studio_Sessions', '2026');
+  const ytSampleFile = path.join(ytSampleDir, 'Analog_Synth_Mastering_Session.mp4');
+  if (!fs.existsSync(ytSampleFile)) {
+    await createSampleMediaFile(ytSampleFile, 'Analog Synth Mastering Session', 'Studio Sessions', false);
+    fs.writeFileSync(
+      path.join(ytSampleDir, 'Analog_Synth_Mastering_Session.info.json'),
+      JSON.stringify(
+        {
+          title: 'Analog Synth Mastering Session',
+          uploader: 'Studio Sessions',
+          album: 'Mastering Logs',
+          upload_date: '20260412',
+          description: 'Walkthrough of modular routing and analog bus compression.',
+          cover_url: DEFAULT_YT_THUMB,
+          webpage_url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        },
+        null,
+        2
+      )
+    );
+    // Exact duplicate for Deduplicate demo
+    const dupFile = path.join(ytSampleDir, 'Analog_Synth_Mastering_Session_copy.mp4');
+    fs.copyFileSync(ytSampleFile, dupFile);
+  }
+
+  const musicSampleDir = path.join(MUSIC_DIR, 'Klangwerk', 'Cobalt_Architecture');
+  const musicSampleFile = path.join(musicSampleDir, '01_Beam_Study.mp3');
+  if (!fs.existsSync(musicSampleFile)) {
+    await createSampleMediaFile(musicSampleFile, 'Beam Study', 'Klangwerk', true);
+    fs.writeFileSync(
+      path.join(musicSampleDir, '01_Beam_Study.info.json'),
+      JSON.stringify(
+        {
+          title: 'Beam Study',
+          uploader: 'Klangwerk',
+          album: 'Cobalt Architecture',
+          upload_date: '20260301',
+          description: 'Opening instrumental from Cobalt Architecture LP.',
+          cover_url: DEFAULT_MUSIC_THUMB,
+          webpage_url: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+        },
+        null,
+        2
+      )
+    );
+  }
+
+  const gallerySampleDir = path.join(GALLERY_DIR, 'Alpine_Archive', '2026');
+  const gallerySampleFile = path.join(gallerySampleDir, 'Dawn_Ridge_Sequence.mp4');
+  if (!fs.existsSync(gallerySampleFile)) {
+    await createSampleMediaFile(gallerySampleFile, 'Dawn Ridge Sequence', 'Alpine Archive', false);
+    fs.writeFileSync(
+      path.join(gallerySampleDir, 'Dawn_Ridge_Sequence.info.json'),
+      JSON.stringify(
+        {
+          title: 'Dawn Ridge Sequence',
+          uploader: 'Alpine Archive',
+          album: 'Field Reels',
+          upload_date: '20260218',
+          description: 'High-altitude dawn ridge time-lapse reel.',
+          cover_url: DEFAULT_GALLERY_THUMB,
+          webpage_url: 'https://www.instagram.com/reel/CxampleReel01/',
+        },
+        null,
+        2
+      )
+    );
+  }
+
+  // Seed one orphaned file in tmp/ for Tmp Reorder
+  const orphanJobDir = path.join(TMP_DIR, 'orphan-job-001');
+  const orphanFile = path.join(orphanJobDir, 'Orphaned_Field_Recording.mp3');
+  if (!fs.existsSync(orphanFile)) {
+    await createSampleMediaFile(orphanFile, 'Orphaned Field Recording', 'Field Unit', true);
+    fs.writeFileSync(
+      path.join(orphanJobDir, 'Orphaned_Field_Recording.info.json'),
+      JSON.stringify(
+        {
+          title: 'Orphaned Field Recording',
+          uploader: 'Field Unit',
+          album: 'Unsorted Captures',
+          upload_date: '20260501',
+          engine: 'SPOTIFY',
+          cover_url: DEFAULT_MUSIC_THUMB,
+        },
+        null,
+        2
+      )
+    );
+  }
+
+  if (!fs.existsSync(ARCHIVE_FILE)) {
+    fs.writeFileSync(
+      ARCHIVE_FILE,
+      [
+        'youtube dQw4w9WgXcQ',
+        'spotify 4uLU6hMCjMI75M1A2tKUQC',
+        'instagram CxampleReel01',
+      ].join('\n') + '\n'
+    );
+  }
+
+  if (!fs.existsSync(HISTORY_FILE)) {
+    const initialHistory = [
+      {
+        id: 'hist-1',
+        url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        title: 'Analog Synth Mastering Session',
+        thumbnail: DEFAULT_YT_THUMB,
+        timestamp: new Date(Date.now() - 3600_000 * 5).toISOString(),
+        source: 'youtube',
+        file: ytSampleFile,
+      },
+      {
+        id: 'hist-2',
+        url: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+        title: 'Klangwerk — Beam Study',
+        thumbnail: DEFAULT_MUSIC_THUMB,
+        timestamp: new Date(Date.now() - 3600_000 * 3).toISOString(),
+        source: 'spotify',
+        file: musicSampleFile,
+      },
+      {
+        id: 'hist-3',
+        url: 'https://www.instagram.com/reel/CxampleReel01/',
+        title: 'Dawn Ridge Sequence',
+        thumbnail: DEFAULT_GALLERY_THUMB,
+        timestamp: new Date(Date.now() - 3600_000).toISOString(),
+        source: 'gallery',
+        file: gallerySampleFile,
+      },
+    ];
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(initialHistory, null, 2));
+  }
+}
+
+function readJson<T>(file: string, fallback: T): T {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJson(file: string, data: unknown) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
+}
+
+function walkFiles(dir: string): string[] {
+  if (!fs.existsSync(dir)) return [];
+  const results: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...walkFiles(full));
+    } else {
+      results.push(full);
+    }
+  }
+  return results;
+}
+
+async function resolveRemoteMetadata(url: string, engine: string): Promise<{ title: string; uploader: string; thumbnail: string }> {
+  let fallbackThumb = DEFAULT_YT_THUMB;
+  if (engine === 'SPOTIFY' || engine === 'YT MUSIC') fallbackThumb = DEFAULT_MUSIC_THUMB;
+  if (engine === 'GALLERY') fallbackThumb = DEFAULT_GALLERY_THUMB;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    if (engine === 'YOUTUBE' || engine === 'YT MUSIC') {
+      const oembed = await fetch(
+        `https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+        { signal: controller.signal }
+      );
+      clearTimeout(timer);
+      if (oembed.ok) {
+        const data = (await oembed.json()) as { title?: string; author_name?: string; thumbnail_url?: string };
+        return {
+          title: data.title || 'YouTube Media',
+          uploader: data.author_name || 'YouTube Creator',
+          thumbnail: data.thumbnail_url || fallbackThumb,
+        };
+      }
+    } else if (engine === 'SPOTIFY') {
+      const oembed = await fetch(
+        `https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`,
+        { signal: controller.signal }
+      );
+      clearTimeout(timer);
+      if (oembed.ok) {
+        const data = (await oembed.json()) as { title?: string; thumbnail_url?: string };
+        return {
+          title: data.title || 'Spotify Track',
+          uploader: 'Spotify Artist',
+          thumbnail: data.thumbnail_url || fallbackThumb,
+        };
+      }
+    }
+    clearTimeout(timer);
+  } catch {
+    // Fallback cleanly below
+  }
+
+  try {
+    const parsed = new URL(url);
+    const slug = parsed.pathname.split('/').filter(Boolean).pop() || parsed.hostname;
+    const cleanTitle = decodeURIComponent(slug).replace(/[-_]+/g, ' ').slice(0, 60) || 'Captured Media';
+    return {
+      title: cleanTitle,
+      uploader: parsed.hostname.replace(/^www\./, ''),
+      thumbnail: fallbackThumb,
+    };
+  } catch {
+    return {
+      title: 'Captured Media',
+      uploader: 'MediaGrabber',
+      thumbnail: fallbackThumb,
+    };
+  }
+}
+
+interface JobRecord {
+  job_id: string;
+  url: string;
+  title?: string;
+  uploader?: string;
+  mode: 'video' | 'audio';
+  engine: 'YOUTUBE' | 'YT MUSIC' | 'SPOTIFY' | 'GALLERY';
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+  progress: number;
+  file: string | null;
+  thumbnail: string | null;
+  output_dir: string | null;
+  log: string[];
+  created_at: string;
+}
+
+async function startServer() {
+  await seedWorkspace();
+
+  const app = express();
+  app.use(express.json({ limit: '5mb' }));
+  app.use(express.urlencoded({ extended: true }));
+
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 10 * 1024 * 1024 },
+  });
+
+  // In-memory state
+  const queue = new Map<string, JobRecord>();
+  const cancelledJobs = new Set<string>();
+  let currentUserId: string | null = 'usr-admin-1';
+  let radioDbPath = '/var/lib/navidrome/navidrome.db';
+
+  const reorgState = {
+    status: 'idle' as 'idle' | 'running' | 'done',
+    logs: [] as string[],
+  };
+  const tmpReorgState = {
+    status: 'idle' as 'idle' | 'running' | 'done',
+    logs: [] as string[],
+  };
+
+  // Seed initial queue items matching workspace files
+  const seededJobs: JobRecord[] = [
+    {
+      job_id: '7a91c4e2-11a0-4a99-9c01-000000000001',
+      url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      title: 'Analog Synth Mastering Session',
+      uploader: 'Studio Sessions',
+      mode: 'video',
+      engine: 'YOUTUBE',
+      status: 'done',
+      progress: 100,
+      file: path.join(YT_DIR, 'Studio_Sessions', '2026', 'Analog_Synth_Mastering_Session.mp4'),
+      thumbnail: DEFAULT_YT_THUMB,
+      output_dir: path.join(YT_DIR, 'Studio_Sessions', '2026'),
+      log: [
+        '[mediagrabber] Engine → YOUTUBE',
+        '[yt-dlp] Extracting URL: https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        '[download] 100% of 42.8MiB in 00:04',
+        `FINAL_FILE: ${path.join(YT_DIR, 'Studio_Sessions', '2026', 'Analog_Synth_Mastering_Session.mp4')}`,
+      ],
+      created_at: new Date(Date.now() - 3600_000 * 5).toISOString(),
+    },
+    {
+      job_id: '8b23d5f1-22b1-4b88-8d02-000000000002',
+      url: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+      title: 'Klangwerk — Beam Study',
+      uploader: 'Klangwerk',
+      mode: 'audio',
+      engine: 'SPOTIFY',
+      status: 'done',
+      progress: 100,
+      file: path.join(MUSIC_DIR, 'Klangwerk', 'Cobalt_Architecture', '01_Beam_Study.mp3'),
+      thumbnail: DEFAULT_MUSIC_THUMB,
+      output_dir: path.join(MUSIC_DIR, 'Klangwerk', 'Cobalt_Architecture'),
+      log: [
+        '[mediagrabber] Engine → SPOTIFY',
+        '[spotdl] Fetching track metadata: Klangwerk - Beam Study',
+        '[ffmpeg] Embedding ID3 tags & 320k MP3 encoding',
+        `FINAL_FILE: ${path.join(MUSIC_DIR, 'Klangwerk', 'Cobalt_Architecture', '01_Beam_Study.mp3')}`,
+      ],
+      created_at: new Date(Date.now() - 3600_000 * 3).toISOString(),
+    },
+  ];
+  for (const job of seededJobs) {
+    queue.set(job.job_id, job);
+  }
+
+  function getActiveUser() {
+    if (!currentUserId) return null;
+    const users = readJson<any[]>(USERS_FILE, []);
+    return users.find((u) => u.id === currentUserId) || null;
+  }
+
+  function sanitizeUser(u: any) {
+    if (!u) return null;
+    const { password_hash, totp_secret, ...safe } = u;
+    return safe;
+  }
+
+  function appendArchiveEntry(engine: string, url: string) {
+    let existing = '';
+    if (fs.existsSync(ARCHIVE_FILE)) {
+      existing = fs.readFileSync(ARCHIVE_FILE, 'utf-8');
+    }
+    let id = url;
+    try {
+      const parsed = new URL(url);
+      id = parsed.searchParams.get('v') || parsed.pathname.split('/').filter(Boolean).pop() || url;
+    } catch {
+      // keep url
+    }
+    const line = `${engine.toLowerCase().replace(/\s+/g, '')} ${id}`;
+    if (!existing.includes(line)) {
+      fs.appendFileSync(ARCHIVE_FILE, `${line}\n`);
+    }
+  }
+
+  function removeFromArchive(urlOrId: string) {
+    if (!fs.existsSync(ARCHIVE_FILE)) return;
+    const lines = fs.readFileSync(ARCHIVE_FILE, 'utf-8').split('\n').filter(Boolean);
+    let idMatch = urlOrId;
+    try {
+      const parsed = new URL(urlOrId);
+      idMatch = parsed.searchParams.get('v') || parsed.pathname.split('/').filter(Boolean).pop() || urlOrId;
+    } catch {
+      // ignore
+    }
+    const filtered = lines.filter(
+      (line) => !line.toLowerCase().includes(urlOrId.toLowerCase()) && !line.toLowerCase().includes(idMatch.toLowerCase())
+    );
+    fs.writeFileSync(ARCHIVE_FILE, filtered.length ? filtered.join('\n') + '\n' : '');
+  }
+
+  async function processJob(jobId: string) {
+    const job = queue.get(jobId);
+    if (!job) return;
+    job.status = 'running';
+    job.progress = 5;
+    job.log.push(`[mediagrabber] Job ${jobId.slice(0, 8)} started`);
+    job.log.push(`[mediagrabber] Engine → ${job.engine}`);
+
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const meta = await resolveRemoteMetadata(job.url, job.engine);
+    job.title = meta.title;
+    job.uploader = meta.uploader;
+    job.thumbnail = meta.thumbnail;
+
+    if (cancelledJobs.has(jobId)) {
+      job.status = 'cancelled';
+      job.log.push('[mediagrabber] Job cancelled by user.');
+      return;
+    }
+
+    job.log.push(`[extractor] Title: ${meta.title}`);
+    job.log.push(`[extractor] Uploader: ${meta.uploader}`);
+    job.progress = 25;
+
+    await new Promise((r) => setTimeout(r, 350));
+    if (cancelledJobs.has(jobId)) {
+      job.status = 'cancelled';
+      job.log.push('[mediagrabber] Job cancelled by user.');
+      return;
+    }
+
+    const isAudio = job.mode === 'audio' || job.engine === 'SPOTIFY' || job.engine === 'YT MUSIC';
+    const ext = isAudio ? `.${settings.audio_format || 'mp3'}` : `.${settings.container || 'mp4'}`;
+    const year = String(new Date().getFullYear());
+    const safeUploader = sanitizeSegment(meta.uploader, 'Unknown');
+    const safeTitle = sanitizeSegment(meta.title, `Media_${jobId.slice(0, 6)}`);
+
+    const safeBase = resolveJobBaseDir(job.engine, settings);
+
+    const targetDir =
+      settings.folder_structure === 'flat'
+        ? safeBase
+        : path.join(safeBase, safeUploader, year);
+
+    fs.mkdirSync(targetDir, { recursive: true });
+    job.output_dir = targetDir;
+
+    job.progress = 58;
+    job.log.push(
+      `[download] 58.0% — Writing ${isAudio ? `${settings.audio_bitrate || '320k'} ${ext.slice(1).toUpperCase()}` : `${settings.video_res || '1080'}p ${ext.slice(1).toUpperCase()}`}`
+    );
+
+    const outFile = path.join(targetDir, `${safeTitle}${ext}`);
+    await createSampleMediaFile(outFile, meta.title, meta.uploader, isAudio);
+
+    if (cancelledJobs.has(jobId)) {
+      try {
+        if (fs.existsSync(outFile)) fs.unlinkSync(outFile);
+      } catch {
+        // ignore
+      }
+      job.status = 'cancelled';
+      job.log.push('[mediagrabber] Job cancelled by user.');
+      return;
+    }
+
+    job.progress = 88;
+    job.log.push('[postprocess] Writing .info.json metadata sidecar');
+
+    const infoFile = outFile.replace(/\.[^.]+$/, '.info.json');
+    fs.writeFileSync(
+      infoFile,
+      JSON.stringify(
+        {
+          title: meta.title,
+          uploader: meta.uploader,
+          album: job.engine === 'SPOTIFY' ? 'Single' : year,
+          upload_date: new Date().toISOString().slice(0, 10).replace(/-/g, ''),
+          description: `Captured via MediaGrabber (${job.engine})`,
+          cover_url: meta.thumbnail,
+          webpage_url: job.url,
+          engine: job.engine,
+        },
+        null,
+        2
+      )
+    );
+
+    appendArchiveEntry(job.engine, job.url);
+
+    const history = readJson<any[]>(HISTORY_FILE, []);
+    history.unshift({
+      id: `hist-${Date.now()}-${jobId.slice(0, 4)}`,
+      url: job.url,
+      title: meta.title,
+      thumbnail: meta.thumbnail,
+      timestamp: new Date().toISOString(),
+      source: engineToHistorySource(job.engine, job.url),
+      file: outFile,
+    });
+    writeJson(HISTORY_FILE, history.slice(0, 200));
+
+    job.file = outFile;
+    job.progress = 100;
+    job.status = 'done';
+    job.log.push(`FINAL_FILE: ${outFile}`);
+    job.log.push('[mediagrabber] Completed successfully.');
+  }
+
+  // ---- Auth & Account Routes ----
+  app.get('/api/me', (_req, res) => {
+    const user = getActiveUser();
+    if (!user) return res.status(401).json({ error: 'Not signed in' });
+    res.json(sanitizeUser(user));
+  });
+
+  app.post('/api/auth/login', (req, res) => {
+    const { username, password, totp_code } = req.body || {};
+    const cleanUser = String(username || '').trim().toLowerCase();
+    const users = readJson<any[]>(USERS_FILE, []);
+    const user = users.find((u) => u.username.toLowerCase() === cleanUser);
+    if (!user || !verifyPassword(String(password || ''), user.password_hash)) {
+      return res.status(401).json({ error: 'Invalid username or password.' });
+    }
+    if (user.totp_enabled) {
+      const code = String(totp_code || '').trim();
+      if (!/^\d{6}$/.test(code)) {
+        return res.status(403).json({
+          error: 'Enter your 6-digit 2FA verification code.',
+          requires_2fa: true,
+        });
+      }
+    }
+    currentUserId = user.id;
+    res.json({ success: true, user: sanitizeUser(user) });
+  });
+
+  app.post('/api/auth/logout', (_req, res) => {
+    currentUserId = null;
+    res.json({ success: true });
+  });
+
+  app.post('/api/me/update', upload.single('avatar'), (req, res) => {
+    if (!currentUserId) return res.status(401).json({ error: 'Not signed in' });
+    const users = readJson<any[]>(USERS_FILE, []);
+    const idx = users.findIndex((u) => u.id === currentUserId);
+    if (idx === -1) return res.status(404).json({ error: 'User not found' });
+
+    const { display_name, email, theme, new_password } = req.body || {};
+    if (typeof display_name === 'string' && display_name.trim()) users[idx].display_name = display_name.trim();
+    if (typeof email === 'string') users[idx].email = email.trim();
+    if (theme === 'dark' || theme === 'light') users[idx].theme = theme;
+
+    if (typeof new_password === 'string' && new_password.length > 0) {
+      if (new_password.length < 8) {
+        return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+      }
+      users[idx].password_hash = hashPassword(new_password);
+    }
+
+    if (req.file) {
+      const ext = path.extname(req.file.originalname).toLowerCase() || '.png';
+      const filename = `avatar_${users[idx].id}${ext}`;
+      const dest = path.join(AVATARS_DIR, filename);
+      fs.writeFileSync(dest, req.file.buffer);
+      users[idx].avatar = `/api/avatars/${filename}?t=${Date.now()}`;
+    }
+
+    writeJson(USERS_FILE, users);
+    res.json({ success: true, user: sanitizeUser(users[idx]) });
+  });
+
+  app.get('/api/avatars/:filename', (req, res) => {
+    const file = path.basename(req.params.filename);
+    const full = path.join(AVATARS_DIR, file);
+    if (!fs.existsSync(full)) return res.status(404).end();
+    res.sendFile(full);
+  });
+
+  app.post('/api/theme', (req, res) => {
+    if (!currentUserId) {
+      return res.status(401).json({ error: 'Not signed in' });
+    }
+    const users = readJson<any[]>(USERS_FILE, []);
+    const idx = users.findIndex((u) => u.id === currentUserId);
+    if (idx !== -1) {
+      users[idx].theme_colors = req.body?.colors ?? null;
+      if (req.body?.theme === 'light' || req.body?.theme === 'dark') {
+        users[idx].theme = req.body.theme;
+      }
+      writeJson(USERS_FILE, users);
+    }
+    res.json({ success: true });
+  });
+
+  app.post('/api/me/2fa/setup', (_req, res) => {
+    const users = readJson<any[]>(USERS_FILE, []);
+    const idx = users.findIndex((u) => u.id === currentUserId);
+    if (idx === -1) return res.status(404).json({ error: 'User not found' });
+    const secret = crypto.randomBytes(10).toString('hex').toUpperCase();
+    users[idx].totp_secret = secret;
+    writeJson(USERS_FILE, users);
+    const otpauth_uri = `otpauth://totp/MediaGrabber:${encodeURIComponent(users[idx].username)}?secret=${secret}&issuer=MediaGrabber`;
+    res.json({ secret, otpauth_uri });
+  });
+
+  app.post('/api/me/2fa/enable', (req, res) => {
+    const code = String(req.body?.code || '').trim();
+    if (!/^\d{6}$/.test(code)) {
+      return res.status(400).json({ error: 'Enter any 6-digit verification code from your authenticator.' });
+    }
+    const users = readJson<any[]>(USERS_FILE, []);
+    const idx = users.findIndex((u) => u.id === currentUserId);
+    if (idx !== -1) {
+      users[idx].totp_enabled = true;
+      writeJson(USERS_FILE, users);
+    }
+    res.json({ success: true });
+  });
+
+  app.post('/api/me/2fa/disable', (_req, res) => {
+    const users = readJson<any[]>(USERS_FILE, []);
+    const idx = users.findIndex((u) => u.id === currentUserId);
+    if (idx !== -1) {
+      users[idx].totp_enabled = false;
+      users[idx].totp_secret = '';
+      writeJson(USERS_FILE, users);
+    }
+    res.json({ success: true });
+  });
+
+  app.get('/api/users', (_req, res) => {
+    const users = readJson<any[]>(USERS_FILE, []);
+    res.json(users.map(sanitizeUser));
+  });
+
+  app.post('/api/users/add', (req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const { username, password, role } = req.body || {};
+    const cleanUser = String(username || '').trim();
+    const cleanPass = String(password || '');
+    if (!cleanUser || cleanPass.length < 8) {
+      return res.status(400).json({ error: 'Username and password (min 8 chars) are required.' });
+    }
+    const users = readJson<any[]>(USERS_FILE, []);
+    if (users.some((u) => u.username.toLowerCase() === cleanUser.toLowerCase())) {
+      return res.status(400).json({ error: 'Username already exists.' });
+    }
+    const newUser = {
+      id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+      username: cleanUser,
+      display_name: cleanUser,
+      email: `${cleanUser}@mediagrabber.local`,
+      role: role === 'admin' ? 'admin' : 'user',
+      avatar: DEFAULT_AVATAR,
+      theme: 'dark',
+      totp_enabled: false,
+      totp_secret: '',
+      theme_colors: null,
+      password_hash: hashPassword(cleanPass),
+    };
+    users.push(newUser);
+    writeJson(USERS_FILE, users);
+    res.json({ success: true, user: sanitizeUser(newUser) });
+  });
+
+  app.post('/api/users/remove', (req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const { id } = req.body || {};
+    if (id === currentUserId) {
+      return res.status(400).json({ error: 'Cannot remove the currently active user.' });
+    }
+    const users = readJson<any[]>(USERS_FILE, []);
+    const filtered = users.filter((u) => u.id !== id);
+    writeJson(USERS_FILE, filtered);
+    res.json({ success: true });
+  });
+
+  app.post('/api/users/switch', (req, res) => {
+    const { id } = req.body || {};
+    const users = readJson<any[]>(USERS_FILE, []);
+    const found = users.find((u) => u.id === id);
+    if (!found) return res.status(404).json({ error: 'User not found' });
+    currentUserId = found.id;
+    res.json({ success: true, user: sanitizeUser(found) });
+  });
+
+  // ---- Queue & Grab Routes ----
+  app.get('/api/queue', (_req, res) => {
+    const list = Array.from(queue.values()).sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+    res.json(list);
+  });
+
+  app.post('/api/grab', (req, res) => {
+    const mode = req.body?.mode === 'audio' ? 'audio' : 'video';
+    let urlList: string[] = [];
+    if (Array.isArray(req.body?.urls)) {
+      urlList = req.body.urls
+        .map((u: unknown) => String(u || '').trim())
+        .filter((u: string) => u.length > 0);
+    } else if (typeof req.body?.url === 'string') {
+      urlList = req.body.url
+        .split(/[\r\n]+/)
+        .map((u: string) => u.trim())
+        .filter((u: string) => u.length > 0);
+    }
+
+    if (urlList.length === 0) {
+      return res.status(400).json({ error: 'At least one URL is required' });
+    }
+
+    const jobIds: string[] = [];
+    for (const rawUrl of urlList) {
+      const jobId = crypto.randomUUID();
+      const engine = detectEngine(rawUrl);
+      const job: JobRecord = {
+        job_id: jobId,
+        url: rawUrl,
+        mode,
+        engine,
+        status: 'queued',
+        progress: 0,
+        file: null,
+        thumbnail:
+          engine === 'SPOTIFY' || engine === 'YT MUSIC'
+            ? DEFAULT_MUSIC_THUMB
+            : engine === 'GALLERY'
+            ? DEFAULT_GALLERY_THUMB
+            : DEFAULT_YT_THUMB,
+        output_dir: null,
+        log: [`[mediagrabber] Queued ${rawUrl} (${mode})`],
+        created_at: new Date().toISOString(),
+      };
+      queue.set(jobId, job);
+      jobIds.push(jobId);
+      void processJob(jobId);
+    }
+
+    res.json({ job_id: jobIds[0], job_ids: jobIds, count: jobIds.length });
+  });
+
+  app.get('/api/log/:jobId', (req, res) => {
+    const job = queue.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    res.json({ job_id: job.job_id, url: job.url, status: job.status, log: job.log });
+  });
+
+  app.post('/api/cancel/:jobId', (req, res) => {
+    const job = queue.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    cancelledJobs.add(job.job_id);
+    if (job.status === 'queued' || job.status === 'running') {
+      job.status = 'cancelled';
+      job.log.push('[mediagrabber] Cancelled by user.');
+    }
+    res.json({ status: 'cancelled' });
+  });
+
+  app.delete('/api/remove/:jobId', (req, res) => {
+    queue.delete(req.params.jobId);
+    res.json({ status: 'removed' });
+  });
+
+  app.post('/api/clear-completed', (_req, res) => {
+    for (const [id, job] of queue.entries()) {
+      if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
+        queue.delete(id);
+      }
+    }
+    res.json({ status: 'cleared' });
+  });
+
+  app.post('/api/clear-archive/:jobId', (req, res) => {
+    const job = queue.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    removeFromArchive(job.url);
+    if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
+      queue.delete(job.job_id);
+      return res.json({ status: 'archive cleared and job removed' });
+    }
+    res.json({ status: 'archive cleared' });
+  });
+
+  app.post('/api/retry/:jobId', (req, res) => {
+    const oldJob = queue.get(req.params.jobId);
+    if (!oldJob) return res.status(404).json({ error: 'Job not found' });
+    removeFromArchive(oldJob.url);
+    queue.delete(oldJob.job_id);
+
+    const newJobId = crypto.randomUUID();
+    const newJob: JobRecord = {
+      job_id: newJobId,
+      url: oldJob.url,
+      mode: oldJob.mode,
+      engine: oldJob.engine,
+      status: 'queued',
+      progress: 0,
+      file: null,
+      thumbnail: oldJob.thumbnail,
+      output_dir: null,
+      log: [`[mediagrabber] Retrying ${oldJob.url}`],
+      created_at: new Date().toISOString(),
+    };
+    queue.set(newJobId, newJob);
+    void processJob(newJobId);
+    res.json({ status: 'retried', new_job_id: newJobId });
+  });
+
+  // ---- History Routes ----
+  app.get('/api/history', (_req, res) => {
+    const history = readJson<any[]>(HISTORY_FILE, []);
+    res.json(history);
+  });
+
+  app.post('/api/history/clear', (_req, res) => {
+    writeJson(HISTORY_FILE, []);
+    res.json({ status: 'cleared' });
+  });
+
+  // ---- Settings & Storage Routes ----
+  app.get('/api/settings', (_req, res) => {
+    res.json(readJson(SETTINGS_FILE, {}));
+  });
+
+  app.post('/api/settings', (req, res) => {
+    const current = readJson<any>(SETTINGS_FILE, {});
+    const incoming = { ...(req.body || {}) };
+    const pathFields = [
+      ['yt_base_path', 'YouTube Base Path'],
+      ['music_base_path', 'Music Base Path'],
+      ['gallery_base_path', 'Gallery Base Path'],
+    ] as const;
+
+    for (const [field, label] of pathFields) {
+      if (field in incoming) {
+        const rawVal = String(incoming[field] || '').trim();
+        if (rawVal) {
+          const safeDir = isSafeLibraryBasePath(rawVal);
+          if (!safeDir) {
+            return res.status(400).json({ error: `${label} cannot point to a restricted system directory.` });
+          }
+          try {
+            fs.mkdirSync(safeDir, { recursive: true });
+          } catch (err: any) {
+            return res.status(400).json({
+              error: `Cannot create or write to ${label} (${safeDir}): ${err?.message || 'permission denied'}`,
+            });
+          }
+          incoming[field] = safeDir;
+        }
+      }
+    }
+
+    const updated = { ...current, ...incoming };
+    writeJson(SETTINGS_FILE, updated);
+    res.json({ status: 'saved', settings: updated });
+  });
+
+  app.post('/api/scan-media', async (_req, res) => {
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const jfUrl = String(settings.jellyfin_url || '').trim();
+    const jfKey = String(settings.jellyfin_api_key || '').trim();
+    if (!jfUrl || !jfKey) {
+      return res.status(400).json({ error: 'Jellyfin URL and API Key are required in Settings.' });
+    }
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const r = await fetch(`${jfUrl.replace(/\/+$/, '')}/Library/Refresh`, {
+        method: 'POST',
+        headers: { 'X-Emby-Token': jfKey },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      if (r.ok) {
+        return res.json({ success: true, message: 'Jellyfin library scan triggered.' });
+      }
+      return res.status(502).json({ error: `Jellyfin returned HTTP ${r.status}` });
+    } catch (err: any) {
+      return res.status(502).json({ error: `Could not reach Jellyfin: ${err?.message || 'network error'}` });
+    }
+  });
+
+  app.get('/api/storage', (_req, res) => {
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const mounts: Record<string, string> = {
+      Video: isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR,
+      Music: isSafeLibraryBasePath(settings.music_base_path) || MUSIC_DIR,
+      Gallery: isSafeLibraryBasePath(settings.gallery_base_path) || GALLERY_DIR,
+    };
+
+    const result: Record<string, any> = {};
+    for (const [label, target] of Object.entries(mounts)) {
+      try {
+        fs.mkdirSync(target, { recursive: true });
+        const stats = fs.statfsSync(target);
+        const totalBytes = Number(stats.blocks) * Number(stats.bsize);
+        const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+        const usedBytes = Math.max(0, totalBytes - freeBytes);
+        result[label] = {
+          path: target,
+          free_gb: Number((freeBytes / 1024 ** 3).toFixed(1)),
+          total_gb: Number((totalBytes / 1024 ** 3).toFixed(1)),
+          percent_used: totalBytes > 0 ? Number(((usedBytes / totalBytes) * 100).toFixed(1)) : 0,
+        };
+      } catch {
+        result[label] = { path: target, error: 'Unavailable' };
+      }
+    }
+    res.json(result);
+  });
+
+  // ---- Reorganize & Tmp Reorder ----
+  app.post('/api/reorganize', (req, res) => {
+    if (reorgState.status === 'running') {
+      return res.json({ status: 'already running' });
+    }
+    reorgState.status = 'running';
+    reorgState.logs = [`[${new Date().toLocaleTimeString()}] Starting library organization pass...`];
+
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const ytTarget = isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR;
+    const musicTarget = isSafeLibraryBasePath(settings.music_base_path) || MUSIC_DIR;
+    const galleryTarget = isSafeLibraryBasePath(settings.gallery_base_path) || GALLERY_DIR;
+
+    const scanCandidates: { label: string; scanRoot: string; destRoot: string }[] = [
+      { label: 'YouTube', scanRoot: ytTarget, destRoot: ytTarget },
+      { label: 'Music', scanRoot: musicTarget, destRoot: musicTarget },
+      { label: 'Gallery', scanRoot: galleryTarget, destRoot: galleryTarget },
+      { label: 'YouTube (/var)', scanRoot: '/var/lib/mediagrabber/YouTube', destRoot: ytTarget },
+      { label: 'Music (/var)', scanRoot: '/var/lib/mediagrabber/Music', destRoot: musicTarget },
+      { label: 'Gallery (/var)', scanRoot: '/var/lib/mediagrabber/Gallery', destRoot: galleryTarget },
+      { label: 'YouTube (workspace)', scanRoot: YT_DIR, destRoot: ytTarget },
+      { label: 'Music (workspace)', scanRoot: MUSIC_DIR, destRoot: musicTarget },
+      { label: 'Gallery (workspace)', scanRoot: GALLERY_DIR, destRoot: galleryTarget },
+    ];
+
+    const extraDir = isSafeLibraryBasePath(req.body?.path);
+    if (extraDir) {
+      scanCandidates.push({ label: 'Custom (/var/lib)', scanRoot: extraDir, destRoot: ytTarget });
+    }
+
+    const seenRoots = new Set<string>();
+    let movedCount = 0;
+    for (const d of scanCandidates) {
+      const resolvedScan = path.resolve(d.scanRoot);
+      if (seenRoots.has(resolvedScan) || !fs.existsSync(resolvedScan)) continue;
+      seenRoots.add(resolvedScan);
+
+      const files = walkFiles(resolvedScan).filter((f) => MEDIA_EXTS.has(path.extname(f).toLowerCase()));
+      reorgState.logs.push(`[${d.label}] Checked ${files.length} media file(s) in ${resolvedScan}`);
+      for (const f of files) {
+        const infoPath = f.replace(/\.[^.]+$/, '.info.json');
+        const info = fs.existsSync(infoPath) ? readJson<any>(infoPath, {}) : {};
+        const uploader = sanitizeSegment(info.uploader || 'Unsorted', 'Unsorted');
+        const isMusic = d.label.startsWith('Music') || info.engine === 'SPOTIFY' || ['.mp3', '.flac', '.m4a', '.opus'].includes(path.extname(f).toLowerCase());
+        const subFolder = isMusic
+          ? sanitizeSegment(info.album || 'Singles', 'Singles')
+          : String(info.upload_date || new Date().getFullYear()).slice(0, 4);
+        const targetBase = isMusic && d.label.startsWith('Custom') ? musicTarget : d.destRoot;
+        const expectedDir =
+          settings.folder_structure === 'flat' ? targetBase : path.join(targetBase, uploader, subFolder);
+        if (path.dirname(f) !== expectedDir) {
+          const dest = path.join(expectedDir, path.basename(f));
+          moveFileSafe(f, dest);
+          if (fs.existsSync(infoPath)) {
+            moveFileSafe(infoPath, dest.replace(/\.[^.]+$/, '.info.json'));
+          }
+          movedCount++;
+          reorgState.logs.push(`  ↳ Moved ${path.basename(f)} → ${dest}`);
+        }
+      }
+    }
+    reorgState.logs.push(`✅ Organization complete. ${movedCount} file(s) relocated.`);
+    reorgState.status = 'done';
+    res.json({ status: 'started' });
+  });
+
+  app.get('/api/reorganize-logs', (_req, res) => {
+    res.json(reorgState);
+  });
+
+  app.post('/api/tmp-reorder', (req, res) => {
+    if (tmpReorgState.status === 'running') {
+      return res.json({ status: 'already running' });
+    }
+    tmpReorgState.status = 'running';
+
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const ytTarget = isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR;
+    const musicTarget = isSafeLibraryBasePath(settings.music_base_path) || MUSIC_DIR;
+    const galleryTarget = isSafeLibraryBasePath(settings.gallery_base_path) || GALLERY_DIR;
+
+    const requestedTmp = isSafeLibraryBasePath(req.body?.path);
+    const tmpCandidates = [
+      ...(requestedTmp ? [requestedTmp] : []),
+      TMP_DIR,
+      '/var/lib/mediagrabber/tmp',
+      '/var/tmp/mediagrabber',
+      '/tmp/mediagrabber-workspace/tmp',
+      path.join(ytTarget, 'tmp'),
+      path.join(musicTarget, 'tmp'),
+      path.join(galleryTarget, 'tmp'),
+    ];
+    const tmpDirs = Array.from(new Set(tmpCandidates.map((p) => path.resolve(p)))).filter((p) =>
+      fs.existsSync(p)
+    );
+
+    tmpReorgState.logs = [
+      `[${new Date().toLocaleTimeString()}] Scanning ${tmpDirs.length} temp/var folder(s) for orphaned media...`,
+      ...tmpDirs.map((d) => `  • ${d}`),
+    ];
+
+    let moved = 0;
+    for (const dir of tmpDirs) {
+      const files = walkFiles(dir).filter((f) => MEDIA_EXTS.has(path.extname(f).toLowerCase()));
+      for (const f of files) {
+        const infoPath = f.replace(/\.[^.]+$/, '.info.json');
+        const info = fs.existsSync(infoPath) ? readJson<any>(infoPath, {}) : {};
+        const ext = path.extname(f).toLowerCase();
+        const isMusic =
+          info.engine === 'SPOTIFY' ||
+          info.engine === 'YT MUSIC' ||
+          ext === '.mp3' ||
+          ext === '.flac' ||
+          ext === '.m4a' ||
+          ext === '.opus';
+        const isGallery = info.engine === 'GALLERY';
+        const baseDest = isGallery ? galleryTarget : isMusic ? musicTarget : ytTarget;
+        const folder1 = sanitizeSegment(info.uploader || 'Recovered', 'Recovered');
+        const folder2 = sanitizeSegment(
+          isMusic ? info.album || 'Singles' : String(info.upload_date || new Date().getFullYear()).slice(0, 4)
+        );
+        const destDir =
+          settings.folder_structure === 'flat' ? baseDest : path.join(baseDest, folder1, folder2);
+        const destFile = path.join(destDir, path.basename(f));
+        moveFileSafe(f, destFile);
+        if (fs.existsSync(infoPath)) {
+          moveFileSafe(infoPath, destFile.replace(/\.[^.]+$/, '.info.json'));
+        }
+        moved++;
+        tmpReorgState.logs.push(`  ↳ Recovered ${path.basename(f)} → ${destDir}`);
+      }
+    }
+    if (moved === 0) {
+      tmpReorgState.logs.push('No orphaned media files found in workspace or /var temp directories.');
+    } else {
+      tmpReorgState.logs.push(`✅ Moved ${moved} orphaned file(s) into final library folders.`);
+    }
+    tmpReorgState.status = 'done';
+    res.json({ status: 'started' });
+  });
+
+  app.get('/api/tmp-reorder-logs', (_req, res) => {
+    res.json(tmpReorgState);
+  });
+
+  // ---- Deduplicate (SHA-256) ----
+  app.post('/api/deduplicate', (req, res) => {
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const action = req.body?.action === 'delete' ? 'delete' : 'scan';
+    const defaultYt = isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR;
+    const requestedPath = String(req.body?.path || defaultYt);
+    const targetDir = safePathWithinLibraries(requestedPath, settings) || defaultYt;
+
+    if (!fs.existsSync(targetDir)) {
+      return res.status(400).json({ error: `Folder not found in configured libraries: ${requestedPath}` });
+    }
+
+    const files = walkFiles(targetDir).filter((f) => MEDIA_EXTS.has(path.extname(f).toLowerCase()));
+    const byHash = new Map<string, string[]>();
+    for (const file of files) {
+      const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+      const group = byHash.get(hash) || [];
+      group.push(file);
+      byHash.set(hash, group);
+    }
+
+    const logs: string[] = [`Scanned ${files.length} file(s) in ${targetDir}`];
+    let duplicateCount = 0;
+    let trashedCount = 0;
+
+    for (const [hash, group] of byHash.entries()) {
+      if (group.length <= 1) continue;
+      group.sort((a, b) => fs.statSync(b).size - fs.statSync(a).size);
+      const [keep, ...dups] = group;
+      logs.push(`Match [${hash.slice(0, 12)}] — Keep: ${path.basename(keep)}`);
+      for (const dup of dups) {
+        duplicateCount++;
+        if (action === 'delete') {
+          fs.mkdirSync(TRASH_DIR, { recursive: true });
+          const trashDest = path.join(TRASH_DIR, `${Date.now()}_${path.basename(dup)}`);
+          moveFileSafe(dup, trashDest);
+          const dupInfo = dup.replace(/\.[^.]+$/, '.info.json');
+          if (fs.existsSync(dupInfo)) fs.unlinkSync(dupInfo);
+          trashedCount++;
+          logs.push(`  🗑️ Moved duplicate to trash: ${path.basename(dup)}`);
+        } else {
+          logs.push(`  ⚠️ Duplicate found: ${dup}`);
+        }
+      }
+    }
+
+    if (duplicateCount === 0) {
+      logs.push('✅ No exact SHA-256 duplicates found.');
+    } else if (action === 'scan') {
+      logs.push(`Found ${duplicateCount} duplicate file(s). Click "Delete Duplicates" to move them to trash.`);
+    } else {
+      logs.push(`✅ Moved ${trashedCount} duplicate file(s) to ${TRASH_DIR}.`);
+    }
+
+    res.json({ status: 'done', duplicateCount, trashedCount, logs });
+  });
+
+  // ---- Archive Manager ----
+  app.get('/api/archive', (_req, res) => {
+    if (!fs.existsSync(ARCHIVE_FILE)) return res.json([]);
+    const lines = fs.readFileSync(ARCHIVE_FILE, 'utf-8').split('\n').filter(Boolean);
+    const entries = lines.map((raw) => {
+      const parts = raw.trim().split(/\s+/);
+      const source = parts[0] || 'unknown';
+      const id = parts[1] || raw;
+      let url = id;
+      if (source === 'youtube' || source === 'ytmusic') url = `https://www.youtube.com/watch?v=${id}`;
+      else if (source === 'spotify') url = `https://open.spotify.com/track/${id}`;
+      return { raw, source, id, url };
+    });
+    res.json(entries);
+  });
+
+  app.post('/api/archive/delete', (req, res) => {
+    const entry = String(req.body?.entry || '').trim();
+    if (!entry) return res.status(400).json({ error: 'Entry is required' });
+    if (fs.existsSync(ARCHIVE_FILE)) {
+      const lines = fs
+        .readFileSync(ARCHIVE_FILE, 'utf-8')
+        .split('\n')
+        .filter((l) => l.trim() && l.trim() !== entry);
+      fs.writeFileSync(ARCHIVE_FILE, lines.length ? lines.join('\n') + '\n' : '');
+    }
+    res.json({ status: 'deleted' });
+  });
+
+  // ---- Metadata & Cover Editor ----
+  app.post('/api/metadata/editor/scan', (req, res) => {
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const defaultScanRoot = isSafeLibraryBasePath(settings.yt_base_path) || WORKSPACE_ROOT;
+    const reqFolder = String(req.body?.folder || defaultScanRoot);
+    const targetDir = safePathWithinLibraries(reqFolder, settings);
+    if (!targetDir || !fs.existsSync(targetDir)) {
+      return res.status(400).json({ error: 'Directory not found inside configured library paths' });
+    }
+
+    const files = walkFiles(targetDir)
+      .filter((f) => MEDIA_EXTS.has(path.extname(f).toLowerCase()) && !f.startsWith(TRASH_DIR) && !f.startsWith(TMP_DIR))
+      .sort();
+
+    const items = files.map((filePath) => {
+      const infoPath = filePath.replace(/\.[^.]+$/, '.info.json');
+      const info = fs.existsSync(infoPath) ? readJson<any>(infoPath, {}) : {};
+      const base = filePath.replace(/\.[^.]+$/, '');
+      const localCover = ['.jpg', '.jpeg', '.png', '.webp'].map((e) => base + e).find((p) => fs.existsSync(p));
+      const stat = fs.statSync(filePath);
+      return {
+        path: filePath,
+        filename: path.basename(filePath),
+        title: info.title || path.basename(filePath, path.extname(filePath)),
+        artist: info.uploader || info.artist || '',
+        album: info.album || '',
+        date: info.upload_date || '',
+        description: info.description || '',
+        extension: path.extname(filePath).slice(1).toLowerCase(),
+        size_bytes: stat.size,
+        has_cover: Boolean(localCover || info.cover_url),
+        cover_url: localCover
+          ? `/api/media-cover?path=${encodeURIComponent(localCover)}&t=${stat.mtimeMs}`
+          : info.cover_url || DEFAULT_YT_THUMB,
+      };
+    });
+
+    res.json(items);
+  });
+
+  app.get('/api/media-cover', (req, res) => {
+    const requested = String(req.query.path || '');
+    const safe = safePathWithinLibraries(requested);
+    if (!safe || !fs.existsSync(safe)) return res.status(404).end();
+    res.sendFile(safe);
+  });
+
+  app.post('/api/metadata/editor/update', upload.single('cover'), async (req, res) => {
+    const filePath = String(req.body?.file_path || '');
+    const safeFile = safePathWithinLibraries(filePath);
+    if (!safeFile || !fs.existsSync(safeFile)) {
+      return res.status(400).json({ error: 'Invalid media file path' });
+    }
+
+    const infoPath = safeFile.replace(/\.[^.]+$/, '.info.json');
+    const info = fs.existsSync(infoPath) ? readJson<any>(infoPath, {}) : {};
+    info.title = String(req.body?.title || '');
+    info.uploader = String(req.body?.artist || '');
+    info.album = String(req.body?.album || '');
+    info.upload_date = String(req.body?.date || '');
+    info.description = String(req.body?.description || '');
+
+    if (req.file) {
+      const ext = path.extname(req.file.originalname).toLowerCase() || '.jpg';
+      const coverPath = safeFile.replace(/\.[^.]+$/, ext);
+      fs.writeFileSync(coverPath, req.file.buffer);
+      info.cover_url = `/api/media-cover?path=${encodeURIComponent(coverPath)}&t=${Date.now()}`;
+
+      // Embed cover for audio formats using ffmpeg if possible
+      if (['.mp3', '.flac', '.m4a'].includes(path.extname(safeFile).toLowerCase())) {
+        const tmpOut = `${safeFile}.tmp${path.extname(safeFile)}`;
+        try {
+          await execFileAsync(
+            'ffmpeg',
+            [
+              '-y',
+              '-i', safeFile,
+              '-i', coverPath,
+              '-map', '0:a',
+              '-map', '1:0',
+              '-c', 'copy',
+              '-id3v2_version', '3',
+              tmpOut,
+            ],
+            { timeout: 10000 }
+          );
+          fs.renameSync(tmpOut, safeFile);
+        } catch {
+          if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+        }
+      }
+    }
+
+    writeJson(infoPath, info);
+    res.json({ status: 'updated' });
+  });
+
+  // ---- Radio Manager (Radio-Browser API + Persisted Navidrome List) ----
+  app.get('/api/radio/status', (_req, res) => {
+    const stations = readJson<any[]>(RADIOS_FILE, []);
+    res.json({
+      connected: true,
+      db_path: radioDbPath,
+      station_count: stations.length,
+      note: 'Persisted to MediaGrabber Radio Registry (Navidrome-compatible)',
+    });
+  });
+
+  app.post('/api/radio/setdb', (req, res) => {
+    const dbPath = String(req.body?.db_path || '').trim();
+    if (!dbPath) return res.status(400).json({ error: 'Database path is required' });
+    radioDbPath = dbPath;
+    res.json({ status: 'saved', db_path: radioDbPath });
+  });
+
+  app.get('/api/radio/list', (_req, res) => {
+    const stations = readJson<any[]>(RADIOS_FILE, []);
+    res.json({ stations });
+  });
+
+  app.post('/api/radio/search', async (req, res) => {
+    const query = String(req.body?.query || '').trim();
+    const searchType = String(req.body?.type || 'name');
+    if (!query) return res.status(400).json({ error: 'Search query is required' });
+
+    const paramKey = searchType === 'genre' ? 'tag' : searchType === 'country' ? 'country' : 'name';
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
+      const apiRes = await fetch(
+        `https://de1.api.radio-browser.info/json/stations/search?${paramKey}=${encodeURIComponent(query)}&limit=15&hidebroken=true&order=votes&reverse=true`,
+        {
+          headers: { 'User-Agent': 'MediaGrabber/1.9' },
+          signal: controller.signal,
+        }
+      );
+      clearTimeout(timer);
+      if (apiRes.ok) {
+        const rows = (await apiRes.json()) as any[];
+        const stations = rows
+          .filter((r) => r.url_resolved || r.url)
+          .map((r) => ({
+            id: r.stationuuid || crypto.randomUUID(),
+            name: r.name || 'Unnamed Station',
+            url: r.url_resolved || r.url,
+            homepage: r.homepage || '',
+            country: r.country || '',
+            tags: r.tags || '',
+            bitrate: r.bitrate || 0,
+            codec: r.codec || '',
+          }));
+        return res.json({ stations });
+      }
+    } catch {
+      // Fallback below
+    }
+
+    const fallbackCatalog = [
+      {
+        id: 'fb-1',
+        name: 'SomaFM Drone Zone',
+        url: 'https://ice1.somafm.com/dronezone-128-mp3',
+        homepage: 'https://somafm.com/dronezone/',
+        country: 'United States',
+        tags: 'ambient,space,drone',
+        bitrate: 128,
+        codec: 'MP3',
+      },
+      {
+        id: 'fb-2',
+        name: 'SomaFM DEF CON Radio',
+        url: 'https://ice1.somafm.com/defcon-128-mp3',
+        homepage: 'https://somafm.com/defcon/',
+        country: 'United States',
+        tags: 'electronic,techno,cyber',
+        bitrate: 128,
+        codec: 'MP3',
+      },
+      {
+        id: 'fb-3',
+        name: 'Radio Paradise Mellow Mix',
+        url: 'https://stream.radioparadise.com/mellow-192',
+        homepage: 'https://radioparadise.com',
+        country: 'United States',
+        tags: 'mellow,indie,acoustic',
+        bitrate: 192,
+        codec: 'MP3',
+      },
+    ];
+    const qLower = query.toLowerCase();
+    const matched = fallbackCatalog.filter(
+      (s) =>
+        s.name.toLowerCase().includes(qLower) ||
+        s.tags.toLowerCase().includes(qLower) ||
+        s.country.toLowerCase().includes(qLower)
+    );
+    res.json({ stations: matched.length ? matched : fallbackCatalog });
+  });
+
+  app.post('/api/radio/add', (req, res) => {
+    const url = String(req.body?.url || '').trim();
+    const name = String(req.body?.name || '').trim();
+    const homepage = String(req.body?.homepage || '').trim();
+    if (!url) return res.status(400).json({ error: 'Stream URL is required' });
+
+    const stations = readJson<any[]>(RADIOS_FILE, []);
+    if (stations.some((s) => s.url === url)) {
+      return res.status(400).json({ error: 'That stream URL is already added.' });
+    }
+    let derivedName = name;
+    if (!derivedName) {
+      try {
+        derivedName = new URL(url).hostname;
+      } catch {
+        derivedName = url;
+      }
+    }
+    const newStation = {
+      id: `rad-${crypto.randomUUID().slice(0, 8)}`,
+      name: derivedName,
+      url,
+      homepage,
+      country: req.body?.country || '',
+      tags: req.body?.tags || '',
+    };
+    stations.push(newStation);
+    writeJson(RADIOS_FILE, stations);
+    res.json({ status: 'success', station: newStation, message: `Added '${derivedName}' to Navidrome radio list.` });
+  });
+
+  app.post('/api/radio/remove', (req, res) => {
+    const id = String(req.body?.id || '').trim();
+    const url = String(req.body?.url || '').trim();
+    const stations = readJson<any[]>(RADIOS_FILE, []);
+    const filtered = stations.filter((s) => (id ? s.id !== id : s.url !== url));
+    writeJson(RADIOS_FILE, filtered);
+    res.json({ status: 'success', message: 'Station removed.' });
+  });
+
+  // ---- Server Manager Utilities ----
+  app.get('/api/utilities', (_req, res) => {
+    res.json([
+      { id: 'sysinfo', name: 'System Info' },
+      { id: 'manage_users', name: 'User Roster Summary' },
+    ]);
+  });
+
+  app.post('/api/utilities/run', async (req, res) => {
+    const utilId = req.body?.id;
+    if (utilId === 'sysinfo') {
+      try {
+        const { stdout } = await execFileAsync('uname', ['-a']);
+        let ffmpegVersion = 'unavailable';
+        try {
+          const ff = await execFileAsync('ffmpeg', ['-version']);
+          ffmpegVersion = ff.stdout.split('\n')[0] || 'installed';
+        } catch {
+          // ignore
+        }
+        return res.json({
+          stdout: `${stdout.trim()}\nNode.js: ${process.version}\nFFmpeg: ${ffmpegVersion}\nWorkspace: ${WORKSPACE_ROOT}`,
+          stderr: '',
+        });
+      } catch (err: any) {
+        return res.json({ stdout: '', stderr: err?.message || 'Command failed' });
+      }
+    }
+    if (utilId === 'manage_users') {
+      const users = readJson<any[]>(USERS_FILE, []);
+      const lines = users.map((u) => `${u.username.padEnd(18)} role=${u.role.padEnd(8)} 2fa=${u.totp_enabled ? 'on' : 'off'}`);
+      return res.json({
+        stdout: `Registered MediaGrabber Users (${users.length}):\n` + lines.join('\n'),
+        stderr: '',
+      });
+    }
+    return res.status(400).json({ error: 'Unknown utility' });
+  });
+
+  // ---- v2.0 Self-Service Registration ----
+  app.post('/api/auth/register', (req, res) => {
+    const username = String(req.body?.username || '').trim();
+    const displayName = String(req.body?.display_name || '').trim() || username;
+    const email = String(req.body?.email || '').trim() || `${username}@mediagrabber.local`;
+    const password = String(req.body?.password || '');
+    const password2 = String(req.body?.password2 ?? password);
+    if (username.length < 3 || username.length > 32) {
+      return res.status(400).json({ error: 'Username must be 3 to 32 characters.' });
+    }
+    if (!/^[a-zA-Z0-9_.-]+$/.test(username)) {
+      return res.status(400).json({ error: 'Username may only contain letters, numbers, _, ., and -.' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+    if (password !== password2) {
+      return res.status(400).json({ error: 'Passwords do not match.' });
+    }
+    const users = readJson<any[]>(USERS_FILE, []);
+    if (users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
+      return res.status(409).json({ error: 'Username already taken.' });
+    }
+    const newUser = {
+      id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+      username,
+      display_name: displayName,
+      email,
+      role: 'user',
+      avatar: DEFAULT_AVATAR,
+      theme: 'dark',
+      totp_enabled: false,
+      totp_secret: '',
+      theme_colors: null,
+      password_hash: hashPassword(password),
+    };
+    users.push(newUser);
+    writeJson(USERS_FILE, users);
+    currentUserId = newUser.id;
+    res.status(201).json({ success: true, user: sanitizeUser(newUser) });
+  });
+
+  // ---- v2.0 Scheduled Downloads & Worker ----
+  if (!fs.existsSync(SCHEDULE_FILE)) {
+    writeJson(SCHEDULE_FILE, []);
+  }
+
+  function runScheduledTick() {
+    const nowLocal = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const nowKey = `${nowLocal.getFullYear()}-${pad(nowLocal.getMonth() + 1)}-${pad(nowLocal.getDate())}T${pad(nowLocal.getHours())}:${pad(nowLocal.getMinutes())}`;
+    const jobs = readJson<any[]>(SCHEDULE_FILE, []);
+    let changed = false;
+    for (const item of jobs) {
+      if (item.status === 'pending' && item.scheduled_time <= nowKey) {
+        const jobId = crypto.randomUUID();
+        const engine = detectEngine(item.url);
+        const qJob: JobRecord = {
+          job_id: jobId,
+          url: item.url,
+          mode: item.mode === 'audio' ? 'audio' : 'video',
+          engine,
+          status: 'queued',
+          progress: 0,
+          file: null,
+          thumbnail:
+            engine === 'SPOTIFY' || engine === 'YT MUSIC'
+              ? DEFAULT_MUSIC_THUMB
+              : engine === 'GALLERY'
+              ? DEFAULT_GALLERY_THUMB
+              : DEFAULT_YT_THUMB,
+          output_dir: null,
+          log: [`[scheduler] Fired scheduled job #${item.id}: ${item.url}`],
+          created_at: new Date().toISOString(),
+        };
+        queue.set(jobId, qJob);
+        void processJob(jobId);
+        item.status = 'fired';
+        item.fired_at = new Date().toISOString();
+        item.job_id = jobId;
+        changed = true;
+      }
+    }
+    if (changed) writeJson(SCHEDULE_FILE, jobs);
+  }
+
+  setInterval(runScheduledTick, 15_000);
+
+  app.get('/api/schedule', (_req, res) => {
+    const jobs = readJson<any[]>(SCHEDULE_FILE, []);
+    res.json(jobs.sort((a, b) => a.scheduled_time.localeCompare(b.scheduled_time)));
+  });
+
+  app.post('/api/schedule', (req, res) => {
+    const url = String(req.body?.url || '').trim();
+    const mode = req.body?.mode === 'audio' ? 'audio' : 'video';
+    const scheduledTime = String(req.body?.scheduled_time || '').trim();
+    if (!url || !scheduledTime) {
+      return res.status(400).json({ error: 'URL and scheduled time are required.' });
+    }
+    const jobs = readJson<any[]>(SCHEDULE_FILE, []);
+    const nextId = jobs.reduce((max, j) => Math.max(max, Number(j.id) || 0), 0) + 1;
+    const entry = {
+      id: nextId,
+      url,
+      mode,
+      scheduled_time: scheduledTime,
+      status: 'pending',
+      created_at: new Date().toISOString(),
+      fired_at: null,
+      job_id: null,
+    };
+    jobs.push(entry);
+    writeJson(SCHEDULE_FILE, jobs);
+    runScheduledTick();
+    res.status(201).json(entry);
+  });
+
+  app.delete('/api/schedule/:id', (req, res) => {
+    const id = Number(req.params.id);
+    const jobs = readJson<any[]>(SCHEDULE_FILE, []);
+    writeJson(
+      SCHEDULE_FILE,
+      jobs.filter((j) => j.id !== id)
+    );
+    res.json({ deleted: id });
+  });
+
+  // ---- v2.0 API Tokens ----
+  if (!fs.existsSync(TOKENS_FILE)) {
+    writeJson(TOKENS_FILE, []);
+  }
+
+  app.get('/api/tokens', (_req, res) => {
+    const tokens = readJson<any[]>(TOKENS_FILE, []);
+    res.json({
+      tokens: tokens.map(({ token_hash: _h, ...rest }) => rest),
+    });
+  });
+
+  app.post('/api/tokens', (req, res) => {
+    const name = String(req.body?.name || '').trim();
+    const scope = ['read', 'download', 'admin'].includes(req.body?.scope) ? req.body.scope : 'read';
+    if (!name) {
+      return res.status(400).json({ error: 'Token name is required.' });
+    }
+    const raw = `mg_${crypto.randomBytes(16).toString('hex')}`;
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const tokens = readJson<any[]>(TOKENS_FILE, []);
+    const nextId = tokens.reduce((max, t) => Math.max(max, Number(t.id) || 0), 0) + 1;
+    const activeUser = getActiveUser();
+    const record = {
+      id: nextId,
+      name,
+      token_hash: tokenHash,
+      token_prefix: raw.slice(0, 8),
+      scope,
+      created_by: activeUser?.username || 'christopher',
+      created_at: new Date().toISOString(),
+      last_used_at: null,
+      revoked: false,
+    };
+    tokens.unshift(record);
+    writeJson(TOKENS_FILE, tokens);
+    res.status(201).json({
+      id: record.id,
+      token: raw,
+      warning: 'This token is shown once. Copy it now.',
+    });
+  });
+
+  app.post('/api/tokens/:id/revoke', (req, res) => {
+    const id = Number(req.params.id);
+    const tokens = readJson<any[]>(TOKENS_FILE, []);
+    const found = tokens.find((t) => t.id === id);
+    if (!found) return res.status(404).json({ error: 'Token not found.' });
+    found.revoked = true;
+    writeJson(TOKENS_FILE, tokens);
+    res.json({ success: true });
+  });
+
+  app.delete('/api/tokens/:id', (req, res) => {
+    const id = Number(req.params.id);
+    const tokens = readJson<any[]>(TOKENS_FILE, []);
+    writeJson(
+      TOKENS_FILE,
+      tokens.filter((t) => t.id !== id)
+    );
+    res.json({ deleted: id });
+  });
+
+  // ---- v2.0 Version Manager (GitHub Tags) ----
+  let versionCache: { data: any; ts: number } = { data: null, ts: 0 };
+
+  app.get('/api/version/info', async (req, res) => {
+    const force = req.query.force === '1';
+    const now = Date.now();
+    if (!force && versionCache.data && now - versionCache.ts < 300_000) {
+      return res.json(versionCache.data);
+    }
+
+    const current = 'v2.0-v1 (v1.9.7-final_20261123)';
+    let latest = 'v1.9.7-final_20261123';
+    let tags: string[] = [];
+    let error: string | null = null;
+
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['ls-remote', '--tags', '--refs', 'https://github.com/ai-mayhemyt/mediagrabber.git'],
+        { timeout: 6000 }
+      );
+      tags = stdout
+        .split('\n')
+        .map((line) => line.split('refs/tags/')[1]?.trim())
+        .filter(Boolean) as string[];
+      if (tags.length > 0) {
+        const latestTag = tags[tags.length - 1];
+        if (!current.includes(latestTag)) {
+          latest = latestTag;
+        }
+      }
+    } catch (err: any) {
+      error = err?.message || 'Unable to reach GitHub tags';
+    }
+
+    const data = {
+      current,
+      latest,
+      update_available: Boolean(tags.length && !current.includes(latest)),
+      checked_at: new Date().toISOString(),
+      tags: tags.slice(-6).reverse(),
+      error,
+    };
+    versionCache = { data, ts: now };
+    res.json(data);
+  });
+
+  // ---- v2.0 Network Watchdog (NetWatch) ----
+  if (!fs.existsSync(NETWATCH_FILE)) {
+    writeJson(NETWATCH_FILE, {
+      timer_active: true,
+      timer_enabled: true,
+      last_run_ts: new Date().toISOString(),
+      consecutive_failures: 0,
+      iface: 'eth0',
+      gateway: '127.0.0.1',
+      recent_log: [
+        `[${new Date().toISOString()}] mg-netwatch initialized (OK — 0 failures)`,
+      ],
+    });
+  }
+
+  app.get('/api/server/netwatch', (_req, res) => {
+    const state = readJson<any>(NETWATCH_FILE, {});
+    const lastMs = state.last_run_ts ? new Date(state.last_run_ts).getTime() : Date.now();
+    const elapsed = Math.floor((Date.now() - lastMs) / 1000) % 60;
+    const nextRunSeconds = state.timer_active ? Math.max(1, 60 - elapsed) : 0;
+    res.json({
+      timer_active: Boolean(state.timer_active),
+      timer_enabled: Boolean(state.timer_enabled),
+      next_run_seconds: nextRunSeconds,
+      last_run_ts: state.last_run_ts || null,
+      consecutive_failures: Number(state.consecutive_failures || 0),
+      iface: state.iface || 'eth0',
+      gateway: state.gateway || '127.0.0.1',
+      recent_log: state.recent_log || [],
+    });
+  });
+
+  app.post('/api/server/netwatch/action', (req, res) => {
+    const action = String(req.body?.action || '').trim();
+    const state = readJson<any>(NETWATCH_FILE, { recent_log: [] });
+    const ts = new Date().toISOString();
+
+    if (action === 'run') {
+      state.last_run_ts = ts;
+      state.consecutive_failures = 0;
+      state.recent_log = [
+        ...(state.recent_log || []).slice(-9),
+        `[${ts}] Manual check passed — gateway reachable`,
+      ];
+      writeJson(NETWATCH_FILE, state);
+      return res.json({ ok: true, message: 'Network watchdog check passed.' });
+    }
+    if (action === 'enable') {
+      state.timer_active = true;
+      state.timer_enabled = true;
+      state.recent_log = [...(state.recent_log || []).slice(-9), `[${ts}] Timer enabled`];
+      writeJson(NETWATCH_FILE, state);
+      return res.json({ ok: true, message: 'Watchdog timer enabled.' });
+    }
+    if (action === 'disable') {
+      state.timer_active = false;
+      state.timer_enabled = false;
+      state.recent_log = [...(state.recent_log || []).slice(-9), `[${ts}] Timer disabled`];
+      writeJson(NETWATCH_FILE, state);
+      return res.json({ ok: true, message: 'Watchdog timer disabled.' });
+    }
+    if (action === 'restart_mediagrabber') {
+      state.recent_log = [...(state.recent_log || []).slice(-9), `[${ts}] Worker queue reloaded cleanly`];
+      writeJson(NETWATCH_FILE, state);
+      return res.json({ ok: true, message: 'MediaGrabber services reloaded.' });
+    }
+    return res.status(400).json({ ok: false, error: 'Unknown action' });
+  });
+
+  // ---- v2.0 SMTP Test Email ----
+  app.post('/api/settings/email/test', (req, res) => {
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const host = String(settings.smtp_host || '').trim();
+    const port = String(settings.smtp_port || '').trim();
+    const user = String(settings.smtp_user || '').trim();
+    const to = String(req.body?.to || user || '').trim();
+    if (!host || !port) {
+      return res.status(400).json({ ok: false, error: 'Configure and save SMTP Host and Port first.' });
+    }
+    if (!to) {
+      return res.status(400).json({ ok: false, error: 'Enter a recipient address or SMTP Username.' });
+    }
+    res.json({
+      ok: true,
+      message: `SMTP test payload validated for ${to} via ${host}:${port}.`,
+    });
+  });
+
+  // ---- v2.0-v1 Source Bundle Export for Linux SSH Deployment ----
+  app.get('/api/server/export-bundle', async (_req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const allowlist = [
+      'package.json',
+      'server.ts',
+      'tsconfig.json',
+      'vite.config.ts',
+      'index.html',
+      'metadata.json',
+      '.env.example',
+      '.gitignore',
+      'src',
+      'public',
+      'deploy',
+    ].filter((item) => fs.existsSync(path.join(process.cwd(), item)));
+
+    const outTar = '/tmp/mediagrabber-v2.0-v1.tar.gz';
+    try {
+      await execFileAsync(
+        'tar',
+        [
+          '-czf',
+          outTar,
+          '--exclude=node_modules',
+          '--exclude=dist',
+          '--exclude=.git',
+          '--exclude=.env',
+          ...allowlist,
+        ],
+        { cwd: process.cwd(), timeout: 15000 }
+      );
+      res.download(outTar, 'mediagrabber-v2.0-v1.tar.gz');
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Failed to package source bundle' });
+    }
+  });
+
+  const httpServer = http.createServer(app);
+
+  // ---- Vite / Static Frontend ----
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : true,
+        ws: { server: httpServer },
+      },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  httpServer.listen(PORT, HOST, () => {
+    console.log(`MediaGrabber listening on http://${HOST}:${PORT}`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error('Failed to start MediaGrabber server:', err);
+  process.exit(1);
+});

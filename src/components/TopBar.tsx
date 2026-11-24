@@ -1,17 +1,22 @@
 import React, { useEffect, useRef } from 'react';
-import { QrCode, Sun, Moon, Palette, LogOut, Search, X } from 'lucide-react';
+import { QrCode, Sun, Moon, Palette, LogOut, Search, X, Bell, BellRing } from 'lucide-react';
 import { ActiveView } from '../types';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface TopBarProps {
   activeView: ActiveView;
   themeMode: 'dark' | 'light';
   version?: string;
   searchQuery: string;
+  notificationsEnabled: boolean;
+  notificationsBusy?: boolean;
   onSearchChange: (value: string) => void;
+  onToggleNotifications: () => void;
   onToggleTheme: () => void;
   onOpenTheme: () => void;
   onShareQr: () => void;
   onLogout: () => void;
+  onPwaInstalled?: () => void;
 }
 
 const VIEW_LABELS: Record<ActiveView, string> = {
@@ -24,13 +29,17 @@ const VIEW_LABELS: Record<ActiveView, string> = {
 export const TopBar: React.FC<TopBarProps> = ({
   activeView,
   themeMode,
-  version = 'v2.0-v1',
+  version = 'v2.0-pre3',
   searchQuery,
+  notificationsEnabled,
+  notificationsBusy = false,
   onSearchChange,
+  onToggleNotifications,
   onToggleTheme,
   onOpenTheme,
   onShareQr,
   onLogout,
+  onPwaInstalled,
 }) => {
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -125,6 +134,29 @@ export const TopBar: React.FC<TopBarProps> = ({
       </div>
 
       <div className="flex items-center gap-2 shrink-0 order-2 sm:order-3">
+        <PWAInstallButton onInstalled={onPwaInstalled} />
+
+        <button
+          type="button"
+          onClick={onToggleNotifications}
+          disabled={notificationsBusy}
+          title={notificationsEnabled ? 'Download notifications active (click to pause)' : 'Enable download notifications'}
+          aria-label={notificationsEnabled ? 'Disable notifications' : 'Enable notifications'}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+          style={{
+            backgroundColor: 'var(--mg-card)',
+            borderColor: notificationsEnabled ? 'var(--mg-accent)' : 'var(--mg-border)',
+            color: notificationsEnabled ? 'var(--mg-text)' : 'var(--mg-muted)',
+          }}
+        >
+          {notificationsEnabled ? (
+            <BellRing className="w-3.5 h-3.5" style={{ color: 'var(--mg-accent)' }} />
+          ) : (
+            <Bell className="w-3.5 h-3.5" />
+          )}
+          <span className="hidden xl:inline">{notificationsEnabled ? 'Alerts On' : 'Alerts'}</span>
+        </button>
+
         <button
           type="button"
           onClick={onOpenTheme}
@@ -137,7 +169,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           }}
         >
           <Palette className="w-3.5 h-3.5" />
-          <span className="hidden lg:inline">Theme Editor</span>
+          <span className="hidden xl:inline">Theme Editor</span>
         </button>
 
         <button
@@ -154,12 +186,12 @@ export const TopBar: React.FC<TopBarProps> = ({
           {themeMode === 'dark' ? (
             <>
               <Sun className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">Light</span>
+              <span className="hidden xl:inline">Light</span>
             </>
           ) : (
             <>
               <Moon className="w-3.5 h-3.5" />
-              <span className="hidden lg:inline">Dark</span>
+              <span className="hidden xl:inline">Dark</span>
             </>
           )}
         </button>
@@ -186,7 +218,7 @@ export const TopBar: React.FC<TopBarProps> = ({
           }}
         >
           <LogOut className="w-3.5 h-3.5" />
-          <span className="hidden lg:inline">Log out</span>
+          <span className="hidden xl:inline">Log out</span>
         </button>
       </div>
     </header>

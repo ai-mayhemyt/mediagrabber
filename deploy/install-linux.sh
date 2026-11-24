@@ -35,6 +35,16 @@ fi
 
 cd "$APP_DIR"
 
+if [ ! -f /usr/local/bin/grab ] && [ -f "grab" ]; then
+  echo "==> Installing grab wrapper to /usr/local/bin/grab..."
+  sudo install -m 755 grab /usr/local/bin/grab
+elif [ -f /usr/local/bin/grab ]; then
+  echo "==> Existing /usr/local/bin/grab detected; preserving and ensuring executable..."
+  sudo chmod 755 /usr/local/bin/grab
+fi
+sudo mkdir -p /tmp/mediagrabber
+sudo chmod 1777 /tmp/mediagrabber
+
 if [ ! -f .env ]; then
   cat > .env <<EOF
 NODE_ENV=production
@@ -44,7 +54,7 @@ EOF
 fi
 
 echo "==> Installing Node dependencies & building frontend..."
-npm install --legacy-peer-deps
+npm install || npm install --legacy-peer-deps
 npm run build
 
 if command -v systemctl >/dev/null 2>&1; then

@@ -1,16 +1,29 @@
 import React, { useEffect, useState } from 'react';
-import { Save, RefreshCw } from 'lucide-react';
+import { Save, RefreshCw, BellRing, BellOff, Smartphone, Send } from 'lucide-react';
 import { MediaGrabberSettings } from '../types';
+import { usePWAInstall } from '../hooks/usePWAInstall';
+
+interface NotificationControlProps {
+  isEnabled: boolean;
+  pushSubscribed: boolean;
+  permission: NotificationPermission | 'unsupported';
+  busy: boolean;
+  onToggle: () => Promise<void>;
+  onTest: () => Promise<void>;
+}
 
 interface SettingsViewProps {
   onNotify: (type: 'info' | 'success' | 'error', msg: string) => void;
   onStorageRefresh: () => void;
+  notifications?: NotificationControlProps;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   onNotify,
   onStorageRefresh,
+  notifications,
 }) => {
+  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [settings, setSettings] = useState<MediaGrabberSettings | null>(null);
   const [saving, setSaving] = useState(false);
   const [scanningJellyfin, setScanningJellyfin] = useState(false);
@@ -441,6 +454,107 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           >
             Send Test Email
           </button>
+        </div>
+      </section>
+
+      <section
+        className="p-5 rounded-xl border flex flex-col gap-4"
+        style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+      >
+        <h2 className="font-display text-sm font-semibold border-b pb-2.5" style={{ borderColor: 'var(--mg-border)' }}>
+          PWA App &amp; Push Notifications
+        </h2>
+
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex flex-col gap-1">
+            <div className="text-xs font-medium" style={{ color: 'var(--mg-text)' }}>
+              Download Completion &amp; Failure Alerts
+            </div>
+            <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+              {notifications?.isEnabled
+                ? notifications.pushSubscribed
+                  ? 'Web Push subscription active (VAPID).'
+                  : 'Browser notification alerts active.'
+                : notifications?.permission === 'denied'
+                ? 'Blocked in browser site settings — allow notifications for this origin to re-enable.'
+                : 'Receive desktop or mobile alerts whenever queued jobs finish or fail.'}
+            </div>
+          </div>
+
+          {notifications && (
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                disabled={notifications.busy}
+                onClick={() => void notifications.onToggle()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50"
+                style={{
+                  backgroundColor: notifications.isEnabled ? 'var(--mg-accent)' : 'var(--mg-bg)',
+                  borderColor: notifications.isEnabled ? 'var(--mg-accent)' : 'var(--mg-border)',
+                  color: notifications.isEnabled ? '#ffffff' : 'var(--mg-text)',
+                }}
+              >
+                {notifications.isEnabled ? (
+                  <>
+                    <BellOff className="w-3.5 h-3.5" />
+                    <span>Disable Alerts</span>
+                  </>
+                ) : (
+                  <>
+                    <BellRing className="w-3.5 h-3.5" />
+                    <span>Enable Alerts</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                disabled={notifications.busy}
+                onClick={() => void notifications.onTest()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50"
+                style={{
+                  backgroundColor: 'var(--mg-bg)',
+                  borderColor: 'var(--mg-border)',
+                  color: 'var(--mg-text)',
+                }}
+              >
+                <Send className="w-3.5 h-3.5" />
+                <span>Send Test</span>
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div
+          className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t"
+          style={{ borderColor: 'var(--mg-border)' }}
+        >
+          <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--mg-muted)' }}>
+            <Smartphone className="w-4 h-4 shrink-0" style={{ color: 'var(--mg-accent)' }} />
+            <span>
+              {isInstalled
+                ? 'Running as an installed standalone PWA.'
+                : isInstallable
+                ? 'Ready to install as a desktop or mobile app.'
+                : isIOS
+                ? 'On iOS Safari: tap Share → Add to Home Screen to install.'
+                : 'Install via browser address bar icon or HTTPS origin.'}
+            </span>
+          </div>
+
+          {!isInstalled && isInstallable && (
+            <button
+              type="button"
+              onClick={async () => {
+                const ok = await install();
+                if (ok) onNotify('success', 'MediaGrabber installed as an app.');
+              }}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-white whitespace-nowrap shrink-0"
+              style={{ backgroundColor: 'var(--mg-accent)' }}
+            >
+              Install PWA
+            </button>
+          )}
         </div>
       </section>
 

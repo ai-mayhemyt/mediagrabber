@@ -10,6 +10,7 @@ import {
   LogOut,
 } from 'lucide-react';
 import { ActiveView, StorageMap, UserAccount } from '../types';
+import { BrandLogo } from './BrandLogo';
 
 interface SidebarProps {
   activeView: ActiveView;
@@ -34,7 +35,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectView,
   user,
   storage,
-  version = 'v2.0-v1',
+  version = 'v2.0-pre3',
   onOpenAccount,
   onOpenTheme,
   onLogout,
@@ -53,22 +54,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div className="p-4 flex flex-col gap-5">
         <div className="flex items-center justify-between gap-2 px-2 pt-1">
           <div className="inline-flex items-center gap-2.5 whitespace-nowrap shrink-0">
-            <svg
-              viewBox="0 0 24 24"
-              className="w-6 h-6 shrink-0"
-              aria-hidden="true"
-            >
-              <defs>
-                <linearGradient id="mg-logo-grad" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor="#a0b4ff" />
-                  <stop offset="100%" stopColor="#5b7cfa" />
-                </linearGradient>
-              </defs>
-              <path
-                fill="url(#mg-logo-grad)"
-                d="M5.2 4.2C2.8 6.8 3.2 11.7 6.8 15.3c3.6 3.6 8.5 4 11.1 1.6.3-.3.3-.8 0-1.1L13.5 11.4l2.7-2.7a1.5 1.5 0 1 0-1.1-1.1l-2.7 2.7L8 5.9c-.3-.3-.8-.3-1.1 0-.4.4-1.2-1.1-1.7-1.7zM6 17.5l-1.8 3.3c-.2.4.1.9.6.9h7.4c.5 0 .8-.5.6-.9L11 17.5a11.2 11.2 0 0 1-5 0z"
-              />
-            </svg>
+            <BrandLogo className="w-7 h-7 shrink-0" />
             <span
               className="font-display text-xl font-bold tracking-tight whitespace-nowrap shrink-0 bg-clip-text text-transparent"
               style={{

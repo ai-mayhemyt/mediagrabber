@@ -1,6 +1,6 @@
 #!/bin/bash
 # =====================================================
-# MediaGrabber v2.0-pre2 – Standalone Grab Wrapper Script
+# MediaGrabber v33.2 – Standalone Grab Wrapper Script
 # =====================================================
 
 export HOME="${HOME:-/home/christopher}"
@@ -27,26 +27,7 @@ mkdir -p "$TEMP_DIR"
 URL="$1"
 CLEAN_URL="$(printf "%s" "$URL" | tr -d '\r\n\t' | sed -e 's/[[:space:]]//g' -e 's/[^[:print:]]//g')"
 
-SERVICE_URL="${MEDIAGRABBER_SERVICE_URL:-http://127.0.0.1:3000}"
-JOB_ID="${MEDIAGRABBER_JOB_ID:-cli-$(date +%s)}"
-
-notify_service() {
-    local status="$1"
-    local progress="$2"
-    local message="$3"
-    local file="$4"
-    if command -v curl >/dev/null 2>&1; then
-        curl -s -X POST "$SERVICE_URL/api/grab/notify" \
-             -H "Content-Type: application/json" \
-             -d "{\"job_id\":\"$JOB_ID\",\"status\":\"$status\",\"progress\":$progress,\"message\":\"$message\",\"file\":\"$file\",\"url\":\"$CLEAN_URL\"}" >/dev/null 2>&1 || true
-    fi
-}
-
-log() {
-    local msg="[$(date +%H:%M:%S)] $1"
-    echo "$msg"
-    notify_service "running" "2" "$1" ""
-}
+log() { echo "[$(date +%H:%M:%S)] $1"; }
 
 # ---------- Tool resolution ----------
 YT_DLP="$(command -v yt-dlp 2>/dev/null || true)"
@@ -94,7 +75,7 @@ log "⚙️  Video max: ${VIDEO_RES}p, Audio: $AUDIO_FORMAT ($AUDIO_BITRATE), Co
 # ---------- SPOTIFY PIPELINE ----------
 if [ "$ENGINE" = "SPOTIFY" ]; then
     log "🎧 Spotify → spotdl"
-    [ -z "$SPOTDL" ] && log "❌ spotdl not found" && notify_service "failed" "100" "❌ spotdl not found" "" && exit 1
+    [ -z "$SPOTDL" ] && log "❌ spotdl not found" && exit 1
     mkdir -p "$MUSIC_DIR"
     OUTPUT_TEMPLATE="$MUSIC_DIR/{artist}/{album}/{title}.{ext}"
     CMD=("$SPOTDL" "$CLEAN_URL" --output "$OUTPUT_TEMPLATE" --format "$AUDIO_FORMAT" --simple-tui)
@@ -109,17 +90,14 @@ if [ "$ENGINE" = "SPOTIFY" ]; then
         echo "$line"
         if [[ "$line" =~ Downloading[[:space:]]+track[[:space:]]+([0-9]+)[[:space:]]+of[[:space:]]+([0-9]+) ]]; then
             downloaded="${BASH_REMATCH[1]}"; total_tracks="${BASH_REMATCH[2]}"
-            pct=0; [ $total_tracks -gt 0 ] && pct=$((downloaded*100/total_tracks))
-            [ $total_tracks -gt 0 ] && log "PROGRESS: $downloaded/$total_tracks ($pct%)" && notify_service "running" "$pct" "Downloading track $downloaded of $total_tracks" ""
+            [ $total_tracks -gt 0 ] && log "PROGRESS: $downloaded/$total_tracks ($((downloaded*100/total_tracks))%)"
         fi
     done < <("${CMD[@]}" 2>&1)
     EXIT_CODE=$?
 
     if [ $EXIT_CODE -eq 0 ]; then
         latest_file=$(find "$MUSIC_DIR" -type f \( -name "*.mp3" -o -name "*.flac" -o -name "*.m4a" \) -mmin -2 2>/dev/null | head -1)
-        [ -n "$latest_file" ] && log "FINAL_FILE: $latest_file" && notify_service "done" "100" "Completed successfully" "$latest_file"
-    else
-        notify_service "failed" "100" "Spotify download failed" ""
+        [ -n "$latest_file" ] && log "FINAL_FILE: $latest_file"
     fi
     exit $EXIT_CODE
 fi
@@ -127,7 +105,7 @@ fi
 # ---------- GALLERY PIPELINE ----------
 if [ "$ENGINE" = "GALLERY" ]; then
     log "🖼 Gallery → gallery-dl"
-    [ -z "$GALLERY" ] && log "❌ gallery-dl not found" && notify_service "failed" "100" "❌ gallery-dl not found" "" && exit 1
+    [ -z "$GALLERY" ] && log "❌ gallery-dl not found" && exit 1
     cd "$TEMP_DIR" || exit 1
     CMD=("$GALLERY" "$CLEAN_URL" --directory "./" --filename "%(title).100s-%(id)s.%(ext)s")
     [ -n "$COOKIES_GALLERY" ] && [ -f "$COOKIES_GALLERY" ] && CMD+=("--cookies" "$COOKIES_GALLERY")
@@ -145,11 +123,8 @@ if [ "$ENGINE" = "GALLERY" ]; then
             filename=$(basename "$latest_file")
             if mv "$latest_file" "$final_dir/$filename"; then
                 log "FINAL_FILE: $final_dir/$filename"
-                notify_service "done" "100" "Completed successfully" "$final_dir/$filename"
             fi
         fi
-    else
-        notify_service "failed" "100" "Gallery download failed" ""
     fi
     exit $EXIT_CODE
 fi
@@ -157,7 +132,7 @@ fi
 # ---------- YOUTUBE PIPELINE ----------
 log "📺 YouTube → yt-dlp"
 cd "$TEMP_DIR" || exit 1
-[ -z "$YT_DLP" ] && log "❌ yt-dlp not found" && notify_service "failed" "100" "❌ yt-dlp not found" "" && exit 1
+[ -z "$YT_DLP" ] && log "❌ yt-dlp not found" && exit 1
 
 if [ "$AUDIO_ONLY" = "true" ]; then
     USE_MUSIC_DIR=true
@@ -247,12 +222,9 @@ if [ $EXIT_CODE -eq 0 ]; then
             done
             [ -f "$INFO_FILE" ] && mv "$INFO_FILE" "$final_dir/"
             log "✅ Moved to $final_dir"
-            notify_service "done" "100" "Completed successfully" "$final_dir/$VIDEO_FILE"
         fi
         exit 0
     fi
-else
-    notify_service "failed" "100" "YouTube download failed" ""
 fi
 
 exit $EXIT_CODE
