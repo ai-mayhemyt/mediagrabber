@@ -2,15 +2,15 @@
 
 <img src="public/logo.png" alt="MediaGrabber" width="360" />
 
-# MediaGrabber (`v2.0`)
+# MediaGrabber (`v2.1-pre1`)
 
 **Self-Hosted Media Ingestion, Download Queue Console, Metadata Editor & Jellyfin Companion Service**
 
-Download, transcode, deduplicate, and organize media from **YouTube**, **YouTube Music**, **Spotify**, **Instagram**, **TikTok**, and other `yt-dlp` / `gallery-dl` sources with web-based queue management, scoped API keys, Navidrome radio sync, and native Jellyfin integration across **Linux**, **Windows 11**, and **Windows 10**.
+Download, transcode, deduplicate, and organize media from **YouTube**, **YouTube Music**, **Spotify**, **Instagram**, **TikTok**, and other `yt-dlp` / `gallery-dl` sources with web-based queue management, YouTube RSS Auto-Grab, per-grab Subtitle/SponsorBlock controls, in-UI `cookies.txt` management, pre-flight dependency updates, scoped API keys, Navidrome radio sync, and native Jellyfin integration across **Linux**, **Windows 11**, and **Windows 10**.
 
-![Version](https://img.shields.io/badge/Version-v2.0-5b7cfa?style=flat-square)
+![Version](https://img.shields.io/badge/Version-v2.1--pre1-5b7cfa?style=flat-square)
 ![Platforms](https://img.shields.io/badge/Platforms-Linux%20%7C%20Windows%2011%20%7C%20Windows%2010-10b981?style=flat-square)
-![Branch](https://img.shields.io/badge/Branch-mediagrabber-6366f1?style=flat-square)
+![Branch](https://img.shields.io/badge/Branch-mediagrabber%20%7C%20mediagrabber--nightly-6366f1?style=flat-square)
 
 </div>
 
@@ -18,7 +18,7 @@ Download, transcode, deduplicate, and organize media from **YouTube**, **YouTube
 
 ## Supported Platforms & OS Version Badges
 
-MediaGrabber automatically appends your host OS to the reported build version (for example `v2.0-Linux`, `v2.0-Windows11`, or `v2.0-Windows10`):
+MediaGrabber automatically appends your host OS to the reported build version (for example `v2.1-pre1-Linux`, `v2.1-pre1-Windows11`, or `v2.1-pre1-Windows10`):
 
 | Platform / Environment | Support Status | Reported Version Tag | Notes |
 | --- | --- | --- | --- |
@@ -51,12 +51,13 @@ MediaGrabber automatically appends your host OS to the reported build version (f
 ### Step 1: Clone & Run the Linux Auto-Installer
 
 ```bash
+# Stable (mediagrabber) or Nightly (mediagrabber-nightly)
 git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git /opt/mediagrabber && \
 cd /opt/mediagrabber && \
 sudo bash deploy/install-linux.sh
 ```
 
-Choose **Full Releases** (`--stable`) or **Nightly Pre-Releases** (`--nightly`) during install. The installer installs [`grab`](./grab) to `/usr/local/bin/grab` and sets up `mediagrabber.service` on port **`3000`**.
+Choose **Full Releases** (`--stable`) or **Nightly Pre-Releases** (`--nightly`) during install. The installer installs [`grab`](./grab) to `/usr/local/bin/grab` and sets up `mediagrabber.service` on port **`3000`**. Or build a standalone Linux binary with `npm run build:bin:linux`.
 
 ### Step 2: Install Media Downloader Tools (If Needed)
 
@@ -69,7 +70,7 @@ python3 -m pip install --user --upgrade yt-dlp spotdl gallery-dl
 
 ## Windows 10 & Windows 11 Installation
 
-### Step 1: Run the PowerShell Installer
+### Step 1: Run the PowerShell Installer (or Download `mediagrabber-win-x64.exe`)
 
 Open **PowerShell** (as Administrator if registering a startup task) and run:
 
@@ -80,7 +81,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\deploy\install-windows.ps1
 ```
 
-The installer detects **Windows 11** vs **Windows 10**, installs missing tools via `winget` (`Node.js LTS`, `Git`, `FFmpeg`, `yt-dlp`), configures `%LOCALAPPDATA%\MediaGrabber` for state, and builds the app. Pass `-RegisterStartupTask` to auto-start MediaGrabber on sign-in.
+The installer detects **Windows 11** vs **Windows 10**, installs missing tools via `winget` (`Node.js LTS`, `Git`, `FFmpeg`, `yt-dlp`), configures `%LOCALAPPDATA%\MediaGrabber` for state, and builds **`mediagrabber.exe`**. Pass `-RegisterStartupTask` to auto-start `mediagrabber.exe` on sign-in.
 
 Install optional Spotify / social gallery engines via Python if desired:
 
@@ -90,10 +91,10 @@ python -m pip install --upgrade yt-dlp spotdl gallery-dl
 
 ### Step 2: Start MediaGrabber on Windows
 
-Double-click or run:
+Run the standalone Windows executable directly (or use `deploy\start-windows.bat` as a source fallback):
 
 ```cmd
-deploy\start-windows.bat
+mediagrabber.exe --open
 ```
 
 MediaGrabber uses [`grab.ps1`](./grab.ps1) natively on Windows and stores downloads in your `Videos\MediaGrabber`, `Music\MediaGrabber`, and `Pictures\MediaGrabber` folders by default (customizable in **Settings**).

@@ -17,6 +17,43 @@ interface NightlyReleaseNote {
 
 const NIGHTLY_RELEASES: NightlyReleaseNote[] = [
   {
+    version: 'v2.1-pre1',
+    channel: 'Nightly Pre-Release',
+    date: '2026-11-24',
+    summary:
+      'Standalone Windows (.exe) and Linux binaries, persistent concurrency queue, cookies.txt upload/paste, YouTube RSS Auto-Grab, Subtitle/SponsorBlock/Playlist toggles, Pre-Flight Dependency Updater, and Nightly branch alignment across Windows & Linux.',
+    items: [
+      {
+        kind: 'new',
+        text: 'Added standalone Windows (.exe) and Linux (linux-x64) executable builds via esbuild + pkg, bundled grab/grab.ps1 extraction, --open browser flag, and OS-aware binary self-updating.',
+      },
+      {
+        kind: 'new',
+        text: 'Added persistent queue.json storage (survives restarts/updates) and configurable Max Concurrent Downloads (1–8) worker scheduling across Windows and Linux.',
+      },
+      {
+        kind: 'new',
+        text: 'Added in-UI Netscape cookies.txt upload, paste, status inspection, and clear actions for YouTube and Gallery extractors inside Settings.',
+      },
+      {
+        kind: 'new',
+        text: 'Added YouTube RSS Auto-Grab per followed channel (Video/Audio toggle, 15m background poller, archive deduplication, and Check Now button) in the sidebar.',
+      },
+      {
+        kind: 'new',
+        text: 'Added per-grab Embed Subtitles, SponsorBlock, and Single Video vs. Full Playlist toggles on the Queue submit card wired to grab (Linux), grab.ps1 (Windows), and yt-dlp fallback.',
+      },
+      {
+        kind: 'new',
+        text: 'Added Pre-Flight Dependency Health Check & 1-Click Extractor Updater (yt-dlp, spotdl, gallery-dl, FFmpeg, Deno, grab/grab.ps1) in Utilities → Server Manager.',
+      },
+      {
+        kind: 'fix',
+        text: 'Fixed Version Manager and auto-updater channel branch tracking: Nightly remembers mediagrabber-nightly and Full Releases track mediagrabber, replacing old 2.0-app links.',
+      },
+    ],
+  },
+  {
     version: 'v2.0-pre8',
     channel: 'Nightly Pre-Release',
     date: '2026-11-24',

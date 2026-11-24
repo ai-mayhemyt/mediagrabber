@@ -69,8 +69,11 @@ AUDIO_BITRATE="${GRAB_AUDIO_BITRATE:-320k}"
 CONTAINER="${GRAB_CONTAINER:-mp4}"
 GENERATE_LRC="${GRAB_GENERATE_LRC:-false}"
 AUDIO_ONLY="${GRAB_AUDIO_ONLY:-false}"
+EMBED_SUBS="${GRAB_EMBED_SUBS:-false}"
+SPONSORBLOCK="${GRAB_SPONSORBLOCK:-false}"
+PLAYLIST_MODE="${GRAB_PLAYLIST:-false}"
 
-log "⚙️  Video max: ${VIDEO_RES}p, Audio: $AUDIO_FORMAT ($AUDIO_BITRATE), Container: $CONTAINER, Audio-Only: $AUDIO_ONLY"
+log "⚙️  Video max: ${VIDEO_RES}p, Audio: $AUDIO_FORMAT ($AUDIO_BITRATE), Container: $CONTAINER, Audio-Only: $AUDIO_ONLY, Subtitles: $EMBED_SUBS, SponsorBlock: $SPONSORBLOCK, Playlist: $PLAYLIST_MODE"
 
 # ---------- SPOTIFY PIPELINE ----------
 if [ "$ENGINE" = "SPOTIFY" ]; then
@@ -159,6 +162,20 @@ fi
 
 if [ -x "$DENO_PATH" ]; then
     CMD+=("--js-runtimes" "deno:$DENO_PATH" "--remote-components" "ejs:github")
+fi
+
+if [ "$PLAYLIST_MODE" = "true" ]; then
+    CMD+=("--yes-playlist")
+else
+    CMD+=("--no-playlist")
+fi
+
+if [ "$EMBED_SUBS" = "true" ] && [ "$AUDIO_ONLY" != "true" ]; then
+    CMD+=("--write-subs" "--write-auto-subs" "--embed-subs" "--sub-langs" "en.*,en")
+fi
+
+if [ "$SPONSORBLOCK" = "true" ]; then
+    CMD+=("--sponsorblock-remove" "sponsor")
 fi
 
 if [ "$AUDIO_ONLY" = "true" ]; then

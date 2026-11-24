@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActiveView,
+  GrabOptions,
   HistoryItem,
   Job,
   MediaFileItem,
@@ -43,7 +44,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [storage, setStorage] = useState<StorageMap>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [appVersion, setAppVersion] = useState('v2.0');
+  const [appVersion, setAppVersion] = useState('v2.1-pre1');
 
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
   const [themeColors, setThemeColors] = useState<ThemeColors>(THEME_PRESETS.default.colors);
@@ -212,7 +213,7 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.current) {
-          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0';
+          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.1-pre1';
           setAppVersion(shortVer);
         }
         if (
@@ -319,11 +320,15 @@ export default function App() {
     setActiveView('queue');
   };
 
-  const handleGrab = async (urls: string[], mode: 'video' | 'audio'): Promise<string[]> => {
+  const handleGrab = async (
+    urls: string[],
+    mode: 'video' | 'audio',
+    options?: GrabOptions
+  ): Promise<string[]> => {
     const res = await fetch('/api/grab', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ urls, mode }),
+      body: JSON.stringify({ urls, mode, ...(options ? { options } : {}) }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));

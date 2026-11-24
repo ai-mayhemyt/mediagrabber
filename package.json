@@ -1,16 +1,33 @@
 {
   "name": "mediagrabber",
   "private": true,
-  "version": "2.0.0",
+  "version": "2.1.0-pre1",
   "description": "Self-hosted media ingestion, download queue console, metadata editor, library deduplication, and Jellyfin companion service for Linux, Windows 11, and Windows 10.",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "start": "NODE_ENV=production tsx server.ts",
     "build": "vite build",
+    "build:server": "esbuild server.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist-server/server.cjs --external:vite --external:esbuild --external:lightningcss --external:@tailwindcss/*",
+    "build:exe": "npm run build && npm run build:server && npx pkg dist-server/server.cjs --targets node22-win-x64 --output dist-exe/mediagrabber-win-x64.exe",
+    "build:bin:linux": "npm run build && npm run build:server && npx pkg dist-server/server.cjs --targets node22-linux-x64 --output dist-exe/mediagrabber-linux-x64",
+    "build:binaries": "npm run build && npm run build:server && npx pkg dist-server/server.cjs --targets node22-win-x64,node22-linux-x64 --out-path dist-exe",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist dist-server dist-exe server.js",
     "lint": "tsc --noEmit"
+  },
+  "bin": "dist-server/server.cjs",
+  "pkg": {
+    "assets": [
+      "dist/**/*",
+      "public/**/*",
+      "grab",
+      "grab.ps1"
+    ],
+    "targets": [
+      "node22-win-x64",
+      "node22-linux-x64"
+    ]
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -24,6 +41,7 @@
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "multer": "^2.5.0",
+    "pkg": "^5.8.1",
     "qrcode": "^1.5.4",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",

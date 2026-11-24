@@ -1,6 +1,20 @@
-import React, { useEffect, useState } from 'react';
-import { Save, RefreshCw, BellRing, BellOff, Smartphone, Send, Download, Copy, Check } from 'lucide-react';
-import { MediaGrabberSettings } from '../types';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  Save,
+  RefreshCw,
+  BellRing,
+  BellOff,
+  Smartphone,
+  Send,
+  Download,
+  Copy,
+  Check,
+  Upload,
+  FileText,
+  Trash2,
+  ShieldCheck,
+} from 'lucide-react';
+import { CookieStatusMap, MediaGrabberSettings } from '../types';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
 interface NotificationControlProps {
@@ -31,15 +45,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [scanningJellyfin, setScanningJellyfin] = useState(false);
   const [testingWebhook, setTestingWebhook] = useState(false);
   const [copiedRepoUrl, setCopiedRepoUrl] = useState(false);
+  const [cookieStatus, setCookieStatus] = useState<CookieStatusMap | null>(null);
+  const [cookiePasteKind, setCookiePasteKind] = useState<'youtube' | 'gallery' | null>(null);
+  const [cookiePasteText, setCookiePasteText] = useState('');
+  const [cookieBusyKind, setCookieBusyKind] = useState<'youtube' | 'gallery' | null>(null);
+  const ytCookieInputRef = useRef<HTMLInputElement | null>(null);
+  const galleryCookieInputRef = useRef<HTMLInputElement | null>(null);
 
   const jellyfinRepoUrl =
     'https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition/releases/latest/download/manifest.json';
+
+  const loadCookieStatus = async () => {
+    try {
+      const res = await fetch('/api/settings/cookies/status', { cache: 'no-store' });
+      if (res.ok) {
+        setCookieStatus((await res.json()) as CookieStatusMap);
+      }
+    } catch {
+      // ignore if non-admin or unavailable
+    }
+  };
 
   useEffect(() => {
     fetch('/api/settings')
       .then((r) => r.json())
       .then((data) => setSettings(data))
       .catch(() => onNotify('error', 'Failed to load settings'));
+    void loadCookieStatus();
   }, [refreshKey]);
 
   if (!settings) {
@@ -175,15 +207,39 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </label>
         </div>
 
-        <label className="inline-flex items-center gap-2.5 text-xs font-medium cursor-pointer pt-1">
-          <input
-            type="checkbox"
-            checked={settings.generate_lrc}
-            onChange={(e) => updateField('generate_lrc', e.target.checked)}
-            className="w-4 h-4 accent-[var(--mg-accent)]"
-          />
-          <span>Generate synchronized .lrc lyrics sidecars for music tracks</span>
-        </label>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+          <label className="inline-flex items-center gap-2.5 text-xs font-medium cursor-pointer">
+            <input
+              type="checkbox"
+              checked={settings.generate_lrc}
+              onChange={(e) => updateField('generate_lrc', e.target.checked)}
+              className="w-4 h-4 accent-[var(--mg-accent)]"
+            />
+            <span>Generate synchronized .lrc lyrics sidecars for music tracks</span>
+          </label>
+
+          <label className="flex flex-col gap-1.5 text-xs font-medium">
+            <span>Max Concurrent Downloads</span>
+            <select
+              value={String(settings.max_concurrent_downloads ?? 2)}
+              onChange={(e) =>
+                updateField(
+                  'max_concurrent_downloads',
+                  Math.max(1, Math.min(8, Number(e.target.value) || 2))
+                )
+              }
+              className={inputClass}
+              style={inputStyle}
+            >
+              <option value="1">1 download at a time (Low CPU / Strict Rate Limit)</option>
+              <option value="2">2 concurrent downloads (Recommended)</option>
+              <option value="3">3 concurrent downloads</option>
+              <option value="4">4 concurrent downloads</option>
+              <option value="6">6 concurrent downloads</option>
+              <option value="8">8 concurrent downloads (High Bandwidth)</option>
+            </select>
+          </label>
+        </div>
       </section>
 
       <section
@@ -434,28 +490,189 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           Cookies, SMTP &amp; Extractor Arguments
         </h2>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <label className="flex flex-col gap-1.5 text-xs font-medium">
-            <span>YouTube Cookies Path</span>
-            <input
-              type="text"
-              value={settings.cookies_youtube_path}
-              onChange={(e) => updateField('cookies_youtube_path', e.target.value)}
-              placeholder="/path/to/youtube_cookies.txt"
-              className={`${inputClass} font-mono`}
-              style={inputStyle}
-            />
-          </label>
-          <label className="flex flex-col gap-1.5 text-xs font-medium">
-            <span>Gallery Cookies Path</span>
-            <input
-              type="text"
-              value={settings.cookies_gallery_path}
-              onChange={(e) => updateField('cookies_gallery_path', e.target.value)}
-              placeholder="/path/to/gallery_cookies.txt"
-              className={`${inputClass} font-mono`}
-              style={inputStyle}
-            />
-          </label>
+          {(['youtube', 'gallery'] as const).map((kind) => {
+            const label = kind === 'youtube' ? 'YouTube Cookies (cookies.txt)' : 'Gallery Cookies (cookies.txt)';
+            const fieldKey = kind === 'youtube' ? 'cookies_youtube_path' : 'cookies_gallery_path';
+            const st = cookieStatus?.[kind];
+            const inputRef = kind === 'youtube' ? ytCookieInputRef : galleryCookieInputRef;
+            const busy = cookieBusyKind === kind;
+
+            return (
+              <div
+                key={kind}
+                className="p-3.5 rounded-lg border flex flex-col gap-2.5"
+                style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs font-semibold">{label}</span>
+                  {st?.configured ? (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-500">
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      <span>
+                        {st.line_count} {st.line_count === 1 ? 'cookie' : 'cookies'} ({st.source === 'managed' ? 'Managed' : 'Custom'})
+                      </span>
+                    </span>
+                  ) : (
+                    <span className="text-[11px]" style={{ color: 'var(--mg-muted)' }}>
+                      Not configured
+                    </span>
+                  )}
+                </div>
+
+                <input
+                  type="text"
+                  value={settings[fieldKey]}
+                  onChange={(e) => updateField(fieldKey, e.target.value)}
+                  placeholder={kind === 'youtube' ? '/path/to/youtube_cookies.txt' : '/path/to/gallery_cookies.txt'}
+                  className={`${inputClass} font-mono text-xs`}
+                  style={{ ...inputStyle, backgroundColor: 'var(--mg-card)' }}
+                />
+
+                <input
+                  ref={inputRef}
+                  type="file"
+                  accept=".txt,text/plain"
+                  className="hidden"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    setCookieBusyKind(kind);
+                    try {
+                      const fd = new FormData();
+                      fd.append('kind', kind);
+                      fd.append('file', file);
+                      const res = await fetch('/api/settings/cookies', { method: 'POST', body: fd });
+                      const data = await res.json().catch(() => ({}));
+                      if (!res.ok) {
+                        onNotify('error', data.error || 'Failed to upload cookies.txt');
+                        return;
+                      }
+                      if (data.settings) setSettings(data.settings);
+                      await loadCookieStatus();
+                      onNotify('success', `${kind === 'youtube' ? 'YouTube' : 'Gallery'} cookies uploaded and linked.`);
+                    } catch {
+                      onNotify('error', 'Failed to upload cookie file.');
+                    } finally {
+                      setCookieBusyKind(null);
+                    }
+                  }}
+                />
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => inputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium whitespace-nowrap disabled:opacity-50"
+                    style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)', backgroundColor: 'var(--mg-card)' }}
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>{busy ? 'Saving...' : 'Upload .txt'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      setCookiePasteKind(cookiePasteKind === kind ? null : kind);
+                      setCookiePasteText('');
+                    }}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium whitespace-nowrap disabled:opacity-50"
+                    style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)', backgroundColor: 'var(--mg-card)' }}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    <span>Paste Text</span>
+                  </button>
+                  {(st?.configured || settings[fieldKey]) && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={async () => {
+                        setCookieBusyKind(kind);
+                        try {
+                          const res = await fetch(`/api/settings/cookies/${kind}`, { method: 'DELETE' });
+                          const data = await res.json().catch(() => ({}));
+                          if (!res.ok) {
+                            onNotify('error', data.error || 'Failed to clear cookies');
+                            return;
+                          }
+                          if (data.settings) setSettings(data.settings);
+                          await loadCookieStatus();
+                          onNotify('info', `${kind === 'youtube' ? 'YouTube' : 'Gallery'} cookies cleared.`);
+                        } catch {
+                          onNotify('error', 'Failed to clear cookies.');
+                        } finally {
+                          setCookieBusyKind(null);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border text-xs font-medium text-red-500 border-red-500/40 whitespace-nowrap disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Clear</span>
+                    </button>
+                  )}
+                </div>
+
+                {cookiePasteKind === kind && (
+                  <div className="flex flex-col gap-2 pt-1">
+                    <textarea
+                      rows={4}
+                      value={cookiePasteText}
+                      onChange={(e) => setCookiePasteText(e.target.value)}
+                      placeholder="# Netscape HTTP Cookie File&#10;.youtube.com&#9;TRUE&#9;/&#9;TRUE&#9;..."
+                      className={`${inputClass} font-mono text-xs resize-y`}
+                      style={{ ...inputStyle, backgroundColor: 'var(--mg-card)' }}
+                    />
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCookiePasteKind(null);
+                          setCookiePasteText('');
+                        }}
+                        className="px-2.5 py-1 rounded-md border text-xs"
+                        style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-muted)' }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || !cookiePasteText.trim()}
+                        onClick={async () => {
+                          setCookieBusyKind(kind);
+                          try {
+                            const res = await fetch('/api/settings/cookies', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ kind, content: cookiePasteText }),
+                            });
+                            const data = await res.json().catch(() => ({}));
+                            if (!res.ok) {
+                              onNotify('error', data.error || 'Invalid Netscape cookies.txt content');
+                              return;
+                            }
+                            if (data.settings) setSettings(data.settings);
+                            setCookiePasteKind(null);
+                            setCookiePasteText('');
+                            await loadCookieStatus();
+                            onNotify('success', `${kind === 'youtube' ? 'YouTube' : 'Gallery'} cookies saved.`);
+                          } catch {
+                            onNotify('error', 'Failed to save pasted cookies.');
+                          } finally {
+                            setCookieBusyKind(null);
+                          }
+                        }}
+                        className="px-3 py-1 rounded-md text-xs font-semibold text-white disabled:opacity-50"
+                        style={{ backgroundColor: 'var(--mg-accent)' }}
+                      >
+                        Save Cookies
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
           <label className="flex flex-col gap-1.5 text-xs font-medium">
             <span>yt-dlp Extra Args</span>
             <input

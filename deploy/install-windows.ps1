@@ -82,10 +82,22 @@ MEDIAGRABBER_UPDATE_CHANNEL=$Channel
 
 Write-Host "==> Installing Node dependencies and building MediaGrabber..."
 npm install --no-package-lock --legacy-peer-deps
-npm run build
+npm run build:exe
+
+$ExePath = Join-Path $InstallDir "dist-exe\mediagrabber-win-x64.exe"
+if (Test-Path $ExePath) {
+    Copy-Item -Force $ExePath (Join-Path $InstallDir "mediagrabber.exe")
+    $RootExe = Join-Path $InstallDir "mediagrabber.exe"
+} else {
+    $RootExe = $null
+}
 
 if ($RegisterStartupTask) {
-    $Action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$InstallDir\deploy\start-windows.bat`""
+    if ($RootExe -and (Test-Path $RootExe)) {
+        $Action = New-ScheduledTaskAction -Execute $RootExe -Argument "--port $Port --data-dir `"$DataDir`"" -WorkingDirectory $InstallDir
+    } else {
+        $Action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c `"$InstallDir\deploy\start-windows.bat`""
+    }
     $Trigger = New-ScheduledTaskTrigger -AtLogOn
     $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
     Register-ScheduledTask -TaskName "MediaGrabber" -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null
@@ -94,5 +106,9 @@ if ($RegisterStartupTask) {
 
 Write-Host ""
 Write-Host "==> Installation complete!" -ForegroundColor Green
-Write-Host "    Start server:  .\deploy\start-windows.bat"
+if ($RootExe) {
+    Write-Host "    Start server:  .\mediagrabber.exe --open"
+} else {
+    Write-Host "    Start server:  .\deploy\start-windows.bat"
+}
 Write-Host "    Web UI URL:    http://127.0.0.1:$Port"

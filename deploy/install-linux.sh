@@ -24,8 +24,8 @@ for arg in "$@"; do
       ;;
     -h|--help)
       echo "Usage: $0 [--stable | --nightly]"
-      echo "  --stable   Track full stable releases only"
-      echo "  --nightly  Track nightly pre-releases and ${DEFAULT_BRANCH} branch (default)"
+      echo "  --stable   Track full stable releases only (${DEFAULT_BRANCH} branch)"
+      echo "  --nightly  Track nightly pre-releases and ${NIGHTLY_BRANCH} branch (default)"
       exit 0
       ;;
   esac
@@ -36,7 +36,7 @@ if [ -z "$RELEASE_CHANNEL" ]; then
     echo ""
     echo "Select MediaGrabber release channel:"
     echo "  1) Full Releases (Stable)"
-    echo "  2) Nightly Pre-Releases (Recommended for v2.0 preview features)"
+    echo "  2) Nightly Pre-Releases (Recommended for preview features)"
     read -r -p "Choose [1/2] (default: 2): " channel_choice || true
     case "${channel_choice:-2}" in
       1) RELEASE_CHANNEL="stable" ;;
@@ -71,9 +71,14 @@ if [ ! -f "$APP_DIR/package.json" ]; then
     cp -a "$SCRIPT_DIR/." "$APP_DIR/"
   else
     echo "==> Cloning MediaGrabber from $REPO_URL..."
-    git clone -b "$DEFAULT_BRANCH" "$REPO_URL" "$APP_DIR" \
-      || git clone -b "v2.0-app" "$REPO_URL" "$APP_DIR" \
-      || git clone "$REPO_URL" "$APP_DIR"
+    if [ "$RELEASE_CHANNEL" = "nightly" ]; then
+      git clone -b "$NIGHTLY_BRANCH" "$REPO_URL" "$APP_DIR" \
+        || git clone -b "$DEFAULT_BRANCH" "$REPO_URL" "$APP_DIR" \
+        || git clone "$REPO_URL" "$APP_DIR"
+    else
+      git clone -b "$DEFAULT_BRANCH" "$REPO_URL" "$APP_DIR" \
+        || git clone "$REPO_URL" "$APP_DIR"
+    fi
   fi
 fi
 

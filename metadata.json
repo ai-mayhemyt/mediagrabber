@@ -1,5 +1,5 @@
 {
-  "name": "Remix MediaGrabber",
+  "name": "Remix Remix MediaGrabber",
   "description": "Self-hosted media ingestion, download queue console, metadata editor, library deduplication, and Navidrome radio manager.",
   "requestFramePermissions": [],
   "majorCapabilities": [

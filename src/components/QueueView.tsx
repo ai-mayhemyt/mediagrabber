@@ -18,14 +18,17 @@ import {
   Layers,
   Smartphone,
   Play,
+  Subtitles,
+  Scissors,
+  ListVideo,
 } from 'lucide-react';
-import { Job, MediaPreviewItem, SignedFileDownload } from '../types';
+import { GrabOptions, Job, MediaPreviewItem, SignedFileDownload } from '../types';
 
 interface QueueViewProps {
   jobs: Job[];
   searchQuery?: string;
   onClearSearch?: () => void;
-  onGrab: (urls: string[], mode: 'video' | 'audio') => Promise<string[]>;
+  onGrab: (urls: string[], mode: 'video' | 'audio', options?: GrabOptions) => Promise<string[]>;
   onCancel: (id: string) => void;
   onRemove: (id: string) => void;
   onRetry: (id: string) => void;
@@ -73,6 +76,9 @@ export const QueueView: React.FC<QueueViewProps> = ({
 }) => {
   const [urlInput, setUrlInput] = useState('');
   const [mode, setMode] = useState<'video' | 'audio'>('video');
+  const [embedSubtitles, setEmbedSubtitles] = useState(false);
+  const [sponsorBlock, setSponsorBlock] = useState(false);
+  const [playlistMode, setPlaylistMode] = useState<'single' | 'playlist'>('single');
   const [submitting, setSubmitting] = useState(false);
   const [submittingCount, setSubmittingCount] = useState(0);
   const [activeBatchIds, setActiveBatchIds] = useState<string[]>([]);
@@ -207,7 +213,12 @@ export const QueueView: React.FC<QueueViewProps> = ({
     setSubmitting(true);
     setSubmittingCount(parsedUrls.length);
     try {
-      const createdIds = await onGrab(parsedUrls, mode);
+      const options: GrabOptions = {
+        embed_subtitles: mode === 'video' ? embedSubtitles : false,
+        sponsorblock: sponsorBlock,
+        playlist_mode: playlistMode,
+      };
+      const createdIds = await onGrab(parsedUrls, mode, options);
       if (createdIds.length > 0) {
         setActiveBatchIds(createdIds);
       }
@@ -510,6 +521,78 @@ export const QueueView: React.FC<QueueViewProps> = ({
               </span>
             </div>
           )}
+
+          <div
+            className="flex flex-wrap items-center justify-between gap-3 px-3.5 py-2.5 rounded-lg border text-xs"
+            style={{
+              backgroundColor: 'var(--mg-bg)',
+              borderColor: 'var(--mg-border)',
+            }}
+          >
+            <div className="flex flex-wrap items-center gap-4">
+              <label
+                className={`inline-flex items-center gap-2 ${
+                  mode === 'audio' ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                }`}
+                title="Download and embed English subtitles into video file"
+              >
+                <input
+                  type="checkbox"
+                  checked={mode === 'video' && embedSubtitles}
+                  disabled={mode === 'audio'}
+                  onChange={(e) => setEmbedSubtitles(e.target.checked)}
+                  className="accent-[var(--mg-accent)]"
+                />
+                <Subtitles className="w-3.5 h-3.5" style={{ color: 'var(--mg-accent)' }} />
+                <span>Embed Subtitles</span>
+              </label>
+
+              <label
+                className="inline-flex items-center gap-2 cursor-pointer"
+                title="Remove sponsored segments automatically via SponsorBlock"
+              >
+                <input
+                  type="checkbox"
+                  checked={sponsorBlock}
+                  onChange={(e) => setSponsorBlock(e.target.checked)}
+                  className="accent-[var(--mg-accent)]"
+                />
+                <Scissors className="w-3.5 h-3.5" style={{ color: 'var(--mg-accent)' }} />
+                <span>SponsorBlock</span>
+              </label>
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <ListVideo className="w-3.5 h-3.5 shrink-0" style={{ color: 'var(--mg-muted)' }} />
+              <div
+                className="inline-flex rounded-md border p-0.5"
+                style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+              >
+                <button
+                  type="button"
+                  onClick={() => setPlaylistMode('single')}
+                  className="px-2.5 py-1 rounded text-[11px] font-medium whitespace-nowrap transition-colors"
+                  style={{
+                    backgroundColor: playlistMode === 'single' ? 'var(--mg-accent)' : 'transparent',
+                    color: playlistMode === 'single' ? '#ffffff' : 'var(--mg-muted)',
+                  }}
+                >
+                  Single Video
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPlaylistMode('playlist')}
+                  className="px-2.5 py-1 rounded text-[11px] font-medium whitespace-nowrap transition-colors"
+                  style={{
+                    backgroundColor: playlistMode === 'playlist' ? 'var(--mg-accent)' : 'transparent',
+                    color: playlistMode === 'playlist' ? '#ffffff' : 'var(--mg-muted)',
+                  }}
+                >
+                  Full Playlist
+                </button>
+              </div>
+            </div>
+          </div>
         </form>
       </section>
 
@@ -629,6 +712,24 @@ export const QueueView: React.FC<QueueViewProps> = ({
                             <span>{job.engine}</span>
                             <span aria-hidden="true">·</span>
                             <span className="font-mono tabular-nums">{job.job_id.slice(0, 8)}</span>
+                            {job.options?.embed_subtitles && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span style={{ color: 'var(--mg-accent)' }}>Subtitles</span>
+                              </>
+                            )}
+                            {job.options?.sponsorblock && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span style={{ color: 'var(--mg-accent)' }}>SponsorBlock</span>
+                              </>
+                            )}
+                            {job.options?.playlist_mode === 'playlist' && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span style={{ color: 'var(--mg-accent)' }}>Playlist</span>
+                              </>
+                            )}
                           </div>
                           <p className="text-xs truncate mt-1" style={{ color: 'var(--mg-muted)' }}>
                             {job.url}

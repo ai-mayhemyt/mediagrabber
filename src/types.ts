@@ -1,12 +1,19 @@
 export type EngineType = 'YOUTUBE' | 'YT MUSIC' | 'SPOTIFY' | 'GALLERY';
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
 
+export interface GrabOptions {
+  embed_subtitles?: boolean;
+  sponsorblock?: boolean;
+  playlist_mode?: 'single' | 'playlist';
+}
+
 export interface Job {
   job_id: string;
   url: string;
   title?: string;
   uploader?: string;
   mode: 'video' | 'audio';
+  options?: GrabOptions;
   engine: EngineType;
   status: JobStatus;
   progress: number;
@@ -56,8 +63,24 @@ export interface MediaGrabberSettings {
   gallerydl_extra: string;
   webhook_url?: string;
   stale_timeout_minutes?: number;
+  max_concurrent_downloads?: number;
   quick_start_completed?: boolean;
   update_channel?: 'stable' | 'nightly';
+}
+
+export interface CookieFileStatus {
+  kind: 'youtube' | 'gallery';
+  configured: boolean;
+  source: 'managed' | 'custom_path' | 'none';
+  path: string;
+  size_bytes: number;
+  line_count: number;
+  updated_at: string | null;
+}
+
+export interface CookieStatusMap {
+  youtube: CookieFileStatus;
+  gallery: CookieFileStatus;
 }
 
 export interface StorageMount {
@@ -160,12 +183,33 @@ export interface VersionInfo {
   latest: string;
   channel?: 'nightly' | 'stable';
   selected_channel?: 'nightly' | 'stable';
+  branch?: 'mediagrabber' | 'mediagrabber-nightly';
+  branch_url?: string;
   is_prerelease?: boolean;
   update_available: boolean;
   release_zip_url?: string | null;
+  binary_asset_url?: string | null;
+  is_binary?: boolean;
   checked_at: string;
   tags: string[];
   error: string | null;
+}
+
+export interface DependencyToolStatus {
+  id: string;
+  name: string;
+  required: boolean;
+  installed: boolean;
+  path: string | null;
+  version: string | null;
+  updatable: boolean;
+  install_hint: string;
+}
+
+export interface DependencyHealthReport {
+  platform: 'windows' | 'linux' | 'darwin';
+  checked_at: string;
+  tools: DependencyToolStatus[];
 }
 
 export interface SignedFileDownload {
@@ -179,6 +223,10 @@ export interface YoutubeFeedChannel {
   channelId: string;
   title: string;
   addedAt: string;
+  auto_download?: boolean;
+  auto_mode?: 'video' | 'audio';
+  auto_since?: string;
+  last_checked_at?: string;
 }
 
 export interface YoutubeFeedVideo {

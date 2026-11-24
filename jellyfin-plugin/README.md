@@ -64,7 +64,7 @@ This plugin requires a running **[MediaGrabber](https://github.com/ai-mayhemyt/m
      ```powershell
      git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git C:\MediaGrabber && cd C:\MediaGrabber && .\deploy\install-windows.ps1
      ```
-   Choose **Nightly Pre-Releases** (`v2.0-pre8+`) or **Full Releases** during installation. The service runs on port **`3000`** (`http://<your-server-ip>:3000`).
+   Choose **Nightly Pre-Releases** (`mediagrabber-nightly`) or **Full Releases** during installation. The service runs on port **`3000`** (`http://<your-server-ip>:3000`).
 2. **Complete the First-Run Setup Wizard**:
    - Open `http://<your-server-ip>:3000` in your browser and follow the 5-step Setup Wizard to create your Admin account (without affecting existing accounts), set your media library folders (e.g., `/media/YouTube`, `/media/Music`), and optionally link Jellyfin library refresh.
 3. **Generate a MediaGrabber API Key**:

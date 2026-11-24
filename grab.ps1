@@ -72,8 +72,11 @@ $AudioBitrate = if ($env:GRAB_AUDIO_BITRATE) { $env:GRAB_AUDIO_BITRATE } else { 
 $Container = if ($env:GRAB_CONTAINER) { $env:GRAB_CONTAINER } else { "mp4" }
 $GenerateLrc = ($env:GRAB_GENERATE_LRC -eq "true")
 $AudioOnly = ($env:GRAB_AUDIO_ONLY -eq "true") -or ($Engine -eq "YT MUSIC")
+$EmbedSubs = ($env:GRAB_EMBED_SUBS -eq "true")
+$SponsorBlock = ($env:GRAB_SPONSORBLOCK -eq "true")
+$AllowPlaylist = ($env:GRAB_PLAYLIST -eq "true")
 
-Write-GrabLog "Video max: ${VideoRes}p, Audio: $AudioFormat ($AudioBitrate), Container: $Container, Audio-Only: $AudioOnly"
+Write-GrabLog "Video max: ${VideoRes}p, Audio: $AudioFormat ($AudioBitrate), Container: $Container, Audio-Only: $AudioOnly, Subtitles: $EmbedSubs, SponsorBlock: $SponsorBlock, Playlist: $AllowPlaylist"
 
 # ---------- SPOTIFY PIPELINE ----------
 if ($Engine -eq "SPOTIFY") {
@@ -156,6 +159,9 @@ $ArgsList = @(
 )
 if ($CookiesYoutube -and (Test-Path $CookiesYoutube)) { $ArgsList += @("--cookies", $CookiesYoutube) }
 if ($DenoBin) { $ArgsList += @("--js-runtimes", "deno:$DenoBin", "--remote-components", "ejs:github") }
+if ($AllowPlaylist) { $ArgsList += "--yes-playlist" } else { $ArgsList += "--no-playlist" }
+if ($EmbedSubs -and (-not $AudioOnly)) { $ArgsList += @("--write-subs", "--write-auto-subs", "--embed-subs", "--sub-langs", "en.*,en") }
+if ($SponsorBlock) { $ArgsList += @("--sponsorblock-remove", "sponsor") }
 
 if ($AudioOnly) {
     $ArgsList += @("--extract-audio", "--audio-format", $AudioFormat, "--audio-quality", "0", "-o", ".\\%(title).150s.%(ext)s")
