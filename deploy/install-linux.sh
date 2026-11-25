@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MediaGrabber v2.0 — Linux Server Auto-Installer (Ubuntu/Debian)
+# MediaGrabber v2.1 — Linux Server Auto-Installer (Ubuntu/Debian)
 # Usage:
 #   ./deploy/install-linux.sh [--stable | --nightly]
-#   RELEASE_CHANNEL=nightly ./deploy/install-linux.sh
+#   RELEASE_CHANNEL=stable ./deploy/install-linux.sh
 
 APP_DIR="${APP_DIR:-/opt/mediagrabber}"
 DATA_DIR="${MEDIAGRABBER_DATA_DIR:-/var/lib/mediagrabber}"
@@ -13,6 +13,9 @@ REPO_URL="${REPO_URL:-https://github.com/ai-mayhemyt/mediagrabber.git}"
 DEFAULT_BRANCH="${DEFAULT_BRANCH:-mediagrabber}"
 NIGHTLY_BRANCH="${NIGHTLY_BRANCH:-mediagrabber-nightly}"
 RELEASE_CHANNEL="${RELEASE_CHANNEL:-}"
+
+TARGET_USER="${SUDO_USER:-$(whoami)}"
+TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || id -gn)"
 
 for arg in "$@"; do
   case "$arg" in
@@ -24,8 +27,8 @@ for arg in "$@"; do
       ;;
     -h|--help)
       echo "Usage: $0 [--stable | --nightly]"
-      echo "  --stable   Track full stable releases only"
-      echo "  --nightly  Track nightly pre-releases and ${DEFAULT_BRANCH} branch (default)"
+      echo "  --stable   Track full stable releases only (${DEFAULT_BRANCH} branch, default)"
+      echo "  --nightly  Track nightly pre-releases and ${NIGHTLY_BRANCH} branch"
       exit 0
       ;;
   esac
@@ -35,23 +38,23 @@ if [ -z "$RELEASE_CHANNEL" ]; then
   if [ -t 0 ]; then
     echo ""
     echo "Select MediaGrabber release channel:"
-    echo "  1) Full Releases (Stable)"
-    echo "  2) Nightly Pre-Releases (Recommended for v2.0 preview features)"
-    read -r -p "Choose [1/2] (default: 2): " channel_choice || true
-    case "${channel_choice:-2}" in
-      1) RELEASE_CHANNEL="stable" ;;
-      *) RELEASE_CHANNEL="nightly" ;;
+    echo "  1) Full Releases (Stable - recommended)"
+    echo "  2) Nightly Pre-Releases"
+    read -r -p "Choose [1/2] (default: 1): " channel_choice || true
+    case "${channel_choice:-1}" in
+      2) RELEASE_CHANNEL="nightly" ;;
+      *) RELEASE_CHANNEL="stable" ;;
     esac
   else
-    RELEASE_CHANNEL="nightly"
+    RELEASE_CHANNEL="stable"
   fi
 fi
 
 echo "==> Selected release channel: ${RELEASE_CHANNEL}"
-echo "==> Installing system prerequisites (curl, git, ffmpeg, unzip)..."
+echo "==> Installing system prerequisites (curl, git, ffmpeg, jq, unzip, python3, pip, venv)..."
 if command -v apt-get >/dev/null 2>&1; then
   sudo apt-get update -y
-  sudo apt-get install -y curl git ffmpeg unzip ca-certificates
+  sudo apt-get install -y curl git ffmpeg jq unzip ca-certificates python3 python3-pip python3-venv
 fi
 
 if ! command -v node >/dev/null 2>&1 || [ "$(node -v | sed 's/v//' | cut -d. -f1)" -lt 20 ]; then
@@ -62,18 +65,24 @@ fi
 
 echo "==> Preparing directories ($APP_DIR & $DATA_DIR)..."
 sudo mkdir -p "$APP_DIR" "$DATA_DIR"
-sudo chown -R "$(id -u):$(id -g)" "$APP_DIR" "$DATA_DIR"
+sudo chown -R "${TARGET_USER}:${TARGET_GROUP}" "$APP_DIR" "$DATA_DIR"
 
 if [ ! -f "$APP_DIR/package.json" ]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   if [ -f "$SCRIPT_DIR/package.json" ]; then
     echo "==> Copying project files from $SCRIPT_DIR to $APP_DIR..."
     cp -a "$SCRIPT_DIR/." "$APP_DIR/"
+    sudo chown -R "${TARGET_USER}:${TARGET_GROUP}" "$APP_DIR"
   else
     echo "==> Cloning MediaGrabber from $REPO_URL..."
-    git clone -b "$DEFAULT_BRANCH" "$REPO_URL" "$APP_DIR" \
-      || git clone -b "v2.0-app" "$REPO_URL" "$APP_DIR" \
-      || git clone "$REPO_URL" "$APP_DIR"
+    if [ "$RELEASE_CHANNEL" = "nightly" ]; then
+      git clone -b "$NIGHTLY_BRANCH" "$REPO_URL" "$APP_DIR" \
+        || git clone -b "$DEFAULT_BRANCH" "$REPO_URL" "$APP_DIR" \
+        || git clone "$REPO_URL" "$APP_DIR"
+    else
+      git clone -b "$DEFAULT_BRANCH" "$REPO_URL" "$APP_DIR" \
+        || git clone "$REPO_URL" "$APP_DIR"
+    fi
   fi
 fi
 
@@ -87,7 +96,8 @@ if [ -d .git ]; then
       echo "==> Checking out latest full release tag: $LATEST_STABLE_TAG"
       git checkout "$LATEST_STABLE_TAG" || true
     else
-      echo "==> No full release tag found yet; staying on current checkout."
+      git checkout "$DEFAULT_BRANCH" 2>/dev/null || true
+      git pull --ff-only origin "$DEFAULT_BRANCH" 2>/dev/null || true
     fi
   else
     echo "==> Tracking nightly channel (${NIGHTLY_BRANCH} / latest nightly pre-release)..."
@@ -101,12 +111,31 @@ if [ -d .git ]; then
   fi
 fi
 
-if [ ! -f /usr/local/bin/grab ] && [ -f "grab" ]; then
-  echo "==> Installing grab wrapper to /usr/local/bin/grab..."
+echo "==> Installing mandatory downloaders (yt-dlp, spotdl, gallery-dl) into ${APP_DIR}/.venv..."
+VENV_DIR="${APP_DIR}/.venv"
+if [ ! -d "$VENV_DIR" ]; then
+  python3 -m venv "$VENV_DIR"
+fi
+"$VENV_DIR/bin/pip" install --upgrade pip
+"$VENV_DIR/bin/pip" install --upgrade yt-dlp spotdl gallery-dl
+
+for tool in yt-dlp spotdl gallery-dl; do
+  if [ -x "$VENV_DIR/bin/$tool" ]; then
+    sudo ln -sf "$VENV_DIR/bin/$tool" "/usr/local/bin/$tool"
+  fi
+done
+
+for tool in ffmpeg jq yt-dlp spotdl gallery-dl; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Error: Mandatory media tool '$tool' failed to install or is not in PATH." >&2
+    exit 1
+  fi
+done
+echo "==> Verified mandatory tools: ffmpeg, jq, yt-dlp, spotdl, gallery-dl"
+
+if [ -f "grab" ]; then
+  echo "==> Installing/updating grab wrapper to /usr/local/bin/grab..."
   sudo install -m 755 grab /usr/local/bin/grab
-elif [ -f /usr/local/bin/grab ]; then
-  echo "==> Existing /usr/local/bin/grab detected; preserving and ensuring executable..."
-  sudo chmod 755 /usr/local/bin/grab
 fi
 sudo mkdir -p /tmp/mediagrabber
 sudo chmod 1777 /tmp/mediagrabber
@@ -124,9 +153,11 @@ else
   echo "MEDIAGRABBER_UPDATE_CHANNEL=${RELEASE_CHANNEL}" >> .env
 fi
 
-echo "==> Installing Node dependencies & building frontend..."
+echo "==> Installing Node dependencies & building MediaGrabber..."
 npm install --no-package-lock --legacy-peer-deps
 npm run build
+npm run build:server
+sudo chown -R "${TARGET_USER}:${TARGET_GROUP}" "$APP_DIR" "$DATA_DIR"
 
 if command -v systemctl >/dev/null 2>&1; then
   echo "==> Installing systemd service (mediagrabber.service)..."
@@ -138,7 +169,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$(whoami)
+User=${TARGET_USER}
 WorkingDirectory=${APP_DIR}
 EnvironmentFile=-${APP_DIR}/.env
 Environment=NODE_ENV=production
@@ -153,7 +184,8 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable --now mediagrabber
   sudo systemctl status mediagrabber --no-pager || true
-  echo "==> MediaGrabber (${RELEASE_CHANNEL} channel) is running on port ${PORT}."
+  echo "==> MediaGrabber (${RELEASE_CHANNEL} channel) is running on http://127.0.0.1:${PORT}."
+  echo "==> First Run: open http://127.0.0.1:${PORT} in your browser to create your Administrator account."
 else
   echo "==> systemd not detected. Start manually with: ./deploy/start.sh"
 fi

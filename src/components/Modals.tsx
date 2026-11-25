@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
   X,
@@ -30,6 +30,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Send,
+  Keyboard,
 } from 'lucide-react';
 import {
   ActiveView,
@@ -187,7 +188,100 @@ export const JobLogModal: React.FC<{
   job: Job | null;
   onClose: () => void;
 }> = ({ job, onClose }) => {
+  const [streamLines, setStreamLines] = useState<string[]>([]);
+  const [liveStatus, setLiveStatus] = useState<Job['status']>('queued');
+  const [streamActive, setStreamActive] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const preRef = useRef<HTMLPreElement | null>(null);
+  const jobId = job?.job_id ?? null;
+
+  useEffect(() => {
+    if (!job) {
+      setStreamLines([]);
+      setStreamActive(false);
+      return;
+    }
+    setStreamLines(Array.isArray(job.log) ? job.log : []);
+    setLiveStatus(job.status);
+
+    const isTerminal = job.status === 'done' || job.status === 'failed' || job.status === 'cancelled';
+    if (isTerminal || typeof EventSource === 'undefined') {
+      setStreamActive(false);
+      return;
+    }
+
+    const es = new EventSource(`/api/log/${encodeURIComponent(job.job_id)}/stream`);
+    setStreamActive(true);
+
+    const handleInit = (evt: MessageEvent) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (Array.isArray(data?.log)) setStreamLines(data.log);
+        if (data?.status) setLiveStatus(data.status);
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    const handleLine = (evt: MessageEvent) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (typeof data?.line === 'string') {
+          setStreamLines((prev) => {
+            if (prev.length > 0 && prev[prev.length - 1] === data.line) return prev;
+            const next = [...prev, data.line];
+            return next.length > 500 ? next.slice(-500) : next;
+          });
+        }
+        if (data?.status) setLiveStatus(data.status);
+      } catch {
+        // ignore parse errors
+      }
+    };
+
+    const handleStatus = (evt: MessageEvent) => {
+      try {
+        const data = JSON.parse(evt.data);
+        if (data?.status) {
+          setLiveStatus(data.status);
+          if (data.status === 'done' || data.status === 'failed' || data.status === 'cancelled') {
+            setStreamActive(false);
+            es.close();
+          }
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    es.addEventListener('init', handleInit as EventListener);
+    es.addEventListener('line', handleLine as EventListener);
+    es.addEventListener('status', handleStatus as EventListener);
+    es.onerror = () => {
+      setStreamActive(false);
+    };
+
+    return () => {
+      setStreamActive(false);
+      es.close();
+    };
+  }, [jobId]);
+
+  // Keep lines synced with parent polling fallback if SSE isn't active
+  useEffect(() => {
+    if (!job || streamActive) return;
+    setStreamLines((prev) => (job.log.length >= prev.length ? job.log : prev));
+    setLiveStatus(job.status);
+  }, [job, streamActive]);
+
+  useEffect(() => {
+    if (!autoScroll || !preRef.current) return;
+    preRef.current.scrollTop = preRef.current.scrollHeight;
+  }, [streamLines.length, autoScroll]);
+
   if (!job) return null;
+  const isRunning = liveStatus === 'running' || liveStatus === 'queued';
+
   return (
     <div className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4">
       <div
@@ -196,22 +290,54 @@ export const JobLogModal: React.FC<{
       >
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
-            <h3 className="font-display text-sm font-semibold truncate">
-              Execution Log — {job.title || job.job_id.slice(0, 8)}
-            </h3>
+            <div className="flex items-center gap-2.5">
+              <h3 className="font-display text-sm font-semibold truncate">
+                Execution Log — {job.title || job.job_id.slice(0, 8)}
+              </h3>
+              <span
+                className="inline-flex items-center gap-1.5 text-[11px] font-mono uppercase shrink-0"
+                style={{
+                  color:
+                    liveStatus === 'done'
+                      ? '#10b981'
+                      : liveStatus === 'failed'
+                      ? '#ef4444'
+                      : isRunning
+                      ? 'var(--mg-accent)'
+                      : 'var(--mg-muted)',
+                }}
+              >
+                {streamActive && isRunning && (
+                  <span className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: 'var(--mg-accent)' }} />
+                )}
+                <span>{streamActive && isRunning ? 'LIVE STREAM' : liveStatus.toUpperCase()}</span>
+              </span>
+            </div>
             <p className="text-xs font-mono truncate" style={{ color: 'var(--mg-muted)' }}>
               {job.url}
             </p>
           </div>
-          <button type="button" onClick={onClose} className="p-1.5 rounded-md border" style={{ borderColor: 'var(--mg-border)' }}>
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3 shrink-0">
+            <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer" style={{ color: 'var(--mg-muted)' }}>
+              <input
+                type="checkbox"
+                checked={autoScroll}
+                onChange={(e) => setAutoScroll(e.target.checked)}
+                className="w-3.5 h-3.5 accent-[var(--mg-accent)]"
+              />
+              <span>Auto-scroll</span>
+            </label>
+            <button type="button" onClick={onClose} className="p-1.5 rounded-md border" style={{ borderColor: 'var(--mg-border)' }}>
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
         <pre
-          className="flex-1 p-3.5 rounded-lg border text-xs font-mono overflow-auto whitespace-pre-wrap"
+          ref={preRef}
+          className="flex-1 p-3.5 rounded-lg border text-xs font-mono overflow-auto whitespace-pre-wrap min-h-[240px]"
           style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
         >
-          {job.log.join('\n')}
+          {streamLines.length > 0 ? streamLines.join('\n') : 'Waiting for extractor output...'}
         </pre>
       </div>
     </div>
@@ -1644,23 +1770,30 @@ export const QuickStartModal: React.FC<{
   const [draft, setDraft] = useState<Partial<MediaGrabberSettings>>({});
   const [testingWebhook, setTestingWebhook] = useState(false);
 
+  const wasOpenRef = useRef(false);
+
   useEffect(() => {
+    const justOpened = open && !wasOpenRef.current;
+    wasOpenRef.current = open;
     if (!open) return;
-    setStep(0);
-    setAccountAction(user ? 'keep' : 'create');
-    setNewAdminUser('');
-    setNewAdminDisplay('');
-    setNewAdminEmail('');
-    setNewAdminPass('');
-    setNewAdminPass2('');
-    setSwitchToNewAdmin(true);
+
+    if (justOpened) {
+      setStep(0);
+      setAccountAction(user ? 'keep' : 'create');
+      setNewAdminUser('');
+      setNewAdminDisplay('');
+      setNewAdminEmail('');
+      setNewAdminPass('');
+      setNewAdminPass2('');
+      setSwitchToNewAdmin(true);
+      setEditPassword('');
+      setQsTotpQr('');
+      setQsTotpUri('');
+      setQsTotpSecret('');
+      setQsTotpCode('');
+    }
     setEditDisplay(user?.display_name || '');
     setEditEmail(user?.email || '');
-    setEditPassword('');
-    setQsTotpQr('');
-    setQsTotpUri('');
-    setQsTotpSecret('');
-    setQsTotpCode('');
 
     if (settings) {
       setDraft(settings);
@@ -1783,9 +1916,12 @@ export const QuickStartModal: React.FC<{
           })
           .catch(() => {});
 
+        const preserved = Number(data.preserved_count ?? 0);
         onNotify(
           'success',
-          `Created admin "${data.user?.username}" — ${data.preserved_count ?? 0} existing account(s) preserved.`
+          preserved > 0
+            ? `Created admin "${data.user?.username}" — ${preserved} existing account(s) preserved.`
+            : `Created admin account "${data.user?.username}". Welcome to MediaGrabber!`
         );
         setStep(1);
         return;
@@ -2737,5 +2873,142 @@ export const QuickStartModal: React.FC<{
     </div>
   );
 };
+
+export const ShortcutsModal: React.FC<{
+  open: boolean;
+  isAdmin?: boolean;
+  onClose: () => void;
+}> = ({ open, isAdmin = false, onClose }) => {
+  if (!open) return null;
+
+  const sections: {
+    title: string;
+    items: { keys: string[]; description: string }[];
+  }[] = [
+    {
+      title: 'Navigation',
+      items: [
+        { keys: ['1'], description: 'Switch to Queue & Grabber' },
+        { keys: ['2'], description: 'Switch to Download History' },
+        { keys: ['3'], description: 'Switch to Library Utilities' },
+        ...(isAdmin ? [{ keys: ['4'], description: 'Switch to System Settings (Admin)' }] : []),
+      ],
+    },
+    {
+      title: 'Queue & Actions',
+      items: [
+        { keys: ['N'], description: 'Jump to Queue & focus URL batch box' },
+        { keys: ['Ctrl / ⌘', 'Enter'], description: 'Submit batch grab while typing URLs' },
+        { keys: ['/', 'or', 'Ctrl / ⌘ + K'], description: 'Focus global queue & history search' },
+        { keys: ['R'], description: 'Refresh queue, history, and storage stats' },
+      ],
+    },
+    {
+      title: 'General',
+      items: [
+        { keys: ['?'], description: 'Open or close Keyboard Shortcuts' },
+        { keys: ['Esc'], description: 'Close active modal or clear search box' },
+      ],
+    },
+  ];
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/75 flex items-center justify-center p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shortcuts-modal-title"
+        className="w-full max-w-lg rounded-xl border p-5 flex flex-col gap-4 max-h-[88vh] overflow-y-auto"
+        style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+      >
+        <div
+          className="flex items-start justify-between gap-3 border-b pb-3"
+          style={{ borderColor: 'var(--mg-border)' }}
+        >
+          <div>
+            <h2 id="shortcuts-modal-title" className="font-display text-base font-semibold flex items-center gap-2">
+              <Keyboard className="w-4 h-4" style={{ color: 'var(--mg-accent)' }} />
+              <span>Keyboard Shortcuts</span>
+            </h2>
+            <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
+              Single-key shortcuts pause automatically while typing inside form fields or modals.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close keyboard shortcuts"
+            className="p-1.5 rounded-lg border shrink-0"
+            style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="flex flex-col gap-4">
+          {sections.map((section) => (
+            <div key={section.title} className="flex flex-col gap-2">
+              <h3 className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--mg-muted)' }}>
+                {section.title}
+              </h3>
+              <div
+                className="divide-y rounded-lg border overflow-hidden"
+                style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+              >
+                {section.items.map((item) => (
+                  <div
+                    key={item.description}
+                    className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-xs"
+                    style={{ borderColor: 'var(--mg-border)' }}
+                  >
+                    <span style={{ color: 'var(--mg-text)' }}>{item.description}</span>
+                    <div className="flex items-center gap-1 shrink-0">
+                      {item.keys.map((k, idx) =>
+                        k === 'or' ? (
+                          <span key={idx} className="text-[11px] px-0.5" style={{ color: 'var(--mg-muted)' }}>
+                            or
+                          </span>
+                        ) : (
+                          <kbd
+                            key={idx}
+                            className="font-mono text-[11px] font-semibold px-2 py-0.5 rounded border whitespace-nowrap"
+                            style={{
+                              backgroundColor: 'var(--mg-card)',
+                              borderColor: 'var(--mg-border)',
+                              color: 'var(--mg-text)',
+                            }}
+                          >
+                            {k}
+                          </kbd>
+                        )
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex justify-end pt-2 border-t" style={{ borderColor: 'var(--mg-border)' }}>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap"
+            style={{ backgroundColor: 'var(--mg-accent)' }}
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 
 

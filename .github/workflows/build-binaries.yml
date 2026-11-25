@@ -1,0 +1,70 @@
+name: Build & Attach Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install --no-package-lock --legacy-peer-deps
+
+      - name: Typecheck & build frontend + binaries
+        run: |
+          npm run lint
+          npm run build:binaries
+
+      - name: Package unified Linux & Windows zip bundle
+        shell: python3 {0}
+        run: |
+          import os, zipfile
+
+          tag = os.environ.get("GITHUB_REF_NAME", "v2.1")
+          items = [
+              "package.json", "server.ts", "tsconfig.json", "vite.config.ts",
+              "index.html", "metadata.json", "README.md", "WINDOWS.md",
+              "LINUX.md", "HANDOFF.md", "LICENSE", ".env.example", ".gitignore",
+              "src", "public", "deploy", "snap", "jellyfin-plugin", "grab", "grab.ps1", ".github",
+          ]
+          skip_dirs = {"node_modules", "dist", "dist-server", "dist-exe", "dist-deb", ".git", "bin", "obj", "aistudio"}
+          os.makedirs("dist-exe", exist_ok=True)
+          out_zip = os.path.join("dist-exe", f"mediagrabber-{tag}.zip")
+          with zipfile.ZipFile(out_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+              for item in items:
+                  if not os.path.exists(item):
+                      continue
+                  if os.path.isfile(item):
+                      zf.write(item, item)
+                  else:
+                      for root, dirs, files in os.walk(item):
+                          dirs[:] = [d for d in dirs if d not in skip_dirs]
+                          for f in files:
+                              if f == ".env":
+                                  continue
+                              fp = os.path.join(root, f)
+                              zf.write(fp, fp)
+
+      - name: Upload release assets (on tag push)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-exe/mediagrabber-win-x64.exe
+            dist-exe/mediagrabber-linux-x64
+            dist-exe/*.zip
+          prerelease: ${{ contains(github.ref_name, 'pre') || contains(github.ref_name, 'nightly') || contains(github.ref_name, 'rc') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}

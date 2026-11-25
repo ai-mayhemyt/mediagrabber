@@ -16,6 +16,7 @@ import {
   X,
   ChevronDown,
   ChevronRight,
+  Zap,
 } from 'lucide-react';
 import {
   ActiveView,
@@ -51,7 +52,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectView,
   user,
   storage,
-  version = 'v2.0-pre8',
+  version = 'v2.1',
   onOpenAccount,
   onOpenTheme,
   onLogout,
@@ -67,6 +68,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const [feedInput, setFeedInput] = useState('');
   const [loadingFeeds, setLoadingFeeds] = useState(false);
   const [addingFeed, setAddingFeed] = useState(false);
+  const [pollingAuto, setPollingAuto] = useState(false);
   const [grabbingVideoId, setGrabbingVideoId] = useState<string | null>(null);
 
   const loadYoutubeFeeds = useCallback(async (force = false) => {
@@ -127,6 +129,62 @@ export const Sidebar: React.FC<SidebarProps> = ({
       }
     } catch {
       onNotify?.('error', 'Failed to remove channel.');
+    }
+  };
+
+  const handleToggleAutoGrab = async (
+    ch: YoutubeFeedChannel,
+    nextEnabled: boolean,
+    nextMode: 'video' | 'audio'
+  ) => {
+    try {
+      const res = await fetch(`/api/feeds/youtube/${encodeURIComponent(ch.channelId)}/auto`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auto_download: nextEnabled, auto_mode: nextMode }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        onNotify?.('error', data.error || 'Could not update Auto-Grab setting.');
+        return;
+      }
+      if (Array.isArray(data.channels)) {
+        setChannels(data.channels);
+      }
+      onNotify?.(
+        nextEnabled ? 'success' : 'info',
+        nextEnabled
+          ? `Auto-Grab enabled for ${ch.title} (${nextMode}).`
+          : `Auto-Grab disabled for ${ch.title}.`
+      );
+    } catch {
+      onNotify?.('error', 'Failed to update Auto-Grab setting.');
+    }
+  };
+
+  const handlePollAutoGrabNow = async () => {
+    if (pollingAuto) return;
+    setPollingAuto(true);
+    try {
+      const res = await fetch('/api/feeds/youtube/poll', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        onNotify?.('error', data.error || 'Auto-Grab poll failed.');
+        return;
+      }
+      if (Array.isArray(data.channels)) {
+        setChannels(data.channels);
+      }
+      onNotify?.(
+        data.queuedCount > 0 ? 'success' : 'info',
+        data.queuedCount > 0
+          ? `Auto-Grab queued ${data.queuedCount} new upload(s).`
+          : `Checked ${data.checked} Auto-Grab channel(s); no new uploads yet.`
+      );
+    } catch {
+      onNotify?.('error', 'Failed to check Auto-Grab channels.');
+    } finally {
+      setPollingAuto(false);
     }
   };
 
@@ -277,17 +335,32 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 </span>
               )}
             </button>
-            <button
-              type="button"
-              disabled={loadingFeeds}
-              onClick={() => void loadYoutubeFeeds(true)}
-              title="Refresh YouTube RSS feeds"
-              aria-label="Refresh YouTube RSS feeds"
-              className="p-1 rounded hover:opacity-80 disabled:opacity-40 shrink-0"
-              style={{ color: 'var(--mg-muted)' }}
-            >
-              <RefreshCw className={`w-3 h-3 ${loadingFeeds ? 'animate-spin' : ''}`} />
-            </button>
+            <div className="flex items-center gap-1 shrink-0">
+              {channels.some((ch) => ch.auto_download) && (
+                <button
+                  type="button"
+                  disabled={pollingAuto}
+                  onClick={() => void handlePollAutoGrabNow()}
+                  title="Check Auto-Grab channels for new uploads now"
+                  aria-label="Poll Auto-Grab channels now"
+                  className="p-1 rounded hover:opacity-80 disabled:opacity-40 shrink-0"
+                  style={{ color: 'var(--mg-accent)' }}
+                >
+                  <Zap className={`w-3 h-3 ${pollingAuto ? 'animate-pulse' : ''}`} />
+                </button>
+              )}
+              <button
+                type="button"
+                disabled={loadingFeeds}
+                onClick={() => void loadYoutubeFeeds(true)}
+                title="Refresh YouTube RSS feeds"
+                aria-label="Refresh YouTube RSS feeds"
+                className="p-1 rounded hover:opacity-80 disabled:opacity-40 shrink-0"
+                style={{ color: 'var(--mg-muted)' }}
+              >
+                <RefreshCw className={`w-3 h-3 ${loadingFeeds ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
           </div>
 
           {feedsOpen && (
@@ -317,28 +390,67 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </form>
 
               {channels.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
-                  {channels.map((ch) => (
-                    <span
-                      key={ch.channelId}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded border text-[11px] max-w-full"
-                      style={{
-                        backgroundColor: 'var(--mg-bg)',
-                        borderColor: 'var(--mg-border)',
-                        color: 'var(--mg-text)',
-                      }}
-                    >
-                      <span className="truncate max-w-[130px]">{ch.title}</span>
-                      <button
-                        type="button"
-                        onClick={() => void handleRemoveChannel(ch.channelId)}
-                        aria-label={`Unfollow ${ch.title}`}
-                        className="opacity-70 hover:opacity-100 hover:text-red-400 shrink-0"
+                <div className="flex flex-col gap-1.5">
+                  {channels.map((ch) => {
+                    const autoOn = Boolean(ch.auto_download);
+                    const autoMode: 'video' | 'audio' = ch.auto_mode === 'audio' ? 'audio' : 'video';
+                    return (
+                      <div
+                        key={ch.channelId}
+                        className="flex items-center justify-between gap-1.5 px-2 py-1 rounded border text-[11px]"
+                        style={{
+                          backgroundColor: 'var(--mg-bg)',
+                          borderColor: autoOn ? 'var(--mg-accent)' : 'var(--mg-border)',
+                          color: 'var(--mg-text)',
+                        }}
                       >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </span>
-                  ))}
+                        <span className="truncate min-w-0 flex-1" title={ch.title}>
+                          {ch.title}
+                        </span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => void handleToggleAutoGrab(ch, !autoOn, autoMode)}
+                            title={
+                              autoOn
+                                ? 'Auto-Grab ON (polls new uploads every 15m). Click to disable.'
+                                : 'Enable Auto-Grab for new uploads from this channel'
+                            }
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-medium whitespace-nowrap"
+                            style={{
+                              backgroundColor: autoOn ? 'var(--mg-accent)' : 'transparent',
+                              borderColor: autoOn ? 'var(--mg-accent)' : 'var(--mg-border)',
+                              color: autoOn ? '#ffffff' : 'var(--mg-muted)',
+                            }}
+                          >
+                            <Zap className="w-2.5 h-2.5" />
+                            <span>{autoOn ? 'Auto' : 'Manual'}</span>
+                          </button>
+                          {autoOn && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void handleToggleAutoGrab(ch, true, autoMode === 'video' ? 'audio' : 'video')
+                              }
+                              title="Toggle Auto-Grab mode (Video / Audio)"
+                              className="px-1.5 py-0.5 rounded border text-[10px] font-mono uppercase"
+                              style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                            >
+                              {autoMode === 'audio' ? 'MP3' : 'MP4'}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void handleRemoveChannel(ch.channelId)}
+                            aria-label={`Unfollow ${ch.title}`}
+                            className="opacity-70 hover:opacity-100 hover:text-red-400 shrink-0"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 

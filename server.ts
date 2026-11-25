@@ -9,29 +9,108 @@ import { promisify } from 'util';
 import multer from 'multer';
 import dotenv from 'dotenv';
 import * as webpush from 'web-push';
-import { createServer as createViteServer } from 'vite';
+
+const IS_PACKAGED_BINARY = Boolean((process as any).pkg);
+const IS_COMPILED_CJS =
+  !IS_PACKAGED_BINARY &&
+  typeof __filename === 'string' &&
+  path.extname(__filename) === '.cjs';
+if ((IS_PACKAGED_BINARY || IS_COMPILED_CJS) && !process.env.NODE_ENV) {
+  process.env.NODE_ENV = 'production';
+}
+
+const PACKAGE_ROOT =
+  typeof __dirname === 'string'
+    ? IS_COMPILED_CJS
+      ? path.resolve(__dirname, '..')
+      : path.resolve(__dirname)
+    : process.cwd();
+const APP_ROOT = IS_PACKAGED_BINARY
+  ? path.dirname(process.execPath)
+  : IS_COMPILED_CJS
+  ? PACKAGE_ROOT
+  : process.cwd();
+const BUNDLE_ROOT =
+  IS_PACKAGED_BINARY && typeof __dirname === 'string' ? path.resolve(__dirname) : PACKAGE_ROOT;
 
 dotenv.config();
+const appEnvPath = path.join(APP_ROOT, '.env');
+if (fs.existsSync(appEnvPath)) {
+  dotenv.config({ path: appEnvPath, override: false });
+}
 
 const execFileAsync = promisify(execFile);
 
+function resolveCliValue(flag: string): string | undefined {
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1 && process.argv[idx + 1] && !process.argv[idx + 1].startsWith('-')) {
+    return process.argv[idx + 1];
+  }
+  const eqPrefix = `${flag}=`;
+  const eqArg = process.argv.find((a) => a.startsWith(eqPrefix));
+  return eqArg ? eqArg.slice(eqPrefix.length) : undefined;
+}
+
 function resolvePort(): number {
-  const idx = process.argv.indexOf('--port');
-  if (idx !== -1 && process.argv[idx + 1]) {
-    const cliPort = Number(process.argv[idx + 1]);
+  const cliVal = resolveCliValue('--port');
+  if (cliVal) {
+    const cliPort = Number(cliVal);
     if (Number.isFinite(cliPort) && cliPort > 0) return cliPort;
   }
   return Number(process.env.PORT) || 3000;
 }
 
+const BASE_APP_VERSION = 'v2.1';
+
+function detectPlatformSuffix(): string {
+  if (process.platform === 'linux') return 'Linux';
+  if (process.platform === 'win32') {
+    const parts = os.release().split('.');
+    const major = parseInt(parts[0] || '0', 10);
+    const build = parseInt(parts[2] || '0', 10);
+    if (major >= 10 && build >= 22000) return 'Windows11';
+    if (major >= 10) return 'Windows10';
+    return 'Windows';
+  }
+  if (process.platform === 'darwin') return 'macOS';
+  return process.platform;
+}
+
+const PLATFORM_SUFFIX = detectPlatformSuffix();
+const CURRENT_APP_VERSION = `${BASE_APP_VERSION}-${PLATFORM_SUFFIX}`;
+const DEFAULT_UPDATE_CHANNEL: 'stable' | 'nightly' =
+  process.env.MEDIAGRABBER_UPDATE_CHANNEL === 'nightly'
+    ? 'nightly'
+    : process.env.MEDIAGRABBER_UPDATE_CHANNEL === 'stable'
+    ? 'stable'
+    : /pre|nightly|rc|alpha|beta|dev/i.test(BASE_APP_VERSION)
+    ? 'nightly'
+    : 'stable';
+
+if (process.argv.includes('--version') || process.argv.includes('-v')) {
+  console.log(`MediaGrabber ${CURRENT_APP_VERSION}`);
+  process.exit(0);
+}
+
 const PORT = resolvePort();
 const HOST = '0.0.0.0';
+const SHOULD_OPEN_BROWSER =
+  process.argv.includes('--open') || process.env.MEDIAGRABBER_OPEN_BROWSER === '1';
 const IS_WINDOWS = process.platform === 'win32';
 const SYSTEM_TMP_GRAB_DIR = IS_WINDOWS ? path.join(os.tmpdir(), 'mediagrabber') : '/tmp/mediagrabber';
-const WORKSPACE_ROOT = process.env.MEDIAGRABBER_DATA_DIR
+const SNAP_DATA_DIR =
+  process.env.SNAP_USER_COMMON || process.env.SNAP_COMMON || process.env.SNAP_USER_DATA || '';
+const CLI_DATA_DIR = resolveCliValue('--data-dir');
+const WORKSPACE_ROOT = CLI_DATA_DIR
+  ? path.resolve(CLI_DATA_DIR)
+  : process.env.MEDIAGRABBER_DATA_DIR
   ? path.resolve(process.env.MEDIAGRABBER_DATA_DIR)
+  : SNAP_DATA_DIR
+  ? path.join(path.resolve(SNAP_DATA_DIR), 'workspace')
   : IS_WINDOWS
   ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'MediaGrabber')
+  : IS_PACKAGED_BINARY || (IS_COMPILED_CJS && !fs.existsSync('/tmp/mediagrabber-workspace'))
+  ? path.join(os.homedir(), '.local', 'share', 'mediagrabber')
   : '/tmp/mediagrabber-workspace';
 const YT_DIR = path.join(WORKSPACE_ROOT, 'YouTube');
 const MUSIC_DIR = path.join(WORKSPACE_ROOT, 'Music');
@@ -49,6 +128,7 @@ const ARCHIVE_FILE =
 const SETTINGS_FILE = path.join(STATE_DIR, 'settings.json');
 const RADIOS_FILE = path.join(STATE_DIR, 'radios.json');
 const HISTORY_FILE = path.join(STATE_DIR, 'history.json');
+const QUEUE_FILE = path.join(STATE_DIR, 'queue.json');
 const USERS_FILE = path.join(STATE_DIR, 'users.json');
 const SCHEDULE_FILE = path.join(STATE_DIR, 'scheduled_jobs.json');
 const TOKENS_FILE = path.join(STATE_DIR, 'api_tokens.json');
@@ -56,6 +136,8 @@ const NETWATCH_FILE = path.join(STATE_DIR, 'netwatch.json');
 const VAPID_FILE = path.join(STATE_DIR, 'vapid.json');
 const PUSH_SUBS_FILE = path.join(STATE_DIR, 'push_subscriptions.json');
 const YOUTUBE_FEEDS_FILE = path.join(STATE_DIR, 'youtube_feeds.json');
+const MANAGED_YT_COOKIES_FILE = path.join(STATE_DIR, 'cookies_youtube.txt');
+const MANAGED_GALLERY_COOKIES_FILE = path.join(STATE_DIR, 'cookies_gallery.txt');
 const FILE_SIGN_SECRET = process.env.MEDIAGRABBER_SIGNING_SECRET || crypto.randomBytes(32).toString('hex');
 
 const DEFAULT_AVATAR = '/src/assets/images/avatar_admin_user_1795453948311.jpg';
@@ -189,14 +271,67 @@ function moveFileSafe(src: string, dest: string) {
   }
 }
 
+function getWinExtraToolDirs(): string[] {
+  const dirs: string[] = [];
+  const pushDir = (d?: string) => {
+    if (d && !dirs.includes(d)) dirs.push(d);
+  };
+  if (process.env.LOCALAPPDATA) {
+    pushDir(path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links'));
+    const wingetPkgRoot = path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Packages');
+    try {
+      if (fs.existsSync(wingetPkgRoot)) {
+        for (const entry of fs.readdirSync(wingetPkgRoot)) {
+          if (/^(Gyan\.FFmpeg|yt-dlp\.yt-dlp|DenoLand\.Deno)/i.test(entry)) {
+            const pkgDir = path.join(wingetPkgRoot, entry);
+            pushDir(pkgDir);
+            pushDir(path.join(pkgDir, 'bin'));
+            try {
+              for (const sub of fs.readdirSync(pkgDir)) {
+                pushDir(path.join(pkgDir, sub, 'bin'));
+              }
+            } catch {}
+          }
+        }
+      }
+    } catch {}
+    const localPyRoot = path.join(process.env.LOCALAPPDATA, 'Programs', 'Python');
+    try {
+      if (fs.existsSync(localPyRoot)) {
+        for (const entry of fs.readdirSync(localPyRoot)) {
+          const pyDir = path.join(localPyRoot, entry);
+          pushDir(path.join(pyDir, 'Scripts'));
+          pushDir(pyDir);
+        }
+      }
+    } catch {}
+  }
+  if (process.env.APPDATA) {
+    const appPyRoot = path.join(process.env.APPDATA, 'Python');
+    pushDir(path.join(appPyRoot, 'Scripts'));
+    try {
+      if (fs.existsSync(appPyRoot)) {
+        for (const entry of fs.readdirSync(appPyRoot)) {
+          if (/^Python\d+/i.test(entry)) {
+            pushDir(path.join(appPyRoot, entry, 'Scripts'));
+          }
+        }
+      }
+    } catch {}
+  }
+  if (process.env.ProgramData) {
+    pushDir(path.join(process.env.ProgramData, 'chocolatey', 'bin'));
+  }
+  pushDir(path.join(os.homedir(), 'scoop', 'shims'));
+  pushDir('C:\\ffmpeg\\bin');
+  pushDir('C:\\Windows\\System32\\WindowsPowerShell\\v1.0');
+  pushDir('C:\\Program Files\\PowerShell\\7');
+  return dirs.filter(Boolean);
+}
+
 function buildToolEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   if (IS_WINDOWS) {
-    const winExtras = [
-      process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links') : '',
-      process.env.ProgramData ? path.join(process.env.ProgramData, 'chocolatey', 'bin') : '',
-      path.join(os.homedir(), 'scoop', 'shims'),
-      process.env.APPDATA ? path.join(process.env.APPDATA, 'Python', 'Scripts') : '',
-    ].filter(Boolean);
+    const winExtras = getWinExtraToolDirs();
     const basePath = process.env.PATH || process.env.Path || '';
     const mergedPath = [...winExtras, basePath].filter(Boolean).join(path.delimiter);
     return {
@@ -232,14 +367,7 @@ function resolveExecutable(name: string, extraPaths: string[] = []): string | nu
   }
 
   const fixedDirs = IS_WINDOWS
-    ? [
-        process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links') : '',
-        process.env.ProgramData ? path.join(process.env.ProgramData, 'chocolatey', 'bin') : '',
-        path.join(os.homedir(), 'scoop', 'shims'),
-        process.env.APPDATA ? path.join(process.env.APPDATA, 'Python', 'Scripts') : '',
-        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0',
-        'C:\\Program Files\\PowerShell\\7',
-      ].filter(Boolean)
+    ? getWinExtraToolDirs()
     : [
         path.join(os.homedir(), '.local', 'bin'),
         '/usr/local/bin',
@@ -249,6 +377,9 @@ function resolveExecutable(name: string, extraPaths: string[] = []): string | nu
 
   const envPathDirs = (process.env.PATH || process.env.Path || '').split(path.delimiter).filter(Boolean);
   for (const dir of [...fixedDirs, ...envPathDirs]) {
+    if (IS_WINDOWS && /^python/i.test(name) && /\\Microsoft\\WindowsApps$/i.test(dir)) {
+      continue;
+    }
     for (const candidateName of namesToTry) {
       const full = path.join(dir, candidateName);
       try {
@@ -274,6 +405,9 @@ function getGrabCandidatePaths(): string[] {
   if (IS_WINDOWS) {
     return [
       process.env.MEDIAGRABBER_GRAB_BIN || '',
+      path.join(APP_ROOT, 'grab.ps1'),
+      path.join(PACKAGE_ROOT, 'grab.ps1'),
+      path.join(STATE_DIR, 'grab.ps1'),
       path.join(process.cwd(), 'grab.ps1'),
       path.join(os.homedir(), '.mediagrabber', 'grab.ps1'),
       'C:\\MediaGrabber\\grab.ps1',
@@ -282,6 +416,9 @@ function getGrabCandidatePaths(): string[] {
   return [
     process.env.MEDIAGRABBER_GRAB_BIN || '',
     '/usr/local/bin/grab',
+    path.join(APP_ROOT, 'grab'),
+    path.join(PACKAGE_ROOT, 'grab'),
+    path.join(STATE_DIR, 'grab'),
     path.join(process.cwd(), 'grab'),
     '/opt/mediagrabber/grab',
     '/opt/mediagrabber.v1-backup/grab',
@@ -327,7 +464,7 @@ function resolveGrabCommand(): ResolvedGrabCommand | null {
       } catch {
         const bashBin = resolveExecutable('bash', ['/bin/bash', '/usr/bin/bash']);
         if (bashBin) {
-          return { bin: bashBin, prefixArgs: [candidate], scriptPath: candidate };
+          return { bin: path.resolve(bashBin), prefixArgs: [candidate], scriptPath: candidate };
         }
       }
     }
@@ -340,8 +477,25 @@ function resolveGrabCommand(): ResolvedGrabCommand | null {
 }
 
 function ensureGrabInitialized(): string | null {
+  // When running as a standalone packaged binary, materialize bundled grab/grab.ps1 onto real disk
+  if (IS_PACKAGED_BINARY) {
+    const scriptName = IS_WINDOWS ? 'grab.ps1' : 'grab';
+    const bundledScript = path.join(BUNDLE_ROOT, scriptName);
+    const extractedScript = path.join(STATE_DIR, scriptName);
+    if (fs.existsSync(bundledScript)) {
+      try {
+        fs.writeFileSync(extractedScript, fs.readFileSync(bundledScript));
+        if (!IS_WINDOWS) fs.chmodSync(extractedScript, 0o755);
+      } catch {
+        // ignore if state dir extraction fails
+      }
+    }
+  }
+
   if (!IS_WINDOWS) {
-    const localGrab = path.join(process.cwd(), 'grab');
+    const localGrab = fs.existsSync(path.join(APP_ROOT, 'grab'))
+      ? path.join(APP_ROOT, 'grab')
+      : path.join(PACKAGE_ROOT, 'grab');
     if (fs.existsSync(localGrab)) {
       try {
         fs.chmodSync(localGrab, 0o755);
@@ -419,6 +573,78 @@ function sanitizeSegment(input: string, fallback = 'Unknown'): string {
   return clean || fallback;
 }
 
+const DEFAULT_YT_NAMING_TEMPLATE = '%(title).150s.%(ext)s';
+const DEFAULT_MUSIC_NAMING_TEMPLATE = '{artist}/{album}/{title}.{ext}';
+const DEFAULT_GALLERY_NAMING_TEMPLATE = '%(title).100s-%(id)s.%(ext)s';
+
+function sanitizeRateLimit(raw: unknown): string {
+  if (raw === undefined || raw === null) return '';
+  const trimmed = String(raw).trim();
+  if (!trimmed) return '';
+  if (!/^\d+(?:\.\d+)?[kKmMgG]?$/.test(trimmed)) {
+    throw new Error('Bandwidth limit must be empty (unlimited) or a value like 500K, 5M, or 25M.');
+  }
+  const last = trimmed[trimmed.length - 1];
+  if (/[kKmMgG]/.test(last)) {
+    return `${trimmed.slice(0, -1)}${last.toUpperCase()}`;
+  }
+  return trimmed;
+}
+
+function sanitizeRateLimitQuiet(raw: unknown): string {
+  try {
+    return sanitizeRateLimit(raw);
+  } catch {
+    return '';
+  }
+}
+
+function sanitizeNamingTemplate(
+  raw: unknown,
+  fallback: string,
+  allowSubdirs = true
+): string {
+  if (raw === undefined || raw === null) return fallback;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return fallback;
+  if (/[\x00-\x1f\r\n`$;|&><"']/.test(trimmed)) {
+    throw new Error('Naming template contains unsafe control or shell characters.');
+  }
+  if (trimmed.includes('..') || /^[a-zA-Z]:/.test(trimmed) || /^[/\\]/.test(trimmed)) {
+    throw new Error('Naming template must be a relative path without ".." or root/drive prefixes.');
+  }
+  if (!allowSubdirs && /[/\\]/.test(trimmed)) {
+    throw new Error('This template cannot contain directory separators.');
+  }
+  if (trimmed.length > 180) {
+    throw new Error('Naming template is too long (max 180 characters).');
+  }
+  return trimmed;
+}
+
+function sanitizeNamingTemplateQuiet(raw: unknown, fallback: string, allowSubdirs = true): string {
+  try {
+    return sanitizeNamingTemplate(raw, fallback, allowSubdirs);
+  } catch {
+    return fallback;
+  }
+}
+
+function hashFileSha256(filePath: string): string {
+  const hash = crypto.createHash('sha256');
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let bytesRead = 0;
+    while ((bytesRead = fs.readSync(fd, buf, 0, buf.length, null)) > 0) {
+      hash.update(buf.subarray(0, bytesRead));
+    }
+    return hash.digest('hex');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function detectEngine(url: string): 'YOUTUBE' | 'YT MUSIC' | 'SPOTIFY' | 'GALLERY' {
   const u = url.toLowerCase();
   if (u.includes('music.youtube.com')) return 'YT MUSIC';
@@ -477,6 +703,8 @@ async function createSampleMediaFile(filePath: string, title: string, artist: st
     fs.writeFileSync(filePath, `MediaGrabber:${title}:${artist}:${new Date().toISOString()}\n`);
   }
 }
+
+const DEMO_SEED_ENABLED = process.env.MEDIAGRABBER_DEMO_SEED === '1';
 
 async function seedWorkspace() {
   ensureDirs();
@@ -540,43 +768,52 @@ async function seedWorkspace() {
       gallerydl_extra: '',
       webhook_url: '',
       stale_timeout_minutes: 120,
+      max_concurrent_downloads: 2,
+      download_rate_limit: '',
+      auto_dedup_schedule: 'off',
+      auto_dedup_last_run: null,
+      auto_dedup_last_summary: null,
+      yt_naming_template: DEFAULT_YT_NAMING_TEMPLATE,
+      music_naming_template: DEFAULT_MUSIC_NAMING_TEMPLATE,
+      gallery_naming_template: DEFAULT_GALLERY_NAMING_TEMPLATE,
       quick_start_completed: false,
-      update_channel:
-        process.env.MEDIAGRABBER_UPDATE_CHANNEL === 'stable' ? 'stable' : 'nightly',
+      update_channel: DEFAULT_UPDATE_CHANNEL,
       ...(importedLegacy || {}),
     };
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(defaultSettings, null, 2));
   }
 
   if (!fs.existsSync(USERS_FILE)) {
-    const users = [
-      {
-        id: 'usr-admin-1',
-        username: 'christopher',
-        display_name: 'Christopher',
-        email: 'admin@mediagrabber.local',
-        role: 'admin',
-        avatar: DEFAULT_AVATAR,
-        theme: 'dark',
-        totp_enabled: false,
-        totp_secret: '',
-        theme_colors: null,
-        password_hash: hashPassword('mediagrabber'),
-      },
-      {
-        id: 'usr-standard-2',
-        username: 'studio_guest',
-        display_name: 'Studio Guest',
-        email: 'guest@mediagrabber.local',
-        role: 'user',
-        avatar: DEFAULT_AVATAR,
-        theme: 'dark',
-        totp_enabled: false,
-        totp_secret: '',
-        theme_colors: null,
-        password_hash: hashPassword('guest1234'),
-      },
-    ];
+    const users = DEMO_SEED_ENABLED
+      ? [
+          {
+            id: 'usr-admin-1',
+            username: 'christopher',
+            display_name: 'Christopher',
+            email: 'admin@mediagrabber.local',
+            role: 'admin',
+            avatar: DEFAULT_AVATAR,
+            theme: 'dark',
+            totp_enabled: false,
+            totp_secret: '',
+            theme_colors: null,
+            password_hash: hashPassword('mediagrabber'),
+          },
+          {
+            id: 'usr-standard-2',
+            username: 'studio_guest',
+            display_name: 'Studio Guest',
+            email: 'guest@mediagrabber.local',
+            role: 'user',
+            avatar: DEFAULT_AVATAR,
+            theme: 'dark',
+            totp_enabled: false,
+            totp_secret: '',
+            theme_colors: null,
+            password_hash: hashPassword('guest1234'),
+          },
+        ]
+      : [];
     fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
   }
 
@@ -606,140 +843,148 @@ async function seedWorkspace() {
     fs.writeFileSync(RADIOS_FILE, JSON.stringify(defaultRadios, null, 2));
   }
 
-  // Seed media files for Metadata Editor, Reorganize, Deduplicate, and Tmp Reorder
-  const ytSampleDir = path.join(YT_DIR, 'Studio_Sessions', '2026');
-  const ytSampleFile = path.join(ytSampleDir, 'Analog_Synth_Mastering_Session.mp4');
-  if (!fs.existsSync(ytSampleFile)) {
-    await createSampleMediaFile(ytSampleFile, 'Analog Synth Mastering Session', 'Studio Sessions', false);
-    fs.writeFileSync(
-      path.join(ytSampleDir, 'Analog_Synth_Mastering_Session.info.json'),
-      JSON.stringify(
+  if (DEMO_SEED_ENABLED) {
+    // Seed media files only when explicit demo mode is enabled
+    const ytSampleDir = path.join(YT_DIR, 'Studio_Sessions', '2026');
+    const ytSampleFile = path.join(ytSampleDir, 'Analog_Synth_Mastering_Session.mp4');
+    if (!fs.existsSync(ytSampleFile)) {
+      await createSampleMediaFile(ytSampleFile, 'Analog Synth Mastering Session', 'Studio Sessions', false);
+      fs.writeFileSync(
+        path.join(ytSampleDir, 'Analog_Synth_Mastering_Session.info.json'),
+        JSON.stringify(
+          {
+            title: 'Analog Synth Mastering Session',
+            uploader: 'Studio Sessions',
+            album: 'Mastering Logs',
+            upload_date: '20260412',
+            description: 'Walkthrough of modular routing and analog bus compression.',
+            cover_url: DEFAULT_YT_THUMB,
+            webpage_url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+          },
+          null,
+          2
+        )
+      );
+      const dupFile = path.join(ytSampleDir, 'Analog_Synth_Mastering_Session_copy.mp4');
+      fs.copyFileSync(ytSampleFile, dupFile);
+    }
+
+    const musicSampleDir = path.join(MUSIC_DIR, 'Klangwerk', 'Cobalt_Architecture');
+    const musicSampleFile = path.join(musicSampleDir, '01_Beam_Study.mp3');
+    if (!fs.existsSync(musicSampleFile)) {
+      await createSampleMediaFile(musicSampleFile, 'Beam Study', 'Klangwerk', true);
+      fs.writeFileSync(
+        path.join(musicSampleDir, '01_Beam_Study.info.json'),
+        JSON.stringify(
+          {
+            title: 'Beam Study',
+            uploader: 'Klangwerk',
+            album: 'Cobalt Architecture',
+            upload_date: '20260301',
+            description: 'Opening instrumental from Cobalt Architecture LP.',
+            cover_url: DEFAULT_MUSIC_THUMB,
+            webpage_url: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+          },
+          null,
+          2
+        )
+      );
+    }
+
+    const gallerySampleDir = path.join(GALLERY_DIR, 'Alpine_Archive', '2026');
+    const gallerySampleFile = path.join(gallerySampleDir, 'Dawn_Ridge_Sequence.mp4');
+    if (!fs.existsSync(gallerySampleFile)) {
+      await createSampleMediaFile(gallerySampleFile, 'Dawn Ridge Sequence', 'Alpine Archive', false);
+      fs.writeFileSync(
+        path.join(gallerySampleDir, 'Dawn_Ridge_Sequence.info.json'),
+        JSON.stringify(
+          {
+            title: 'Dawn Ridge Sequence',
+            uploader: 'Alpine Archive',
+            album: 'Field Reels',
+            upload_date: '20260218',
+            description: 'High-altitude dawn ridge time-lapse reel.',
+            cover_url: DEFAULT_GALLERY_THUMB,
+            webpage_url: 'https://www.instagram.com/reel/CxampleReel01/',
+          },
+          null,
+          2
+        )
+      );
+    }
+
+    const orphanJobDir = path.join(TMP_DIR, 'orphan-job-001');
+    const orphanFile = path.join(orphanJobDir, 'Orphaned_Field_Recording.mp3');
+    if (!fs.existsSync(orphanFile)) {
+      await createSampleMediaFile(orphanFile, 'Orphaned Field Recording', 'Field Unit', true);
+      fs.writeFileSync(
+        path.join(orphanJobDir, 'Orphaned_Field_Recording.info.json'),
+        JSON.stringify(
+          {
+            title: 'Orphaned Field Recording',
+            uploader: 'Field Unit',
+            album: 'Unsorted Captures',
+            upload_date: '20260501',
+            engine: 'SPOTIFY',
+            cover_url: DEFAULT_MUSIC_THUMB,
+          },
+          null,
+          2
+        )
+      );
+    }
+
+    if (!fs.existsSync(ARCHIVE_FILE)) {
+      fs.writeFileSync(
+        ARCHIVE_FILE,
+        [
+          'youtube dQw4w9WgXcQ',
+          'spotify 4uLU6hMCjMI75M1A2tKUQC',
+          'instagram CxampleReel01',
+        ].join('\n') + '\n'
+      );
+    }
+
+    if (!fs.existsSync(HISTORY_FILE)) {
+      const initialHistory = [
         {
+          id: 'hist-1',
+          url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
           title: 'Analog Synth Mastering Session',
-          uploader: 'Studio Sessions',
-          album: 'Mastering Logs',
-          upload_date: '20260412',
-          description: 'Walkthrough of modular routing and analog bus compression.',
-          cover_url: DEFAULT_YT_THUMB,
-          webpage_url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+          thumbnail: DEFAULT_YT_THUMB,
+          timestamp: new Date(Date.now() - 3600_000 * 5).toISOString(),
+          source: 'youtube',
+          file: ytSampleFile,
         },
-        null,
-        2
-      )
-    );
-    // Exact duplicate for Deduplicate demo
-    const dupFile = path.join(ytSampleDir, 'Analog_Synth_Mastering_Session_copy.mp4');
-    fs.copyFileSync(ytSampleFile, dupFile);
-  }
-
-  const musicSampleDir = path.join(MUSIC_DIR, 'Klangwerk', 'Cobalt_Architecture');
-  const musicSampleFile = path.join(musicSampleDir, '01_Beam_Study.mp3');
-  if (!fs.existsSync(musicSampleFile)) {
-    await createSampleMediaFile(musicSampleFile, 'Beam Study', 'Klangwerk', true);
-    fs.writeFileSync(
-      path.join(musicSampleDir, '01_Beam_Study.info.json'),
-      JSON.stringify(
         {
-          title: 'Beam Study',
-          uploader: 'Klangwerk',
-          album: 'Cobalt Architecture',
-          upload_date: '20260301',
-          description: 'Opening instrumental from Cobalt Architecture LP.',
-          cover_url: DEFAULT_MUSIC_THUMB,
-          webpage_url: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+          id: 'hist-2',
+          url: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
+          title: 'Klangwerk — Beam Study',
+          thumbnail: DEFAULT_MUSIC_THUMB,
+          timestamp: new Date(Date.now() - 3600_000 * 3).toISOString(),
+          source: 'spotify',
+          file: musicSampleFile,
         },
-        null,
-        2
-      )
-    );
-  }
-
-  const gallerySampleDir = path.join(GALLERY_DIR, 'Alpine_Archive', '2026');
-  const gallerySampleFile = path.join(gallerySampleDir, 'Dawn_Ridge_Sequence.mp4');
-  if (!fs.existsSync(gallerySampleFile)) {
-    await createSampleMediaFile(gallerySampleFile, 'Dawn Ridge Sequence', 'Alpine Archive', false);
-    fs.writeFileSync(
-      path.join(gallerySampleDir, 'Dawn_Ridge_Sequence.info.json'),
-      JSON.stringify(
         {
+          id: 'hist-3',
+          url: 'https://www.instagram.com/reel/CxampleReel01/',
           title: 'Dawn Ridge Sequence',
-          uploader: 'Alpine Archive',
-          album: 'Field Reels',
-          upload_date: '20260218',
-          description: 'High-altitude dawn ridge time-lapse reel.',
-          cover_url: DEFAULT_GALLERY_THUMB,
-          webpage_url: 'https://www.instagram.com/reel/CxampleReel01/',
+          thumbnail: DEFAULT_GALLERY_THUMB,
+          timestamp: new Date(Date.now() - 3600_000).toISOString(),
+          source: 'gallery',
+          file: gallerySampleFile,
         },
-        null,
-        2
-      )
-    );
-  }
-
-  // Seed one orphaned file in tmp/ for Tmp Reorder
-  const orphanJobDir = path.join(TMP_DIR, 'orphan-job-001');
-  const orphanFile = path.join(orphanJobDir, 'Orphaned_Field_Recording.mp3');
-  if (!fs.existsSync(orphanFile)) {
-    await createSampleMediaFile(orphanFile, 'Orphaned Field Recording', 'Field Unit', true);
-    fs.writeFileSync(
-      path.join(orphanJobDir, 'Orphaned_Field_Recording.info.json'),
-      JSON.stringify(
-        {
-          title: 'Orphaned Field Recording',
-          uploader: 'Field Unit',
-          album: 'Unsorted Captures',
-          upload_date: '20260501',
-          engine: 'SPOTIFY',
-          cover_url: DEFAULT_MUSIC_THUMB,
-        },
-        null,
-        2
-      )
-    );
-  }
-
-  if (!fs.existsSync(ARCHIVE_FILE)) {
-    fs.writeFileSync(
-      ARCHIVE_FILE,
-      [
-        'youtube dQw4w9WgXcQ',
-        'spotify 4uLU6hMCjMI75M1A2tKUQC',
-        'instagram CxampleReel01',
-      ].join('\n') + '\n'
-    );
-  }
-
-  if (!fs.existsSync(HISTORY_FILE)) {
-    const initialHistory = [
-      {
-        id: 'hist-1',
-        url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-        title: 'Analog Synth Mastering Session',
-        thumbnail: DEFAULT_YT_THUMB,
-        timestamp: new Date(Date.now() - 3600_000 * 5).toISOString(),
-        source: 'youtube',
-        file: ytSampleFile,
-      },
-      {
-        id: 'hist-2',
-        url: 'https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC',
-        title: 'Klangwerk — Beam Study',
-        thumbnail: DEFAULT_MUSIC_THUMB,
-        timestamp: new Date(Date.now() - 3600_000 * 3).toISOString(),
-        source: 'spotify',
-        file: musicSampleFile,
-      },
-      {
-        id: 'hist-3',
-        url: 'https://www.instagram.com/reel/CxampleReel01/',
-        title: 'Dawn Ridge Sequence',
-        thumbnail: DEFAULT_GALLERY_THUMB,
-        timestamp: new Date(Date.now() - 3600_000).toISOString(),
-        source: 'gallery',
-        file: gallerySampleFile,
-      },
-    ];
-    fs.writeFileSync(HISTORY_FILE, JSON.stringify(initialHistory, null, 2));
+      ];
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify(initialHistory, null, 2));
+    }
+  } else {
+    if (!fs.existsSync(ARCHIVE_FILE)) {
+      fs.mkdirSync(path.dirname(ARCHIVE_FILE), { recursive: true });
+      fs.writeFileSync(ARCHIVE_FILE, '');
+    }
+    if (!fs.existsSync(HISTORY_FILE)) {
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify([], null, 2));
+    }
   }
 }
 
@@ -981,6 +1226,10 @@ interface YoutubeFeedChannel {
   channelId: string;
   title: string;
   addedAt: string;
+  auto_download?: boolean;
+  auto_mode?: 'video' | 'audio';
+  auto_since?: string;
+  last_checked_at?: string;
 }
 
 interface YoutubeFeedVideo {
@@ -1181,12 +1430,19 @@ async function resolveRemoteMetadata(url: string, engine: string): Promise<{ tit
   }
 }
 
+interface JobOptions {
+  embed_subtitles?: boolean;
+  sponsorblock?: boolean;
+  playlist_mode?: 'single' | 'playlist';
+}
+
 interface JobRecord {
   job_id: string;
   url: string;
   title?: string;
   uploader?: string;
   mode: 'video' | 'audio';
+  options?: JobOptions;
   engine: 'YOUTUBE' | 'YT MUSIC' | 'SPOTIFY' | 'GALLERY';
   status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
   progress: number;
@@ -1214,8 +1470,47 @@ async function startServer() {
   const queue = new Map<string, JobRecord>();
   const activeProcesses = new Map<string, ChildProcess>();
   const cancelledJobs = new Set<string>();
-  let currentUserId: string | null = 'usr-admin-1';
+  const jobLogSubscribers = new Map<string, Set<(event: string, payload: unknown) => void>>();
+  const seededUsers = readJson<any[]>(USERS_FILE, []);
+  let currentUserId: string | null =
+    DEMO_SEED_ENABLED && seededUsers.some((u) => u.id === 'usr-admin-1') ? 'usr-admin-1' : null;
   let radioDbPath = '/var/lib/navidrome/navidrome.db';
+
+  function broadcastJobEvent(jobId: string, event: string, payload: unknown) {
+    const subs = jobLogSubscribers.get(jobId);
+    if (!subs || subs.size === 0) return;
+    for (const cb of subs) {
+      try {
+        cb(event, payload);
+      } catch {
+        // ignore broken SSE sink
+      }
+    }
+  }
+
+  function appendJobLog(job: JobRecord, line: string) {
+    job.log.push(line);
+    while (job.log.length > 500) job.log.shift();
+    broadcastJobEvent(job.job_id, 'line', {
+      line,
+      progress: job.progress,
+      status: job.status,
+      engine: job.engine,
+      title: job.title,
+      uploader: job.uploader,
+    });
+  }
+
+  function notifyJobStatus(job: JobRecord) {
+    broadcastJobEvent(job.job_id, 'status', {
+      status: job.status,
+      progress: job.progress,
+      file: job.file,
+      title: job.title,
+      engine: job.engine,
+      thumbnail: job.thumbnail,
+    });
+  }
 
   const reorgState = {
     status: 'idle' as 'idle' | 'running' | 'done',
@@ -1226,7 +1521,7 @@ async function startServer() {
     logs: [] as string[],
   };
 
-  // Seed initial queue items matching workspace files
+  // Seed initial queue items matching workspace files ONLY on first boot (before queue.json exists)
   const seededJobs: JobRecord[] = [
     {
       job_id: '7a91c4e2-11a0-4a99-9c01-000000000001',
@@ -1269,8 +1564,78 @@ async function startServer() {
       created_at: new Date(Date.now() - 3600_000 * 3).toISOString(),
     },
   ];
-  for (const job of seededJobs) {
-    queue.set(job.job_id, job);
+
+  function persistQueue() {
+    try {
+      const list = Array.from(queue.values())
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(0, 200)
+        .map((j) => ({
+          ...j,
+          log: Array.isArray(j.log) ? j.log.slice(-200) : [],
+        }));
+      writeJson(QUEUE_FILE, list);
+    } catch {
+      // ignore persistence write error
+    }
+  }
+
+  function getMaxConcurrentDownloads(): number {
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const val = Number(settings?.max_concurrent_downloads ?? 2);
+    return Number.isFinite(val) ? Math.max(1, Math.min(8, Math.round(val))) : 2;
+  }
+
+  const dispatchingJobIds = new Set<string>();
+
+  function scheduleQueueWorker() {
+    const maxConcurrent = getMaxConcurrentDownloads();
+    let activeCount = 0;
+    const pending: JobRecord[] = [];
+
+    for (const job of queue.values()) {
+      if (job.status === 'running' || dispatchingJobIds.has(job.job_id)) {
+        activeCount++;
+      } else if (job.status === 'queued') {
+        pending.push(job);
+      }
+    }
+
+    if (activeCount >= maxConcurrent || pending.length === 0) return;
+
+    pending.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    const slots = maxConcurrent - activeCount;
+    for (const nextJob of pending.slice(0, slots)) {
+      dispatchingJobIds.add(nextJob.job_id);
+      void processJob(nextJob.job_id);
+    }
+  }
+
+  if (fs.existsSync(QUEUE_FILE)) {
+    const saved = readJson<JobRecord[]>(QUEUE_FILE, []);
+    if (Array.isArray(saved)) {
+      for (const item of saved) {
+        if (!item || typeof item.job_id !== 'string' || typeof item.url !== 'string') continue;
+        const recovered: JobRecord = {
+          ...item,
+          log: Array.isArray(item.log) ? item.log : [],
+        };
+        if (recovered.status === 'running') {
+          recovered.status = 'queued';
+          recovered.progress = 0;
+          recovered.started_at = undefined;
+          recovered.log.push('[mediagrabber] Interrupted by server restart — re-queued automatically.');
+        }
+        queue.set(recovered.job_id, recovered);
+      }
+    }
+  } else {
+    if (DEMO_SEED_ENABLED) {
+      for (const job of seededJobs) {
+        queue.set(job.job_id, job);
+      }
+    }
+    persistQueue();
   }
 
   function getActiveUser() {
@@ -1393,14 +1758,25 @@ async function startServer() {
 
   async function processJob(jobId: string) {
     const job = queue.get(jobId);
-    if (!job) return;
+    if (!job) {
+      dispatchingJobIds.delete(jobId);
+      return;
+    }
     try {
       job.status = 'running';
       job.started_at = new Date().toISOString();
       job.progress = 2;
-      job.log.push(`[mediagrabber] Job ${jobId.slice(0, 8)} started`);
+      appendJobLog(job, `[mediagrabber] Job ${jobId.slice(0, 8)} started`);
+      notifyJobStatus(job);
+      persistQueue();
 
       const settings = readJson<any>(SETTINGS_FILE, {});
+      const rateLimit = sanitizeRateLimitQuiet(settings.download_rate_limit);
+      const ytTemplate = sanitizeNamingTemplateQuiet(settings.yt_naming_template, DEFAULT_YT_NAMING_TEMPLATE, true);
+      const musicTemplate = sanitizeNamingTemplateQuiet(settings.music_naming_template, DEFAULT_MUSIC_NAMING_TEMPLATE, true);
+      const galleryTemplate = sanitizeNamingTemplateQuiet(settings.gallery_naming_template, DEFAULT_GALLERY_NAMING_TEMPLATE, false);
+      const folderStructure = settings.folder_structure === 'flat' ? 'flat' : 'default';
+
       const meta = await resolveRemoteMetadata(job.url, job.engine);
       job.title = meta.title;
       job.uploader = meta.uploader;
@@ -1408,7 +1784,8 @@ async function startServer() {
 
       if (cancelledJobs.has(jobId)) {
         job.status = 'cancelled';
-        job.log.push('[mediagrabber] Job cancelled by user.');
+        appendJobLog(job, '[mediagrabber] Job cancelled by user.');
+        notifyJobStatus(job);
         return;
       }
 
@@ -1428,7 +1805,7 @@ async function startServer() {
           fs.mkdirSync(tempJobDir, { recursive: true });
           fs.accessSync(tempJobDir, fs.constants.W_OK);
         } catch (err: any) {
-          job.log.push(`[mediagrabber] Failed to initialize ${tempJobDir}: ${err?.message || err}`);
+          appendJobLog(job, `[mediagrabber] Failed to initialize ${tempJobDir}: ${err?.message || err}`);
           tempJobDir = path.join(TMP_DIR, jobId);
           fs.mkdirSync(tempJobDir, { recursive: true });
         }
@@ -1453,21 +1830,26 @@ async function startServer() {
           GRAB_CONTAINER: String(settings.container || 'mp4'),
           GRAB_GENERATE_LRC: settings.generate_lrc ? 'true' : 'false',
           GRAB_AUDIO_ONLY: job.mode === 'audio' ? 'true' : 'false',
+          GRAB_EMBED_SUBS: job.options?.embed_subtitles ? 'true' : 'false',
+          GRAB_SPONSORBLOCK: job.options?.sponsorblock ? 'true' : 'false',
+          GRAB_PLAYLIST: job.options?.playlist_mode === 'playlist' ? 'true' : 'false',
+          GRAB_FOLDER_STRUCTURE: folderStructure,
+          GRAB_YT_TEMPLATE: ytTemplate,
+          GRAB_MUSIC_TEMPLATE: musicTemplate,
+          GRAB_GALLERY_TEMPLATE: galleryTemplate,
+          ...(rateLimit ? { GRAB_RATE_LIMIT: rateLimit } : {}),
           ...(extraYt ? { GRAB_EXTRA_YT: extraYt } : {}),
           ...(settings.spotdl_extra ? { GRAB_EXTRA_SPOTIFY: String(settings.spotdl_extra) } : {}),
           ...(settings.gallerydl_extra ? { GRAB_EXTRA_GALLERY: String(settings.gallerydl_extra) } : {}),
         });
 
         const launchArgs = [...grabCmd.prefixArgs, job.url];
-        job.log.push(`[mediagrabber] Launching ${grabCmd.scriptPath} (${job.mode})`);
+        appendJobLog(job, `[mediagrabber] Launching ${grabCmd.scriptPath} (${job.mode}${rateLimit ? `, limit ${rateLimit}` : ''})`);
         let lastProgress = 2;
         let detectedEngine: string = job.engine;
         let galleryDownloadStarted = false;
 
         const exitCode = await runCommandStreaming(jobId, grabCmd.bin, launchArgs, env, (line) => {
-        job.log.push(line);
-        if (job.log.length > 500) job.log.shift();
-
         if (line.includes('Engine → SPOTIFY')) {
           detectedEngine = 'SPOTIFY';
           job.engine = 'SPOTIFY';
@@ -1516,11 +1898,13 @@ async function startServer() {
           const rawThumb = line.split('FINAL_THUMB:', 2)[1].trim();
           job.thumbnail = toClientThumbUrl(rawThumb) || job.thumbnail;
         }
+        appendJobLog(job, line);
       });
 
       if (cancelledJobs.has(jobId)) {
         job.status = 'cancelled';
-        job.log.push('[mediagrabber] Job cancelled by user.');
+        appendJobLog(job, '[mediagrabber] Job cancelled by user.');
+        notifyJobStatus(job);
         return;
       }
 
@@ -1572,7 +1956,8 @@ async function startServer() {
           file: job.file,
         });
         writeJson(HISTORY_FILE, history.slice(0, 200));
-        job.log.push('[mediagrabber] Completed successfully.');
+        appendJobLog(job, '[mediagrabber] Completed successfully.');
+        notifyJobStatus(job);
         void sendPushNotification({
           title: 'Download Complete',
           body: `${job.title || job.url} finished (${job.engine}).`,
@@ -1589,7 +1974,8 @@ async function startServer() {
       } else {
         job.status = 'failed';
         job.progress = 0;
-        job.log.push(`[mediagrabber] Download failed (exit code ${exitCode}).`);
+        appendJobLog(job, `[mediagrabber] Download failed (exit code ${exitCode}).`);
+        notifyJobStatus(job);
         void sendPushNotification({
           title: 'Download Failed',
           body: `${job.title || job.url} failed (${job.engine}).`,
@@ -1614,7 +2000,7 @@ async function startServer() {
       const targetRoot = resolveJobBaseDir(job.engine, settings);
       const safeUploader = sanitizeSegment(meta.uploader, 'Unknown');
       const year = String(new Date().getFullYear());
-      const outDir = settings.folder_structure === 'flat' ? targetRoot : path.join(targetRoot, safeUploader, year);
+      const outDir = folderStructure === 'flat' ? targetRoot : path.join(targetRoot, safeUploader, year);
       fs.mkdirSync(outDir, { recursive: true });
       job.output_dir = outDir;
 
@@ -1623,6 +2009,20 @@ async function startServer() {
       if (toolName.includes('yt-dlp')) {
         const isAudio = job.mode === 'audio' || job.engine === 'YT MUSIC';
         args.push('--newline', '--write-info-json', '--write-thumbnail', '--download-archive', ARCHIVE_FILE);
+        if (rateLimit) {
+          args.push('--limit-rate', rateLimit);
+        }
+        if (job.options?.playlist_mode === 'playlist') {
+          args.push('--yes-playlist');
+        } else {
+          args.push('--no-playlist');
+        }
+        if (job.options?.embed_subtitles && !isAudio) {
+          args.push('--write-subs', '--write-auto-subs', '--embed-subs', '--sub-langs', 'en.*,en');
+        }
+        if (job.options?.sponsorblock) {
+          args.push('--sponsorblock-remove', 'sponsor');
+        }
         if (settings.cookies_youtube_path && fs.existsSync(String(settings.cookies_youtube_path))) {
           args.push('--cookies', String(settings.cookies_youtube_path));
         }
@@ -1633,31 +2033,36 @@ async function startServer() {
           const container = String(settings.container || 'mp4');
           args.push('-f', `bestvideo[height<=${resNum}]+bestaudio/best[height<=${resNum}]/best`, '--merge-output-format', container);
         }
-        args.push('-o', path.join(outDir, '%(title).120s.%(ext)s'), job.url);
+        const ytRel = ytTemplate.replace(/^[/\\]+/, '');
+        const hasSubdirs = /[/\\]/.test(ytRel);
+        const directOutBase = hasSubdirs ? targetRoot : outDir;
+        args.push('-o', path.join(directOutBase, ytRel), job.url);
       } else if (toolName.includes('spotdl')) {
-        args.push('download', job.url, '--output', path.join(outDir, '{artist} - {title}.{output-ext}'));
+        args.push(job.url, '--output', path.join(targetRoot, musicTemplate));
       } else {
-        args.push('-D', outDir, job.url);
+        args.push('-D', outDir, '--filename', galleryTemplate);
+        if (rateLimit) args.push('--limit-rate', rateLimit);
+        args.push(job.url);
       }
 
-      job.log.push(`[mediagrabber] Launching direct ${toolName}...`);
-      const beforeSet = new Set(walkFiles(outDir));
+      appendJobLog(job, `[mediagrabber] Launching direct ${toolName}...`);
+      const beforeSet = new Set(walkFiles(targetRoot));
       const exitCode = await runCommandStreaming(jobId, directTool, args, buildToolEnv(), (line) => {
-        job.log.push(line);
-        if (job.log.length > 500) job.log.shift();
         const m = line.match(/(\d{1,3}(?:\.\d+)?)%/);
         if (m && line.includes('[download]')) {
           job.progress = Math.min(99, parseFloat(m[1]));
         }
+        appendJobLog(job, line);
       });
 
       if (cancelledJobs.has(jobId)) {
         job.status = 'cancelled';
-        job.log.push('[mediagrabber] Job cancelled by user.');
+        appendJobLog(job, '[mediagrabber] Job cancelled by user.');
+        notifyJobStatus(job);
         return;
       }
 
-      const afterFiles = walkFiles(outDir).filter(
+      const afterFiles = walkFiles(targetRoot).filter(
         (f) => !beforeSet.has(f) && MEDIA_EXTS.has(path.extname(f).toLowerCase())
       );
       if (afterFiles.length > 0) {
@@ -1683,7 +2088,8 @@ async function startServer() {
           file: job.file,
         });
         writeJson(HISTORY_FILE, history.slice(0, 200));
-        job.log.push('[mediagrabber] Completed successfully.');
+        appendJobLog(job, '[mediagrabber] Completed successfully.');
+        notifyJobStatus(job);
         void sendPushNotification({
           title: 'Download Complete',
           body: `${job.title || job.url} finished (${job.engine}).`,
@@ -1700,7 +2106,8 @@ async function startServer() {
       } else {
         job.status = 'failed';
         job.progress = 0;
-        job.log.push(`[mediagrabber] ${toolName} failed (exit code ${exitCode}).`);
+        appendJobLog(job, `[mediagrabber] ${toolName} failed (exit code ${exitCode}).`);
+        notifyJobStatus(job);
         void sendPushNotification({
           title: 'Download Failed',
           body: `${job.title || job.url} failed (${job.engine}).`,
@@ -1719,8 +2126,9 @@ async function startServer() {
 
       job.status = 'failed';
       job.progress = 0;
-      job.log.push('[mediagrabber] ERROR: No grab script or downloading binary found.');
-      job.log.push('[mediagrabber] Ensure /usr/local/bin/grab or yt-dlp is installed and in PATH.');
+      appendJobLog(job, '[mediagrabber] ERROR: No grab script or downloading binary found.');
+      appendJobLog(job, '[mediagrabber] Ensure /usr/local/bin/grab or yt-dlp is installed and in PATH.');
+      notifyJobStatus(job);
       void sendPushNotification({
         title: 'Download Failed',
         body: `${job.title || job.url} failed: no download binary found.`,
@@ -1737,7 +2145,8 @@ async function startServer() {
     } catch (err: any) {
       job.status = 'failed';
       job.progress = 0;
-      job.log.push(`[mediagrabber] Unexpected job error: ${err?.message || String(err)}`);
+      appendJobLog(job, `[mediagrabber] Unexpected job error: ${err?.message || String(err)}`);
+      notifyJobStatus(job);
       void sendPushNotification({
         title: 'Download Failed',
         body: `${job.title || job.url} encountered an unexpected error.`,
@@ -1751,6 +2160,10 @@ async function startServer() {
         engine: job.engine,
         message: `Download Failed: ${job.title || job.url} (${err?.message || 'unexpected error'})`,
       });
+    } finally {
+      dispatchingJobIds.delete(jobId);
+      persistQueue();
+      scheduleQueueWorker();
     }
   }
 
@@ -1773,7 +2186,8 @@ async function startServer() {
 
       job.status = 'failed';
       job.progress = 0;
-      job.log.push(`[janitor] Marked failed after exceeding ${timeoutMins}m stale download timeout.`);
+      appendJobLog(job, `[janitor] Marked failed after exceeding ${timeoutMins}m stale download timeout.`);
+      notifyJobStatus(job);
       cleaned++;
 
       void sendPushNotification({
@@ -1920,6 +2334,8 @@ async function startServer() {
   });
 
   app.get('/api/users', (_req, res) => {
+    const active = getActiveUser();
+    if (!active) return res.status(401).json({ error: 'Sign in required.' });
     const users = readJson<any[]>(USERS_FILE, []);
     res.json(users.map(sanitizeUser));
   });
@@ -1989,8 +2405,19 @@ async function startServer() {
     res.json(list);
   });
 
+  function sanitizeGrabOptions(raw: any): JobOptions | undefined {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const opts: JobOptions = {};
+    if (raw.embed_subtitles === true) opts.embed_subtitles = true;
+    if (raw.sponsorblock === true) opts.sponsorblock = true;
+    if (raw.playlist_mode === 'playlist') opts.playlist_mode = 'playlist';
+    else if (raw.playlist_mode === 'single') opts.playlist_mode = 'single';
+    return Object.keys(opts).length > 0 ? opts : undefined;
+  }
+
   function handleGrabRequest(req: express.Request, res: express.Response) {
     const mode = req.body?.mode === 'audio' ? 'audio' : 'video';
+    const options = sanitizeGrabOptions(req.body?.options);
     let urlList: string[] = [];
     if (Array.isArray(req.body?.urls)) {
       urlList = req.body.urls
@@ -2007,6 +2434,13 @@ async function startServer() {
       return res.status(400).json({ error: 'At least one URL is required' });
     }
 
+    const optTags = [
+      options?.embed_subtitles ? 'subtitles' : '',
+      options?.sponsorblock ? 'sponsorblock' : '',
+      options?.playlist_mode === 'playlist' ? 'playlist' : '',
+    ].filter(Boolean);
+    const optSuffix = optTags.length > 0 ? ` [${optTags.join(', ')}]` : '';
+
     const jobIds: string[] = [];
     for (const rawUrl of urlList) {
       const jobId = crypto.randomUUID();
@@ -2015,6 +2449,7 @@ async function startServer() {
         job_id: jobId,
         url: rawUrl,
         mode,
+        options,
         engine,
         status: 'queued',
         progress: 0,
@@ -2026,14 +2461,15 @@ async function startServer() {
             ? DEFAULT_GALLERY_THUMB
             : DEFAULT_YT_THUMB,
         output_dir: null,
-        log: [`[mediagrabber] Queued ${rawUrl} (${mode})`],
+        log: [`[mediagrabber] Queued ${rawUrl} (${mode}${optSuffix})`],
         created_at: new Date().toISOString(),
       };
       queue.set(jobId, job);
       jobIds.push(jobId);
-      void processJob(jobId);
     }
 
+    persistQueue();
+    scheduleQueueWorker();
     res.json({ job_id: jobIds[0], job_ids: jobIds, count: jobIds.length });
   }
 
@@ -2105,9 +2541,96 @@ async function startServer() {
   });
 
   app.get('/api/log/:jobId', (req, res) => {
+    const active = getActiveUser();
+    if (!active) return res.status(401).json({ error: 'Sign in required.' });
     const job = queue.get(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     res.json({ job_id: job.job_id, url: job.url, status: job.status, log: job.log });
+  });
+
+  app.get('/api/log/:jobId/stream', (req, res) => {
+    const active = getActiveUser();
+    if (!active) return res.status(401).json({ error: 'Sign in required.' });
+    const job = queue.get(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    const sendEvent = (event: string, data: unknown) => {
+      try {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // ignore disconnected stream
+      }
+    };
+
+    sendEvent('init', {
+      job_id: job.job_id,
+      status: job.status,
+      progress: job.progress,
+      title: job.title,
+      engine: job.engine,
+      log: job.log,
+    });
+
+    const isTerminal = job.status === 'done' || job.status === 'failed' || job.status === 'cancelled';
+    if (isTerminal) {
+      sendEvent('status', {
+        status: job.status,
+        progress: job.progress,
+        file: job.file,
+        title: job.title,
+        engine: job.engine,
+        thumbnail: job.thumbnail,
+      });
+      res.end();
+      return;
+    }
+
+    let listeners = jobLogSubscribers.get(job.job_id);
+    if (!listeners) {
+      listeners = new Set();
+      jobLogSubscribers.set(job.job_id, listeners);
+    }
+
+    const heartbeat = setInterval(() => {
+      try {
+        res.write(': keepalive\n\n');
+      } catch {
+        cleanup();
+      }
+    }, 15_000);
+
+    const onEvent = (event: string, payload: any) => {
+      sendEvent(event, payload);
+      if (
+        event === 'status' &&
+        (payload?.status === 'done' || payload?.status === 'failed' || payload?.status === 'cancelled')
+      ) {
+        cleanup();
+        try {
+          res.end();
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      const setRef = jobLogSubscribers.get(job.job_id);
+      if (setRef) {
+        setRef.delete(onEvent);
+        if (setRef.size === 0) jobLogSubscribers.delete(job.job_id);
+      }
+    };
+
+    listeners.add(onEvent);
+    req.on('close', cleanup);
   });
 
   function killChildProcessTree(proc: ChildProcess) {
@@ -2139,8 +2662,12 @@ async function startServer() {
     }
     if (job.status === 'queued' || job.status === 'running') {
       job.status = 'cancelled';
-      job.log.push('[mediagrabber] Cancelled by user.');
+      appendJobLog(job, '[mediagrabber] Cancelled by user.');
+      notifyJobStatus(job);
     }
+    dispatchingJobIds.delete(job.job_id);
+    persistQueue();
+    scheduleQueueWorker();
     return { ok: true };
   }
 
@@ -2155,6 +2682,7 @@ async function startServer() {
       job_id: newJobId,
       url: oldJob.url,
       mode: oldJob.mode,
+      options: oldJob.options,
       engine: oldJob.engine,
       status: 'queued',
       progress: 0,
@@ -2165,7 +2693,8 @@ async function startServer() {
       created_at: new Date().toISOString(),
     };
     queue.set(newJobId, newJob);
-    void processJob(newJobId);
+    persistQueue();
+    scheduleQueueWorker();
     return { ok: true, new_job_id: newJobId };
   }
 
@@ -2177,6 +2706,7 @@ async function startServer() {
 
   app.delete('/api/remove/:jobId', (req, res) => {
     queue.delete(req.params.jobId);
+    persistQueue();
     res.json({ status: 'removed' });
   });
 
@@ -2186,6 +2716,7 @@ async function startServer() {
         queue.delete(id);
       }
     }
+    persistQueue();
     res.json({ status: 'cleared' });
   });
 
@@ -2195,6 +2726,7 @@ async function startServer() {
     removeFromArchive(job.url);
     if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
       queue.delete(job.job_id);
+      persistQueue();
       return res.json({ status: 'archive cleared and job removed' });
     }
     res.json({ status: 'archive cleared' });
@@ -2219,7 +2751,17 @@ async function startServer() {
 
   // ---- Settings & Storage Routes ----
   app.get('/api/settings', (_req, res) => {
-    res.json(readJson(SETTINGS_FILE, {}));
+    const s = readJson<any>(SETTINGS_FILE, {});
+    res.json({
+      download_rate_limit: '',
+      auto_dedup_schedule: 'off',
+      auto_dedup_last_run: null,
+      auto_dedup_last_summary: null,
+      yt_naming_template: DEFAULT_YT_NAMING_TEMPLATE,
+      music_naming_template: DEFAULT_MUSIC_NAMING_TEMPLATE,
+      gallery_naming_template: DEFAULT_GALLERY_NAMING_TEMPLATE,
+      ...s,
+    });
   });
 
   app.post('/api/settings', (req, res) => {
@@ -2262,11 +2804,49 @@ async function startServer() {
         return res.status(400).json({ error: err?.message || 'Invalid webhook URL.' });
       }
     }
+    if ('download_rate_limit' in incoming) {
+      try {
+        incoming.download_rate_limit = sanitizeRateLimit(incoming.download_rate_limit);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || 'Invalid download rate limit.' });
+      }
+    }
+    if ('auto_dedup_schedule' in incoming) {
+      const val = String(incoming.auto_dedup_schedule || 'off').toLowerCase();
+      incoming.auto_dedup_schedule = val === 'daily' || val === 'weekly' ? val : 'off';
+    }
+    if ('yt_naming_template' in incoming) {
+      try {
+        incoming.yt_naming_template = sanitizeNamingTemplate(incoming.yt_naming_template, DEFAULT_YT_NAMING_TEMPLATE, true);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || 'Invalid YouTube naming template.' });
+      }
+    }
+    if ('music_naming_template' in incoming) {
+      try {
+        incoming.music_naming_template = sanitizeNamingTemplate(incoming.music_naming_template, DEFAULT_MUSIC_NAMING_TEMPLATE, true);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || 'Invalid Music naming template.' });
+      }
+    }
+    if ('gallery_naming_template' in incoming) {
+      try {
+        incoming.gallery_naming_template = sanitizeNamingTemplate(incoming.gallery_naming_template, DEFAULT_GALLERY_NAMING_TEMPLATE, false);
+      } catch (err: any) {
+        return res.status(400).json({ error: err?.message || 'Invalid Gallery naming template.' });
+      }
+    }
     if ('stale_timeout_minutes' in incoming) {
       const mins = Number(incoming.stale_timeout_minutes);
       incoming.stale_timeout_minutes = Number.isFinite(mins)
         ? Math.max(5, Math.min(1440, Math.round(mins)))
         : 120;
+    }
+    if ('max_concurrent_downloads' in incoming) {
+      const conc = Number(incoming.max_concurrent_downloads);
+      incoming.max_concurrent_downloads = Number.isFinite(conc)
+        ? Math.max(1, Math.min(8, Math.round(conc)))
+        : 2;
     }
     if ('update_channel' in incoming) {
       incoming.update_channel = incoming.update_channel === 'stable' ? 'stable' : 'nightly';
@@ -2274,7 +2854,163 @@ async function startServer() {
 
     const updated = { ...current, ...incoming };
     writeJson(SETTINGS_FILE, updated);
+    scheduleQueueWorker();
     res.json({ status: 'saved', settings: updated });
+  });
+
+  function buildCookieStatus(kind: 'youtube' | 'gallery', settings: any) {
+    const managedPath = path.resolve(
+      kind === 'youtube' ? MANAGED_YT_COOKIES_FILE : MANAGED_GALLERY_COOKIES_FILE
+    );
+    const settingKey = kind === 'youtube' ? 'cookies_youtube_path' : 'cookies_gallery_path';
+    const configuredPath = String(settings?.[settingKey] || '').trim();
+    const resolvedConfigured = configuredPath ? path.resolve(configuredPath) : '';
+
+    const targetPath = resolvedConfigured && fs.existsSync(resolvedConfigured)
+      ? resolvedConfigured
+      : fs.existsSync(managedPath)
+      ? managedPath
+      : resolvedConfigured;
+
+    if (targetPath && fs.existsSync(targetPath)) {
+      try {
+        const stat = fs.statSync(targetPath);
+        if (stat.isFile()) {
+          const text = fs.readFileSync(targetPath, 'utf-8');
+          const lineCount = text
+            .split(/\r?\n/)
+            .filter((l) => l.trim() && !l.trim().startsWith('#')).length;
+          const isManaged = IS_WINDOWS
+            ? targetPath.toLowerCase() === managedPath.toLowerCase()
+            : targetPath === managedPath;
+          return {
+            kind,
+            configured: true,
+            source: isManaged ? 'managed' : 'custom_path',
+            path: targetPath,
+            size_bytes: stat.size,
+            line_count: lineCount,
+            updated_at: stat.mtime.toISOString(),
+          };
+        }
+      } catch {
+        // fall through to unconfigured
+      }
+    }
+
+    return {
+      kind,
+      configured: false,
+      source: 'none',
+      path: configuredPath,
+      size_bytes: 0,
+      line_count: 0,
+      updated_at: null,
+    };
+  }
+
+  app.get('/api/settings/cookies/status', (_req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    res.json({
+      youtube: buildCookieStatus('youtube', settings),
+      gallery: buildCookieStatus('gallery', settings),
+    });
+  });
+
+  app.post('/api/settings/cookies', upload.single('file'), (req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const kindRaw = String(req.body?.kind || '').trim().toLowerCase();
+    if (kindRaw !== 'youtube' && kindRaw !== 'gallery') {
+      return res.status(400).json({ error: 'Cookie kind must be "youtube" or "gallery".' });
+    }
+    const kind = kindRaw as 'youtube' | 'gallery';
+
+    let rawContent = '';
+    if (req.file) {
+      rawContent = req.file.buffer.toString('utf-8');
+    } else if (typeof req.body?.content === 'string') {
+      rawContent = req.body.content;
+    }
+
+    const cleaned = rawContent.replace(/\0/g, '').trim();
+    if (!cleaned) {
+      return res.status(400).json({ error: 'Provide a non-empty Netscape cookies.txt file or text.' });
+    }
+    if (Buffer.byteLength(cleaned, 'utf-8') > 2 * 1024 * 1024) {
+      return res.status(400).json({ error: 'Cookie file exceeds the 2 MB limit.' });
+    }
+
+    const lines = cleaned.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const hasCookieRows = lines.some(
+      (l) => l.startsWith('# Netscape') || l.startsWith('# HTTP Cookie') || l.split('\t').length >= 6
+    );
+    if (!hasCookieRows) {
+      return res.status(400).json({
+        error: 'Expected Netscape cookies.txt format (tab-separated cookie rows or # Netscape HTTP Cookie File header).',
+      });
+    }
+
+    const targetPath = path.resolve(
+      kind === 'youtube' ? MANAGED_YT_COOKIES_FILE : MANAGED_GALLERY_COOKIES_FILE
+    );
+    const resolvedStateDir = path.resolve(STATE_DIR);
+    if (!targetPath.startsWith(resolvedStateDir + path.sep)) {
+      return res.status(400).json({ error: 'Invalid cookie storage target.' });
+    }
+
+    ensureDirs();
+    fs.writeFileSync(targetPath, `${cleaned}\n`, { encoding: 'utf-8', mode: 0o600 });
+    if (!IS_WINDOWS) {
+      try { fs.chmodSync(targetPath, 0o600); } catch {}
+    }
+
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const settingKey = kind === 'youtube' ? 'cookies_youtube_path' : 'cookies_gallery_path';
+    const updatedSettings = { ...settings, [settingKey]: targetPath };
+    writeJson(SETTINGS_FILE, updatedSettings);
+
+    res.json({
+      ok: true,
+      status: buildCookieStatus(kind, updatedSettings),
+      settings: updatedSettings,
+    });
+  });
+
+  app.delete('/api/settings/cookies/:kind', (req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const kindRaw = String(req.params.kind || '').trim().toLowerCase();
+    if (kindRaw !== 'youtube' && kindRaw !== 'gallery') {
+      return res.status(400).json({ error: 'Cookie kind must be "youtube" or "gallery".' });
+    }
+    const kind = kindRaw as 'youtube' | 'gallery';
+    const targetPath = path.resolve(
+      kind === 'youtube' ? MANAGED_YT_COOKIES_FILE : MANAGED_GALLERY_COOKIES_FILE
+    );
+    const resolvedStateDir = path.resolve(STATE_DIR);
+    if (targetPath.startsWith(resolvedStateDir + path.sep) && fs.existsSync(targetPath)) {
+      try { fs.unlinkSync(targetPath); } catch {}
+    }
+
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const settingKey = kind === 'youtube' ? 'cookies_youtube_path' : 'cookies_gallery_path';
+    const updatedSettings = { ...settings, [settingKey]: '' };
+    writeJson(SETTINGS_FILE, updatedSettings);
+
+    res.json({
+      ok: true,
+      status: buildCookieStatus(kind, updatedSettings),
+      settings: updatedSettings,
+    });
   });
 
   app.post('/api/webhook/test', async (req, res) => {
@@ -2681,25 +3417,27 @@ async function startServer() {
     res.json(tmpReorgState);
   });
 
-  // ---- Deduplicate (SHA-256) ----
-  app.post('/api/deduplicate', (req, res) => {
-    const settings = readJson<any>(SETTINGS_FILE, {});
-    const action = req.body?.action === 'delete' ? 'delete' : 'scan';
-    const defaultYt = isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR;
-    const requestedPath = String(req.body?.path || defaultYt);
-    const targetDir = safePathWithinLibraries(requestedPath, settings) || defaultYt;
-
-    if (!fs.existsSync(targetDir)) {
-      return res.status(400).json({ error: `Folder not found in configured libraries: ${requestedPath}` });
-    }
-
-    const files = walkFiles(targetDir).filter((f) => MEDIA_EXTS.has(path.extname(f).toLowerCase()));
+  // ---- Deduplicate (SHA-256) & Scheduled Auto-Cleanup ----
+  function deduplicateDirectory(targetDir: string, action: 'scan' | 'delete') {
+    const trashRoot = path.resolve(TRASH_DIR);
+    const tmpRoot = path.resolve(TMP_DIR);
+    const files = walkFiles(targetDir).filter((f) => {
+      const resolved = path.resolve(f);
+      if (resolved.startsWith(trashRoot + path.sep) || resolved.startsWith(tmpRoot + path.sep)) {
+        return false;
+      }
+      return MEDIA_EXTS.has(path.extname(f).toLowerCase());
+    });
     const byHash = new Map<string, string[]>();
     for (const file of files) {
-      const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-      const group = byHash.get(hash) || [];
-      group.push(file);
-      byHash.set(hash, group);
+      try {
+        const hash = hashFileSha256(file);
+        const group = byHash.get(hash) || [];
+        group.push(file);
+        byHash.set(hash, group);
+      } catch {
+        // skip unreadable file
+      }
     }
 
     const logs: string[] = [`Scanned ${files.length} file(s) in ${targetDir}`];
@@ -2718,7 +3456,9 @@ async function startServer() {
           const trashDest = path.join(TRASH_DIR, `${Date.now()}_${path.basename(dup)}`);
           moveFileSafe(dup, trashDest);
           const dupInfo = dup.replace(/\.[^.]+$/, '.info.json');
-          if (fs.existsSync(dupInfo)) fs.unlinkSync(dupInfo);
+          if (fs.existsSync(dupInfo)) {
+            try { fs.unlinkSync(dupInfo); } catch {}
+          }
           trashedCount++;
           logs.push(`  🗑️ Moved duplicate to trash: ${path.basename(dup)}`);
         } else {
@@ -2735,7 +3475,114 @@ async function startServer() {
       logs.push(`✅ Moved ${trashedCount} duplicate file(s) to ${TRASH_DIR}.`);
     }
 
-    res.json({ status: 'done', duplicateCount, trashedCount, logs });
+    return { scannedFiles: files.length, duplicateCount, trashedCount, logs };
+  }
+
+  let scheduledDedupRunning = false;
+
+  async function runScheduledDeduplication(force = false) {
+    if (scheduledDedupRunning) return { ok: false, skipped: true, reason: 'already_running' };
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const schedule = settings?.auto_dedup_schedule === 'daily' || settings?.auto_dedup_schedule === 'weekly'
+      ? settings.auto_dedup_schedule
+      : 'off';
+
+    if (!force) {
+      if (schedule === 'off') return { ok: true, skipped: true, reason: 'disabled' };
+      const intervalMs = schedule === 'weekly' ? 7 * 86_400_000 : 86_400_000;
+      const lastRunMs = settings?.auto_dedup_last_run ? new Date(settings.auto_dedup_last_run).getTime() : 0;
+      if (Number.isFinite(lastRunMs) && lastRunMs > 0 && Date.now() - lastRunMs < intervalMs) {
+        return { ok: true, skipped: true, reason: 'not_due' };
+      }
+    }
+
+    scheduledDedupRunning = true;
+    try {
+      const dirs = Array.from(
+        new Set(
+          [
+            isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR,
+            isSafeLibraryBasePath(settings.music_base_path) || MUSIC_DIR,
+            isSafeLibraryBasePath(settings.gallery_base_path) || GALLERY_DIR,
+          ]
+            .map((d) => path.resolve(d))
+            .filter((d) => fs.existsSync(d))
+        )
+      );
+
+      let totalScanned = 0;
+      let duplicateCount = 0;
+      let trashedCount = 0;
+      const logs: string[] = [];
+      for (const dir of dirs) {
+        const resDir = deduplicateDirectory(dir, 'delete');
+        totalScanned += resDir.scannedFiles;
+        duplicateCount += resDir.duplicateCount;
+        trashedCount += resDir.trashedCount;
+        logs.push(...resDir.logs);
+      }
+
+      const nowIso = new Date().toISOString();
+      const summary =
+        trashedCount > 0
+          ? `Scanned ${totalScanned} files across ${dirs.length} library root(s); moved ${trashedCount} duplicate(s) to trash.`
+          : `Scanned ${totalScanned} files across ${dirs.length} library root(s); no duplicates found.`;
+
+      const updated = {
+        ...readJson<any>(SETTINGS_FILE, {}),
+        auto_dedup_last_run: nowIso,
+        auto_dedup_last_summary: summary,
+      };
+      writeJson(SETTINGS_FILE, updated);
+
+      if (trashedCount > 0) {
+        void sendPushNotification({
+          title: 'Automated Duplicate Cleanup',
+          body: summary,
+          tag: 'auto-dedup',
+          url: '/',
+        });
+      }
+
+      return { ok: true, skipped: false, totalScanned, duplicateCount, trashedCount, summary, logs, settings: updated };
+    } finally {
+      scheduledDedupRunning = false;
+    }
+  }
+
+  setTimeout(() => {
+    void runScheduledDeduplication(false);
+  }, 90_000);
+  setInterval(() => {
+    void runScheduledDeduplication(false);
+  }, 30 * 60_000);
+
+  app.post('/api/deduplicate', (req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const settings = readJson<any>(SETTINGS_FILE, {});
+    const action = req.body?.action === 'delete' ? 'delete' : 'scan';
+    const defaultYt = isSafeLibraryBasePath(settings.yt_base_path) || YT_DIR;
+    const requestedPath = String(req.body?.path || defaultYt);
+    const targetDir = safePathWithinLibraries(requestedPath, settings) || defaultYt;
+
+    if (!fs.existsSync(targetDir)) {
+      return res.status(400).json({ error: `Folder not found in configured libraries: ${requestedPath}` });
+    }
+
+    const result = deduplicateDirectory(targetDir, action);
+    res.json({ status: 'done', ...result });
+  });
+
+  app.post('/api/deduplicate/run-scheduled', async (_req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const result = await runScheduledDeduplication(true);
+    res.json(result);
   });
 
   // ---- Archive Manager ----
@@ -3077,12 +3924,13 @@ async function startServer() {
     if (users.some((u) => u.username.toLowerCase() === username.toLowerCase())) {
       return res.status(409).json({ error: 'Username already taken.' });
     }
+    const needsFirstAdmin = !users.some((u) => u.role === 'admin');
     const newUser = {
       id: `usr-${crypto.randomUUID().slice(0, 8)}`,
       username,
       display_name: displayName,
       email,
-      role: 'user',
+      role: needsFirstAdmin ? 'admin' : 'user',
       avatar: DEFAULT_AVATAR,
       theme: 'dark',
       totp_enabled: false,
@@ -3242,7 +4090,7 @@ async function startServer() {
         token_hash: tokenHash,
         token_prefix: raw.slice(0, 8),
         scope,
-        created_by: activeUser.username || 'christopher',
+        created_by: activeUser.username || 'admin',
         created_at: new Date().toISOString(),
         last_used_at: null,
         revoked: false,
@@ -3289,25 +4137,7 @@ async function startServer() {
     res.json({ deleted: id });
   });
 
-  // ---- v2.0 Version Manager (GitHub Full & Nightly Releases + Tags) ----
-  const BASE_APP_VERSION = 'v2.0';
-
-  function detectPlatformSuffix(): string {
-    if (process.platform === 'linux') return 'Linux';
-    if (process.platform === 'win32') {
-      const parts = os.release().split('.');
-      const major = parseInt(parts[0] || '0', 10);
-      const build = parseInt(parts[2] || '0', 10);
-      if (major >= 10 && build >= 22000) return 'Windows11';
-      if (major >= 10) return 'Windows10';
-      return 'Windows';
-    }
-    if (process.platform === 'darwin') return 'macOS';
-    return process.platform;
-  }
-
-  const PLATFORM_SUFFIX = detectPlatformSuffix();
-  const CURRENT_APP_VERSION = `${BASE_APP_VERSION}-${PLATFORM_SUFFIX}`;
+  // ---- Version Manager (GitHub Full & Nightly Releases + Binary Updates) ----
 
   // ---- MediaGrabber - Jellyfin Edition Plugin API Bridge ----
   const TOKEN_SCOPE_LEVEL: Record<string, number> = {
@@ -3444,6 +4274,7 @@ async function startServer() {
     req.body = {
       urls: validUrls,
       mode: req.body?.mode === 'audio' ? 'audio' : 'video',
+      options: req.body?.options,
     };
     return handleGrabRequest(req, res);
   });
@@ -3522,6 +4353,30 @@ async function startServer() {
   const isNightlyReleaseTag = (tag: string, rel?: any): boolean =>
     Boolean(rel?.prerelease || /pre|nightly|rc|alpha|beta|dev/i.test(stripOsSuffix(tag)));
 
+  function pickPlatformReleaseAssets(assets: any[]): { zipUrl: string | null; binaryUrl: string | null } {
+    const list = Array.isArray(assets) ? assets : [];
+    const byName = (pred: (lower: string) => boolean) =>
+      list.find((a: any) => pred(String(a?.name || '').toLowerCase()) && a?.browser_download_url);
+
+    const binaryAsset = IS_WINDOWS
+      ? byName((n) => n.endsWith('.exe') && (n.includes('win') || n.includes('mediagrabber')))
+      : byName((n) => n.includes('linux') && !n.endsWith('.zip') && !n.endsWith('.tar.gz'));
+
+    const osZipAsset = IS_WINDOWS
+      ? byName((n) => n.endsWith('.zip') && n.includes('windows'))
+      : byName((n) => n.endsWith('.zip') && n.includes('linux'));
+    const fallbackZipAsset = byName((n) => n.endsWith('.zip'));
+
+    return {
+      zipUrl: osZipAsset?.browser_download_url
+        ? String(osZipAsset.browser_download_url)
+        : fallbackZipAsset?.browser_download_url
+        ? String(fallbackZipAsset.browser_download_url)
+        : null,
+      binaryUrl: binaryAsset?.browser_download_url ? String(binaryAsset.browser_download_url) : null,
+    };
+  }
+
   async function resolveVersionInfo(
     selectedChannel: 'nightly' | 'stable',
     force = false
@@ -3537,6 +4392,7 @@ async function startServer() {
     const candidateTags: string[] = [];
     const allTags: string[] = [];
     let releaseZipUrl: string | null = null;
+    let binaryAssetUrl: string | null = null;
     let isPrerelease = isNightlyReleaseTag(current);
     let error: string | null = null;
 
@@ -3576,10 +4432,10 @@ async function startServer() {
             const topTag = String(top.tag_name).trim();
             latest = topTag;
             isPrerelease = isNightlyReleaseTag(topTag, top);
-            const assets = Array.isArray(top.assets) ? top.assets : [];
-            const zipAsset = assets.find((a: any) => String(a?.name || '').endsWith('.zip'));
-            if (zipAsset?.browser_download_url && cmpVer(topTag, current) > 0) {
-              releaseZipUrl = String(zipAsset.browser_download_url);
+            if (cmpVer(topTag, current) > 0) {
+              const picked = pickPlatformReleaseAssets(top.assets || []);
+              releaseZipUrl = picked.zipUrl;
+              binaryAssetUrl = picked.binaryUrl;
             }
           }
         }
@@ -3626,6 +4482,9 @@ async function startServer() {
     }
     const updateAvailable =
       latest !== 'None published' && cmpVer(latest, current) > 0;
+    const targetBranch =
+      selectedChannel === 'stable' ? 'mediagrabber' : 'mediagrabber-nightly';
+    const branchUrl = `https://github.com/ai-mayhemyt/mediagrabber/tree/${targetBranch}`;
 
     const data = {
       current,
@@ -3633,12 +4492,16 @@ async function startServer() {
       platform: PLATFORM_SUFFIX,
       os_release: os.release(),
       os_arch: os.arch(),
+      is_binary: IS_PACKAGED_BINARY,
       latest,
       channel: isNightlyReleaseTag(current) ? 'nightly' : 'stable',
       selected_channel: selectedChannel,
+      branch: targetBranch,
+      branch_url: branchUrl,
       is_prerelease: isPrerelease,
       update_available: updateAvailable,
       release_zip_url: releaseZipUrl,
+      binary_asset_url: binaryAssetUrl,
       checked_at: new Date().toISOString(),
       tags: (candidateTags.length > 0 ? candidateTags : allTags).slice(0, 8),
       error,
@@ -3665,9 +4528,9 @@ async function startServer() {
     const reqChannel =
       req.query.channel === 'stable' || req.query.channel === 'nightly'
         ? req.query.channel
-        : settings?.update_channel === 'stable'
-        ? 'stable'
-        : 'nightly';
+        : settings?.update_channel === 'stable' || settings?.update_channel === 'nightly'
+        ? settings.update_channel
+        : DEFAULT_UPDATE_CHANNEL;
     const data = await resolveVersionInfo(reqChannel, force);
     res.json(data);
   });
@@ -3698,16 +4561,17 @@ async function startServer() {
       const selectedChannel: 'stable' | 'nightly' =
         req.body?.channel === 'stable' || req.body?.channel === 'nightly'
           ? req.body.channel
-          : settings?.update_channel === 'stable'
-          ? 'stable'
-          : 'nightly';
+          : settings?.update_channel === 'stable' || settings?.update_channel === 'nightly'
+          ? settings.update_channel
+          : DEFAULT_UPDATE_CHANNEL;
 
       versionCacheByChannel.stable = { data: null, ts: 0 };
       versionCacheByChannel.nightly = { data: null, ts: 0 };
-      const cwd = process.cwd();
+      const cwd = APP_ROOT;
       const current = CURRENT_APP_VERSION;
 
       let zipUrl = '';
+      let binaryUrl = '';
       let targetTag = selectedChannel === 'stable' ? 'latest stable' : 'mediagrabber-nightly';
       try {
         const ghRes = await fetch(
@@ -3733,17 +4597,66 @@ async function startServer() {
             const topTag = String(top?.tag_name || '').trim();
             if (topTag && cmpVer(topTag, current) > 0) {
               targetTag = topTag;
-              const zipAsset = (top?.assets || []).find((a: any) =>
-                String(a?.name || '').endsWith('.zip')
-              );
-              if (zipAsset?.browser_download_url) {
-                zipUrl = String(zipAsset.browser_download_url);
-              }
+              const picked = pickPlatformReleaseAssets(top?.assets || []);
+              zipUrl = picked.zipUrl || '';
+              binaryUrl = picked.binaryUrl || '';
             }
           }
         }
       } catch {
         // fallback to git pull
+      }
+
+      // Self-update standalone executable (.exe on Windows or standalone binary on Linux)
+      if (IS_PACKAGED_BINARY) {
+        if (!binaryUrl) {
+          throw new Error(
+            `No standalone ${IS_WINDOWS ? '.exe' : 'Linux binary'} release asset found for ${targetTag}.`
+          );
+        }
+        const dlRes = await fetch(binaryUrl, {
+          headers: { 'User-Agent': 'MediaGrabber' },
+          signal: AbortSignal.timeout(120000),
+        });
+        if (!dlRes.ok) {
+          throw new Error(`Failed to download binary update (${dlRes.status})`);
+        }
+        const dlBuf = Buffer.from(await dlRes.arrayBuffer());
+        if (dlBuf.length < 1024 * 1024) {
+          throw new Error('Downloaded executable asset appears incomplete.');
+        }
+
+        const execPath = process.execPath;
+        const stagedPath = `${execPath}.new`;
+        const backupPath = `${execPath}.old`;
+        fs.writeFileSync(stagedPath, dlBuf);
+        if (!IS_WINDOWS) {
+          fs.chmodSync(stagedPath, 0o755);
+        }
+        try {
+          if (fs.existsSync(backupPath)) fs.unlinkSync(backupPath);
+        } catch {}
+        if (fs.existsSync(execPath)) {
+          fs.renameSync(execPath, backupPath);
+        }
+        fs.renameSync(stagedPath, execPath);
+
+        res.json({
+          ok: true,
+          message: `Updated standalone binary to ${targetTag} (${selectedChannel} channel). Restarting MediaGrabber...`,
+        });
+        setTimeout(() => {
+          try {
+            const child = spawn(execPath, process.argv.slice(1), {
+              detached: true,
+              stdio: 'ignore',
+              cwd: APP_ROOT,
+            });
+            child.unref();
+          } catch {}
+          process.exit(0);
+        }, 750);
+        return;
       }
 
       if (zipUrl) {
@@ -3782,10 +4695,11 @@ async function startServer() {
           } else {
             return res.status(400).json({
               ok: false,
-              error: `No newer full release is available above ${current}.`,
+              error: `No newer full release is available above ${current} on mediagrabber.`,
             });
           }
         } else {
+          // Ensure Nightly updates always track and remember `mediagrabber-nightly`
           let currentBranch = '';
           try {
             const { stdout: bOut } = await execFileAsync(
@@ -3796,17 +4710,33 @@ async function startServer() {
             const trimmed = bOut.trim();
             if (trimmed && trimmed !== 'HEAD') currentBranch = trimmed;
           } catch {}
-          const candidates = ['mediagrabber-nightly', currentBranch, 'mediagrabber', '2.0-app', 'main'].filter(Boolean);
+
+          if (currentBranch !== 'mediagrabber-nightly') {
+            try {
+              await execFileAsync('git', ['checkout', 'mediagrabber-nightly'], { cwd, timeout: 15000 });
+            } catch {
+              try {
+                await execFileAsync(
+                  'git',
+                  ['checkout', '-B', 'mediagrabber-nightly', 'origin/mediagrabber-nightly'],
+                  { cwd, timeout: 15000 }
+                );
+              } catch {}
+            }
+          }
+
+          const candidates = ['mediagrabber-nightly', 'mediagrabber'];
           let pulled = false;
           for (const br of candidates) {
             try {
               await execFileAsync('git', ['pull', '--ff-only', 'origin', br], { cwd, timeout: 20000 });
+              targetTag = br;
               pulled = true;
               break;
             } catch {}
           }
           if (!pulled) {
-            throw new Error('Could not pull latest commits from mediagrabber-nightly / mediagrabber.');
+            throw new Error('Could not pull latest commits from origin/mediagrabber-nightly or origin/mediagrabber.');
           }
         }
       }
@@ -3818,6 +4748,7 @@ async function startServer() {
         { cwd, timeout: 120000, shell: IS_WINDOWS }
       );
       await execFileAsync(npmBin, ['run', 'build'], { cwd, timeout: 120000, shell: IS_WINDOWS });
+      await execFileAsync(npmBin, ['run', 'build:server'], { cwd, timeout: 120000, shell: IS_WINDOWS }).catch(() => {});
 
       res.json({
         ok: true,
@@ -3835,6 +4766,8 @@ async function startServer() {
     res.json({
       status: 'ok',
       version: CURRENT_APP_VERSION,
+      is_binary: IS_PACKAGED_BINARY,
+      max_concurrent_downloads: getMaxConcurrentDownloads(),
       uptime_seconds: Math.round(process.uptime()),
       queue: {
         total: jobs.length,
@@ -3956,8 +4889,110 @@ async function startServer() {
     fs.createReadStream(safeFile).pipe(res);
   });
 
-  // ---- YouTube RSS Channel Feeds ----
+  // ---- YouTube RSS Channel Feeds & Auto-Grab Poller ----
   let ytFeedCache: { videos: YoutubeFeedVideo[]; ts: number } = { videos: [], ts: 0 };
+
+  function isVideoAlreadySeenOrQueued(videoId: string, url: string): boolean {
+    const idLower = videoId.toLowerCase();
+    const urlLower = url.toLowerCase();
+    if (fs.existsSync(ARCHIVE_FILE)) {
+      const archiveContent = fs.readFileSync(ARCHIVE_FILE, 'utf-8').toLowerCase();
+      if (archiveContent.includes(idLower) || archiveContent.includes(urlLower)) {
+        return true;
+      }
+    }
+    for (const qJob of queue.values()) {
+      const qUrl = String(qJob.url || '').toLowerCase();
+      if (qUrl === urlLower || qUrl.includes(idLower)) {
+        return true;
+      }
+    }
+    const history = readJson<any[]>(HISTORY_FILE, []);
+    for (const h of history) {
+      const hUrl = String(h?.url || '').toLowerCase();
+      if (hUrl === urlLower || hUrl.includes(idLower)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  let autoPollRunning = false;
+  async function pollYoutubeAutoDownloads(): Promise<{
+    checked: number;
+    queuedCount: number;
+    channels: YoutubeFeedChannel[];
+  }> {
+    const channels = readJson<YoutubeFeedChannel[]>(YOUTUBE_FEEDS_FILE, []);
+    if (autoPollRunning) {
+      return { checked: 0, queuedCount: 0, channels };
+    }
+    autoPollRunning = true;
+    let checked = 0;
+    let queuedCount = 0;
+    try {
+      let dirty = false;
+      for (const ch of channels) {
+        if (!ch.auto_download) continue;
+        checked++;
+        try {
+          const parsed = await fetchYoutubeChannelFeed(ch.channelId);
+          const sinceMs = ch.auto_since ? new Date(ch.auto_since).getTime() : 0;
+          const autoMode: 'video' | 'audio' = ch.auto_mode === 'audio' ? 'audio' : 'video';
+
+          for (const vid of parsed.videos) {
+            const pubMs = new Date(vid.published).getTime();
+            if (sinceMs > 0 && Number.isFinite(pubMs) && pubMs <= sinceMs) {
+              continue;
+            }
+            if (isVideoAlreadySeenOrQueued(vid.videoId, vid.url)) {
+              continue;
+            }
+            const jobId = crypto.randomUUID();
+            const job: JobRecord = {
+              job_id: jobId,
+              url: vid.url,
+              title: vid.title,
+              uploader: ch.title || vid.channelTitle,
+              mode: autoMode,
+              options: { playlist_mode: 'single' },
+              engine: 'YOUTUBE',
+              status: 'queued',
+              progress: 0,
+              file: null,
+              thumbnail: vid.thumbnail || DEFAULT_YT_THUMB,
+              output_dir: null,
+              log: [`[auto-grab] Auto-queued new upload from ${ch.title}: ${vid.title}`],
+              created_at: new Date().toISOString(),
+            };
+            queue.set(jobId, job);
+            queuedCount++;
+          }
+
+          ch.last_checked_at = new Date().toISOString();
+          dirty = true;
+        } catch {
+          // ignore single channel transient fetch errors
+        }
+      }
+      if (dirty) {
+        writeJson(YOUTUBE_FEEDS_FILE, channels);
+      }
+      if (queuedCount > 0) {
+        persistQueue();
+        scheduleQueueWorker();
+        void sendPushNotification({
+          title: 'YouTube Auto-Grab',
+          body: `Queued ${queuedCount} new upload${queuedCount === 1 ? '' : 's'} from followed channels.`,
+          tag: 'yt-auto-grab',
+          url: '/',
+        });
+      }
+      return { checked, queuedCount, channels };
+    } finally {
+      autoPollRunning = false;
+    }
+  }
 
   app.get('/api/feeds/youtube', async (req, res) => {
     const active = getActiveUser();
@@ -4011,6 +5046,8 @@ async function startServer() {
         channelId,
         title: channelTitle,
         addedAt: new Date().toISOString(),
+        auto_download: false,
+        auto_mode: 'video',
       };
       if (!existing) {
         channels.push(savedChannel);
@@ -4021,6 +5058,39 @@ async function startServer() {
     } catch (err: any) {
       res.status(400).json({ error: err?.message || 'Unable to resolve YouTube RSS feed.' });
     }
+  });
+
+  app.post('/api/feeds/youtube/:channelId/auto', (req, res) => {
+    const active = getActiveUser();
+    if (!active) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    const channelId = String(req.params.channelId || '').trim();
+    const channels = readJson<YoutubeFeedChannel[]>(YOUTUBE_FEEDS_FILE, []);
+    const target = channels.find((c) => c.channelId === channelId);
+    if (!target) {
+      return res.status(404).json({ error: 'Channel not found in subscriptions.' });
+    }
+    const nextEnabled = Boolean(req.body?.auto_download);
+    const nextMode: 'video' | 'audio' = req.body?.auto_mode === 'audio' ? 'audio' : target.auto_mode === 'audio' && req.body?.auto_mode !== 'video' ? 'audio' : 'video';
+    const wasEnabled = Boolean(target.auto_download);
+    target.auto_download = nextEnabled;
+    target.auto_mode = nextMode;
+    if (nextEnabled && (!wasEnabled || !target.auto_since)) {
+      // Only auto-grab uploads published after enabling Auto-Grab
+      target.auto_since = new Date().toISOString();
+    }
+    writeJson(YOUTUBE_FEEDS_FILE, channels);
+    res.json({ ok: true, channel: target, channels });
+  });
+
+  app.post('/api/feeds/youtube/poll', async (_req, res) => {
+    const active = getActiveUser();
+    if (!active) {
+      return res.status(401).json({ error: 'Sign in required.' });
+    }
+    const result = await pollYoutubeAutoDownloads();
+    res.json({ ok: true, ...result });
   });
 
   app.delete('/api/feeds/youtube/:channelId', (req, res) => {
@@ -4034,6 +5104,257 @@ async function startServer() {
     writeJson(YOUTUBE_FEEDS_FILE, filtered);
     ytFeedCache = { videos: [], ts: 0 };
     res.json({ ok: true, channels: filtered });
+  });
+
+  // Poll YouTube Auto-Grab channels every 15 minutes
+  setInterval(() => {
+    void pollYoutubeAutoDownloads();
+  }, 15 * 60_000);
+  setTimeout(() => {
+    void pollYoutubeAutoDownloads();
+  }, 30_000);
+
+  // ---- Pre-Flight Dependency Health Check & 1-Click Tool Updater ----
+  async function probeToolVersion(bin: string | null, args: string[]): Promise<string | null> {
+    if (!bin) return null;
+    try {
+      const { stdout, stderr } = await execFileAsync(bin, args, {
+        timeout: 4500,
+        env: buildToolEnv(),
+      });
+      const firstLine = (stdout || stderr || '')
+        .split(/[\r\n]+/)
+        .map((l) => l.trim())
+        .find(Boolean);
+      return firstLine ? firstLine.slice(0, 96) : 'installed';
+    } catch {
+      return 'installed';
+    }
+  }
+
+  async function buildDependencyHealthReport() {
+    const platform: 'windows' | 'linux' | 'darwin' = IS_WINDOWS
+      ? 'windows'
+      : process.platform === 'darwin'
+      ? 'darwin'
+      : 'linux';
+
+    const ytdlpPath = resolveExecutable('yt-dlp');
+    const ffmpegPath = resolveExecutable('ffmpeg');
+    const spotdlPath = resolveExecutable('spotdl');
+    const gallerydlPath = resolveExecutable('gallery-dl');
+    const denoPath = resolveExecutable('deno');
+    const grabCmd = resolveGrabCommand();
+
+    const [ytdlpVer, ffmpegVer, spotdlVer, gallerydlVer, denoVer] = await Promise.all([
+      probeToolVersion(ytdlpPath, ['--version']),
+      probeToolVersion(ffmpegPath, ['-version']),
+      probeToolVersion(spotdlPath, ['--version']),
+      probeToolVersion(gallerydlPath, ['--version']),
+      probeToolVersion(denoPath, ['--version']),
+    ]);
+
+    const tools = [
+      {
+        id: 'yt-dlp',
+        name: 'yt-dlp',
+        required: true,
+        installed: Boolean(ytdlpPath),
+        path: ytdlpPath,
+        version: ytdlpVer,
+        updatable: true,
+        install_hint: IS_WINDOWS
+          ? 'winget install yt-dlp.yt-dlp'
+          : 'python3 -m pip install --user --upgrade yt-dlp',
+      },
+      {
+        id: 'ffmpeg',
+        name: 'FFmpeg',
+        required: true,
+        installed: Boolean(ffmpegPath),
+        path: ffmpegPath,
+        version: ffmpegVer,
+        updatable: false,
+        install_hint: IS_WINDOWS ? 'winget install Gyan.FFmpeg' : 'sudo apt install -y ffmpeg',
+      },
+      {
+        id: 'spotdl',
+        name: 'spotdl',
+        required: true,
+        installed: Boolean(spotdlPath),
+        path: spotdlPath,
+        version: spotdlVer,
+        updatable: true,
+        install_hint: IS_WINDOWS
+          ? 'python -m pip install --upgrade spotdl'
+          : 'python3 -m pip install --user --upgrade spotdl',
+      },
+      {
+        id: 'gallery-dl',
+        name: 'gallery-dl',
+        required: true,
+        installed: Boolean(gallerydlPath),
+        path: gallerydlPath,
+        version: gallerydlVer,
+        updatable: true,
+        install_hint: IS_WINDOWS
+          ? 'python -m pip install --upgrade gallery-dl'
+          : 'python3 -m pip install --user --upgrade gallery-dl',
+      },
+      {
+        id: 'deno',
+        name: 'Deno (YouTube EJS)',
+        required: false,
+        installed: Boolean(denoPath),
+        path: denoPath,
+        version: denoVer,
+        updatable: false,
+        install_hint: IS_WINDOWS
+          ? 'winget install DenoLand.Deno'
+          : 'curl -fsSL https://deno.land/install.sh | sh',
+      },
+      {
+        id: 'grab',
+        name: IS_WINDOWS ? 'grab.ps1 Wrapper' : 'grab Wrapper',
+        required: true,
+        installed: Boolean(grabCmd?.scriptPath),
+        path: grabCmd?.scriptPath || null,
+        version: grabCmd?.scriptPath ? (IS_WINDOWS ? 'PowerShell' : 'Bash') : null,
+        updatable: false,
+        install_hint: IS_WINDOWS ? 'Included in app root as grab.ps1' : 'Install grab to /usr/local/bin/grab',
+      },
+    ];
+
+    return {
+      platform,
+      checked_at: new Date().toISOString(),
+      tools,
+    };
+  }
+
+  async function runPipUpgrade(pkg: 'yt-dlp' | 'spotdl' | 'gallery-dl'): Promise<{ ok: boolean; output: string }> {
+    const pyBin = resolveExecutable('python3') || resolveExecutable('python');
+    if (!pyBin) {
+      return { ok: false, output: `python${IS_WINDOWS ? '' : '3'} not found in PATH.` };
+    }
+    const baseArgs = IS_WINDOWS
+      ? ['-m', 'pip', 'install', '--upgrade', pkg]
+      : ['-m', 'pip', 'install', '--user', '--upgrade', pkg];
+    try {
+      const { stdout, stderr } = await execFileAsync(pyBin, baseArgs, {
+        timeout: 90000,
+        env: buildToolEnv(),
+      });
+      return { ok: true, output: (stdout || stderr || `Upgraded ${pkg} via pip.`).trim() };
+    } catch (err: any) {
+      const msg = `${err?.stderr || ''} ${err?.stdout || ''} ${err?.message || ''}`;
+      if (!IS_WINDOWS && /externally-managed-environment|PEP\s*668/i.test(msg)) {
+        try {
+          const { stdout, stderr } = await execFileAsync(
+            pyBin,
+            ['-m', 'pip', 'install', '--user', '--break-system-packages', '--upgrade', pkg],
+            { timeout: 90000, env: buildToolEnv() }
+          );
+          return { ok: true, output: (stdout || stderr || `Upgraded ${pkg} via pip.`).trim() };
+        } catch (err2: any) {
+          return {
+            ok: false,
+            output: (err2?.stderr || err2?.stdout || err2?.message || `pip upgrade failed for ${pkg}`).trim(),
+          };
+        }
+      }
+      return { ok: false, output: msg.trim() };
+    }
+  }
+
+  app.get('/api/server/dependencies', async (_req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const report = await buildDependencyHealthReport();
+    res.json(report);
+  });
+
+  app.post('/api/server/dependencies/update', async (req, res) => {
+    const active = getActiveUser();
+    if (!active || active.role !== 'admin') {
+      return res.status(403).json({ error: 'Administrator privileges required.' });
+    }
+    const rawTool = String(req.body?.tool || 'yt-dlp').trim();
+    const ALLOWED = new Set(['yt-dlp', 'spotdl', 'gallery-dl', 'all']);
+    if (!ALLOWED.has(rawTool)) {
+      return res.status(400).json({ error: 'Invalid dependency target.' });
+    }
+
+    const targets: ('yt-dlp' | 'spotdl' | 'gallery-dl')[] =
+      rawTool === 'all'
+        ? ['yt-dlp', 'spotdl', 'gallery-dl']
+        : [rawTool as 'yt-dlp' | 'spotdl' | 'gallery-dl'];
+
+    const logs: string[] = [];
+    const updated: string[] = [];
+    const failed: string[] = [];
+
+    for (const tool of targets) {
+      if (tool === 'yt-dlp') {
+        const ytdlpBin = resolveExecutable('yt-dlp');
+        let done = false;
+        if (ytdlpBin) {
+          try {
+            const { stdout, stderr } = await execFileAsync(ytdlpBin, ['-U'], {
+              timeout: 60000,
+              env: buildToolEnv(),
+            });
+            const out = (stdout || stderr || '').trim();
+            logs.push(`[yt-dlp -U]\n${out || 'OK'}`);
+            if (!/installed .* via pip|package manager|cannot update/i.test(out)) {
+              done = true;
+            }
+          } catch (err: any) {
+            const out = `${err?.stdout || ''}\n${err?.stderr || ''}\n${err?.message || ''}`.trim();
+            logs.push(`[yt-dlp -U]\n${out}`);
+          }
+        }
+        if (!done) {
+          const pipRes = await runPipUpgrade('yt-dlp');
+          logs.push(`[pip upgrade yt-dlp]\n${pipRes.output}`);
+          done = pipRes.ok;
+          if (!done && IS_WINDOWS) {
+            const wingetBin = resolveExecutable('winget');
+            if (wingetBin) {
+              try {
+                const { stdout, stderr } = await execFileAsync(
+                  wingetBin,
+                  ['upgrade', '--id', 'yt-dlp.yt-dlp', '--accept-source-agreements', '--accept-package-agreements'],
+                  { timeout: 90000, env: buildToolEnv() }
+                );
+                logs.push(`[winget upgrade yt-dlp]\n${(stdout || stderr || 'OK').trim()}`);
+                done = true;
+              } catch (errW: any) {
+                logs.push(`[winget upgrade yt-dlp]\n${errW?.message || 'failed'}`);
+              }
+            }
+          }
+        }
+        if (done) updated.push(tool);
+        else failed.push(tool);
+      } else {
+        const pipRes = await runPipUpgrade(tool);
+        logs.push(`[pip upgrade ${tool}]\n${pipRes.output}`);
+        if (pipRes.ok) updated.push(tool);
+        else failed.push(tool);
+      }
+    }
+
+    const report = await buildDependencyHealthReport();
+    res.json({
+      ok: updated.length > 0 && failed.length === 0,
+      updated,
+      failed,
+      log: logs.join('\n\n'),
+      report,
+    });
   });
 
   // ---- v2.0 Network Watchdog (NetWatch) ----
@@ -4193,12 +5514,15 @@ async function startServer() {
     }
   });
 
-  // ---- v2.0-v1 Source Bundle Export for Linux SSH Deployment ----
+  // ---- v2.1 Source Bundle Export for Linux SSH Deployment ----
   app.get('/api/server/export-bundle', async (req, res) => {
     const active = getActiveUser();
     if (!active || active.role !== 'admin') {
       return res.status(403).json({ error: 'Administrator privileges required.' });
     }
+    const bundleSourceRoot = fs.existsSync(path.join(BUNDLE_ROOT, 'package.json'))
+      ? BUNDLE_ROOT
+      : process.cwd();
     const format = req.query.format === 'tar.gz' ? 'tar.gz' : 'zip';
     const allowlist = [
       'package.json',
@@ -4208,16 +5532,21 @@ async function startServer() {
       'index.html',
       'metadata.json',
       'README.md',
+      'WINDOWS.md',
+      'LINUX.md',
       'HANDOFF.md',
+      'LICENSE',
       '.env.example',
       '.gitignore',
+      '.github',
       'src',
       'public',
       'deploy',
+      'snap',
       'jellyfin-plugin',
       'grab',
       'grab.ps1',
-    ].filter((item) => fs.existsSync(path.join(process.cwd(), item)));
+    ].filter((item) => fs.existsSync(path.join(bundleSourceRoot, item)));
 
     try {
       if (format === 'tar.gz') {
@@ -4229,12 +5558,15 @@ async function startServer() {
             outTar,
             '--exclude=node_modules',
             '--exclude=dist',
+            '--exclude=dist-server',
+            '--exclude=dist-exe',
+            '--exclude=dist-deb',
             '--exclude=.git',
             '--exclude=.env',
             '--exclude=public/assets/aistudio',
             ...allowlist,
           ],
-          { cwd: process.cwd(), timeout: 15000 }
+          { cwd: bundleSourceRoot, timeout: 15000 }
         );
         return res.download(outTar, `mediagrabber-${BASE_APP_VERSION}.tar.gz`);
       }
@@ -4246,7 +5578,7 @@ async function startServer() {
 import os, sys, zipfile
 out_zip = sys.argv[1]
 items = sys.argv[2:]
-skip_dirs = {'node_modules', 'dist', '.git', 'bin', 'obj', 'aistudio'}
+skip_dirs = {'node_modules', 'dist', 'dist-server', 'dist-exe', 'dist-deb', '.git', 'bin', 'obj', 'aistudio'}
 with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
     for item in items:
         if os.path.isfile(item):
@@ -4262,7 +5594,7 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
                     zf.write(fp, fp)
 `;
         await execFileAsync(pyBin, ['-c', pyScript, outZip, ...allowlist], {
-          cwd: process.cwd(),
+          cwd: bundleSourceRoot,
           timeout: 15000,
         });
       } else if (IS_WINDOWS) {
@@ -4271,7 +5603,7 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
         await execFileAsync(
           psBin,
           ['-NoProfile', '-Command', `Compress-Archive -Path ${quotedItems} -DestinationPath '${outZip.replace(/'/g, "''")}' -Force`],
-          { cwd: process.cwd(), timeout: 30000 }
+          { cwd: bundleSourceRoot, timeout: 30000 }
         );
       } else {
         throw new Error('python3 is required to package zip archive on this host.');
@@ -4288,7 +5620,10 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
     if (!active || active.role !== 'admin') {
       return res.status(403).json({ error: 'Administrator privileges required.' });
     }
-    const pluginDir = path.join(process.cwd(), 'jellyfin-plugin');
+    const bundleSourceRoot = fs.existsSync(path.join(BUNDLE_ROOT, 'jellyfin-plugin'))
+      ? BUNDLE_ROOT
+      : process.cwd();
+    const pluginDir = path.join(bundleSourceRoot, 'jellyfin-plugin');
     if (!fs.existsSync(pluginDir)) {
       return res.status(404).json({ error: 'Jellyfin plugin directory not found.' });
     }
@@ -4312,7 +5647,7 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
             zf.write(fp, arcname)
 `;
         await execFileAsync(pyBin, ['-c', pyScript, outZip, pluginDir], {
-          cwd: process.cwd(),
+          cwd: bundleSourceRoot,
           timeout: 15000,
         });
       } else if (IS_WINDOWS) {
@@ -4320,7 +5655,7 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
         await execFileAsync(
           psBin,
           ['-NoProfile', '-Command', `Compress-Archive -Path '${pluginDir.replace(/'/g, "''")}\\*' -DestinationPath '${outZip.replace(/'/g, "''")}' -Force`],
-          { cwd: process.cwd(), timeout: 30000 }
+          { cwd: bundleSourceRoot, timeout: 30000 }
         );
       } else {
         throw new Error('python3 is required to package Jellyfin plugin archive.');
@@ -4335,7 +5670,8 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
   const httpServer = http.createServer(app);
 
   // ---- Vite / Static Frontend ----
-  if (process.env.NODE_ENV !== 'production') {
+  if (process.env.NODE_ENV !== 'production' && !IS_PACKAGED_BINARY && !IS_COMPILED_CJS) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -4346,7 +5682,14 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(process.cwd(), 'dist');
+    const distCandidates = [
+      path.resolve(APP_ROOT, 'dist'),
+      path.resolve(PACKAGE_ROOT, 'dist'),
+      path.resolve(BUNDLE_ROOT, 'dist'),
+      path.resolve(process.cwd(), 'dist'),
+    ];
+    const distPath =
+      distCandidates.find((d) => fs.existsSync(path.join(d, 'index.html'))) || distCandidates[0];
     const indexHtml = path.join(distPath, 'index.html');
     if (fs.existsSync(distPath)) {
       app.use(express.static(distPath));
@@ -4366,8 +5709,25 @@ with zipfile.ZipFile(out_zip, 'w', zipfile.ZIP_DEFLATED) as zf:
     }
   });
 
+  // Resume any persisted queued jobs according to max_concurrent_downloads
+  scheduleQueueWorker();
+
   httpServer.listen(PORT, HOST, () => {
-    console.log(`MediaGrabber listening on http://${HOST}:${PORT}`);
+    console.log(`MediaGrabber ${CURRENT_APP_VERSION} listening on http://${HOST}:${PORT}`);
+    if (SHOULD_OPEN_BROWSER) {
+      const localUrl = `http://127.0.0.1:${PORT}`;
+      try {
+        if (IS_WINDOWS) {
+          spawn('cmd.exe', ['/c', 'start', '', localUrl], { detached: true, stdio: 'ignore' }).unref();
+        } else if (process.platform === 'darwin') {
+          spawn('open', [localUrl], { detached: true, stdio: 'ignore' }).unref();
+        } else {
+          spawn('xdg-open', [localUrl], { detached: true, stdio: 'ignore' }).unref();
+        }
+      } catch {
+        // ignore if no desktop browser handler exists
+      }
+    }
   });
 }
 

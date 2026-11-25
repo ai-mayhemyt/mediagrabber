@@ -21,9 +21,13 @@ import {
   FileUp,
   Download,
   BarChart3,
+  CheckCircle2,
+  AlertTriangle,
+  Wrench,
 } from 'lucide-react';
 import {
   ArchiveEntry,
+  DependencyHealthReport,
   MediaFileItem,
   NetwatchStatus,
   RadioStation,
@@ -101,6 +105,8 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
   const [dedupTarget, setDedupTarget] = useState('/tmp/mediagrabber-workspace/YouTube');
   const [dedupLogs, setDedupLogs] = useState<string[]>(['Ready to scan target folder for SHA-256 duplicates.']);
   const [dedupBusy, setDedupBusy] = useState(false);
+  const [autoDedupSchedule, setAutoDedupSchedule] = useState<'off' | 'daily' | 'weekly'>('off');
+  const [autoDedupSummary, setAutoDedupSummary] = useState<string | null>(null);
 
   // Metadata Editor
   const [editorFolder, setEditorFolder] = useState('/tmp/mediagrabber-workspace');
@@ -136,6 +142,10 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [checkingVersion, setCheckingVersion] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [depReport, setDepReport] = useState<DependencyHealthReport | null>(null);
+  const [loadingDeps, setLoadingDeps] = useState(false);
+  const [updatingDeps, setUpdatingDeps] = useState<string | null>(null);
+  const [depUpdateLog, setDepUpdateLog] = useState<string>('');
   const [stats, setStats] = useState<StatsOverview | null>(null);
   const [loadingStats, setLoadingStats] = useState(false);
 
@@ -225,17 +235,58 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
     }
   };
 
+  const loadDependencyHealth = async () => {
+    setLoadingDeps(true);
+    try {
+      const res = await fetch('/api/server/dependencies', { cache: 'no-store' });
+      if (res.ok) {
+        setDepReport((await res.json()) as DependencyHealthReport);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingDeps(false);
+    }
+  };
+
+  const handleUpdateDependency = async (tool: 'yt-dlp' | 'spotdl' | 'gallery-dl' | 'all') => {
+    if (updatingDeps) return;
+    setUpdatingDeps(tool);
+    setDepUpdateLog(`Updating ${tool === 'all' ? 'yt-dlp, spotdl & gallery-dl' : tool}...`);
+    try {
+      const res = await fetch('/api/server/dependencies/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data.report) setDepReport(data.report as DependencyHealthReport);
+      if (data.log) setDepUpdateLog(String(data.log));
+      if (res.ok && data.ok) {
+        onNotify('success', `Updated ${(data.updated || [tool]).join(', ')} successfully.`);
+      } else {
+        onNotify('error', data.error || `Some dependencies could not be updated: ${(data.failed || [tool]).join(', ')}`);
+      }
+    } catch {
+      onNotify('error', 'Failed to contact server for dependency update.');
+    } finally {
+      setUpdatingDeps(null);
+    }
+  };
+
   const loadServerTools = async () => {
     try {
-      const [toolsRes, nwRes, verRes] = await Promise.all([
+      const [toolsRes, nwRes, verRes, depRes] = await Promise.all([
         fetch('/api/utilities'),
         fetch('/api/server/netwatch'),
         fetch('/api/version/info'),
+        fetch('/api/server/dependencies', { cache: 'no-store' }),
       ]);
       const toolsData = await toolsRes.json();
       setServerTools(Array.isArray(toolsData) ? toolsData : []);
       if (nwRes.ok) setNetwatch(await nwRes.json());
       if (verRes.ok) setVersionInfo(await verRes.json());
+      if (depRes.ok) setDepReport((await depRes.json()) as DependencyHealthReport);
     } catch {
       // ignore
     }
@@ -246,7 +297,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
   const checkForVersionUpdate = async (overrideChannel?: 'stable' | 'nightly') => {
     setCheckingVersion(true);
     try {
-      const ch = overrideChannel || versionInfo?.selected_channel || 'nightly';
+      const ch = overrideChannel || versionInfo?.selected_channel || 'stable';
       const res = await fetch(`/api/version/info?force=1&channel=${encodeURIComponent(ch)}`);
       if (res.ok) {
         const info = (await res.json()) as VersionInfo;
@@ -292,7 +343,7 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
 
   const installVersionUpdate = () => {
     const target = versionInfo?.latest || 'latest release';
-    const selectedChannel = versionInfo?.selected_channel || 'nightly';
+    const selectedChannel = versionInfo?.selected_channel || 'stable';
     onConfirm(
       'Install MediaGrabber Update',
       `Download ${target} (${selectedChannel} channel), rebuild the server, and restart MediaGrabber?`,
@@ -348,6 +399,12 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
         if (s?.yt_base_path) {
           setDedupTarget(s.yt_base_path);
           setEditorFolder(s.yt_base_path);
+        }
+        if (s?.auto_dedup_schedule) {
+          setAutoDedupSchedule(s.auto_dedup_schedule);
+        }
+        if (s?.auto_dedup_last_summary) {
+          setAutoDedupSummary(s.auto_dedup_last_summary);
         }
       })
       .catch(() => {});
@@ -911,14 +968,20 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
             className="p-5 rounded-xl border flex flex-col gap-3"
             style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
           >
-            <div>
-              <h2 className="font-display text-sm font-semibold flex items-center gap-2">
-                <CopyX className="w-4 h-4" />
-                <span>Deduplicate Files (SHA-256)</span>
-              </h2>
-              <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
-                Identify exact byte-identical files in a library folder, keeping the largest copy and trashing duplicates.
-              </p>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+                  <CopyX className="w-4 h-4" />
+                  <span>Deduplicate Files (SHA-256)</span>
+                </h2>
+                <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
+                  Identify exact byte-identical files in a library folder, keeping the largest copy and trashing duplicates.
+                </p>
+              </div>
+              <span className="text-[11px] font-mono" style={{ color: 'var(--mg-muted)' }}>
+                Auto-Cleanup: {autoDedupSchedule === 'off' ? 'Off' : autoDedupSchedule === 'daily' ? 'Daily' : 'Weekly'}
+                {autoDedupSummary ? ` · ${autoDedupSummary}` : ''}
+              </span>
             </div>
             <div className="flex flex-col sm:flex-row gap-2.5">
               <input
@@ -1715,22 +1778,48 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                   <span>Version Manager</span>
                 </h2>
                 <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
-                  Compare running build against upstream{' '}
+                  Active channel tracks{' '}
                   <a
-                    href="https://github.com/ai-mayhemyt/mediagrabber/tree/2.0-app"
+                    href={
+                      versionInfo?.branch_url ||
+                      (versionInfo?.selected_channel === 'stable'
+                        ? 'https://github.com/ai-mayhemyt/mediagrabber/tree/mediagrabber'
+                        : 'https://github.com/ai-mayhemyt/mediagrabber/tree/mediagrabber-nightly')
+                    }
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-mono underline hover:opacity-80"
+                    style={{ color: 'var(--mg-accent)' }}
+                  >
+                    {versionInfo?.branch ||
+                      (versionInfo?.selected_channel === 'stable'
+                        ? 'mediagrabber'
+                        : 'mediagrabber-nightly')}
+                  </a>{' '}
+                  · Full:{' '}
+                  <a
+                    href="https://github.com/ai-mayhemyt/mediagrabber/tree/mediagrabber"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="underline hover:opacity-80"
                   >
-                    2.0-app branch
+                    mediagrabber
                   </a>{' '}
-                  releases on GitHub.
+                  / Nightly:{' '}
+                  <a
+                    href="https://github.com/ai-mayhemyt/mediagrabber/tree/mediagrabber-nightly"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:opacity-80"
+                  >
+                    mediagrabber-nightly
+                  </a>
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <a
                   href="/api/server/export-bundle?format=zip"
-                  download="mediagrabber-v2.0-pre8.zip"
+                  download="mediagrabber-v2.1.zip"
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0"
                   style={{
                     backgroundColor: 'var(--mg-bg)',
@@ -1785,7 +1874,8 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
               <div>
                 <div className="text-xs font-semibold">Auto-Updater Release Channel</div>
                 <p className="text-[11px] mt-0.5" style={{ color: 'var(--mg-muted)' }}>
-                  Choose whether the auto-installer tracks stable full releases only or includes nightly pre-releases.
+                  Full Releases track <code className="font-mono">mediagrabber</code>; Nightly Pre-Releases track{' '}
+                  <code className="font-mono">mediagrabber-nightly</code>.
                 </p>
               </div>
               <div
@@ -1799,8 +1889,13 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                   className="px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-colors"
                   style={{
                     backgroundColor:
-                      versionInfo?.selected_channel === 'stable' ? 'var(--mg-accent)' : 'transparent',
-                    color: versionInfo?.selected_channel === 'stable' ? '#ffffff' : 'var(--mg-muted)',
+                      (versionInfo?.selected_channel ?? 'stable') === 'stable'
+                        ? 'var(--mg-accent)'
+                        : 'transparent',
+                    color:
+                      (versionInfo?.selected_channel ?? 'stable') === 'stable'
+                        ? '#ffffff'
+                        : 'var(--mg-muted)',
                   }}
                 >
                   Full Releases
@@ -1812,13 +1907,9 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                   className="px-3 py-1.5 rounded-md text-xs font-medium whitespace-nowrap transition-colors"
                   style={{
                     backgroundColor:
-                      (versionInfo?.selected_channel ?? 'nightly') === 'nightly'
-                        ? 'var(--mg-accent)'
-                        : 'transparent',
+                      versionInfo?.selected_channel === 'nightly' ? 'var(--mg-accent)' : 'transparent',
                     color:
-                      (versionInfo?.selected_channel ?? 'nightly') === 'nightly'
-                        ? '#ffffff'
-                        : 'var(--mg-muted)',
+                      versionInfo?.selected_channel === 'nightly' ? '#ffffff' : 'var(--mg-muted)',
                   }}
                 >
                   Nightly Pre-Releases
@@ -1829,15 +1920,15 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
-                  Current Build ({versionInfo?.channel === 'nightly' ? 'Nightly' : 'Release'}{versionInfo?.platform ? ` · ${versionInfo.platform}` : ''})
+                  Current Build ({versionInfo?.channel === 'nightly' ? 'Nightly' : 'Release'}{versionInfo?.platform ? ` · ${versionInfo.platform}` : ''}{versionInfo?.is_binary ? ' · Standalone Binary' : ''})
                 </div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.0-pre8'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.current || 'v2.1'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>
-                  Latest {(versionInfo?.selected_channel ?? 'nightly') === 'stable' ? 'Full Release' : 'Nightly Pre-Release'}
+                  Latest {(versionInfo?.selected_channel ?? 'stable') === 'stable' ? 'Full Release' : 'Nightly Pre-Release'}
                 </div>
-                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.0-pre8'}</div>
+                <div className="font-mono text-sm font-semibold mt-1">{versionInfo?.latest || 'v2.1'}</div>
               </div>
               <div className="p-3 rounded-lg border" style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}>
                 <div className="text-xs" style={{ color: 'var(--mg-muted)' }}>Last Checked</div>
@@ -1846,6 +1937,118 @@ export const UtilitiesView: React.FC<UtilitiesViewProps> = ({
                 </div>
               </div>
             </div>
+          </section>
+
+          <section
+            className="p-5 rounded-xl border flex flex-col gap-4"
+            style={{ backgroundColor: 'var(--mg-card)', borderColor: 'var(--mg-border)' }}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="font-display text-sm font-semibold flex items-center gap-2">
+                  <Wrench className="w-4 h-4" />
+                  <span>Pre-Flight Dependency Health ({depReport?.platform || 'host'})</span>
+                </h2>
+                <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
+                  Inspect installed extractor binaries &amp; wrappers across Windows/Linux and run 1-click extractor updates.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={loadingDeps}
+                  onClick={() => void loadDependencyHealth()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50"
+                  style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingDeps ? 'animate-spin' : ''}`} />
+                  <span>Scan</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={updatingDeps !== null}
+                  onClick={() => void handleUpdateDependency('yt-dlp')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white whitespace-nowrap shrink-0 disabled:opacity-50"
+                  style={{ backgroundColor: 'var(--mg-accent)' }}
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${updatingDeps === 'yt-dlp' ? 'animate-spin' : ''}`} />
+                  <span>{updatingDeps === 'yt-dlp' ? 'Updating yt-dlp...' : 'Update yt-dlp'}</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={updatingDeps !== null}
+                  onClick={() => void handleUpdateDependency('all')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium whitespace-nowrap shrink-0 disabled:opacity-50"
+                  style={{ borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${updatingDeps === 'all' ? 'animate-spin' : ''}`} />
+                  <span>{updatingDeps === 'all' ? 'Updating All...' : 'Update All Extractors'}</span>
+                </button>
+              </div>
+            </div>
+
+            {!depReport ? (
+              <div className="p-6 text-center text-xs" style={{ color: 'var(--mg-muted)' }}>
+                {loadingDeps ? 'Probing system executables...' : 'Loading dependency status...'}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {depReport.tools.map((tool) => (
+                  <div
+                    key={tool.id}
+                    className="p-3 rounded-lg border flex flex-col gap-1.5"
+                    style={{
+                      backgroundColor: 'var(--mg-bg)',
+                      borderColor: tool.installed
+                        ? 'var(--mg-border)'
+                        : tool.required
+                        ? '#dc2626'
+                        : '#d97706',
+                    }}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {tool.installed ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                        ) : (
+                          <AlertTriangle
+                            className={`w-4 h-4 shrink-0 ${tool.required ? 'text-red-500' : 'text-amber-500'}`}
+                          />
+                        )}
+                        <span className="text-xs font-semibold truncate">{tool.name}</span>
+                        {tool.required && (
+                          <span className="text-[10px] font-mono uppercase" style={{ color: 'var(--mg-muted)' }}>
+                            Required
+                          </span>
+                        )}
+                      </div>
+                      <span
+                        className="text-[11px] font-medium shrink-0"
+                        style={{
+                          color: tool.installed ? '#16a34a' : tool.required ? '#dc2626' : '#d97706',
+                        }}
+                      >
+                        {tool.installed ? 'Ready' : 'Missing'}
+                      </span>
+                    </div>
+                    <div className="text-[11px] font-mono truncate" style={{ color: 'var(--mg-muted)' }}>
+                      {tool.installed
+                        ? `${tool.version || 'installed'} · ${tool.path}`
+                        : `Install: ${tool.install_hint}`}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {depUpdateLog && (
+              <pre
+                className="p-3 rounded-lg border text-xs font-mono overflow-x-auto max-h-40 whitespace-pre-wrap"
+                style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)', color: 'var(--mg-text)' }}
+              >
+                {depUpdateLog}
+              </pre>
+            )}
           </section>
 
           <section

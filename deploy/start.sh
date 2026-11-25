@@ -17,4 +17,8 @@ if [ ! -d dist ]; then
   npm run build
 fi
 
+if [ ! -f dist-server/server.cjs ]; then
+  npm run build:server
+fi
+
 exec npm start

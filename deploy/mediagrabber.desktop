@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=MediaGrabber
+GenericName=Media Downloader & Queue Console
+Comment=Self-hosted media downloader, metadata editor, and Jellyfin companion
+Exec=mediagrabber --open
+Icon=mediagrabber
+Terminal=false
+Type=Application
+Categories=AudioVideo;Network;Utility;
+Keywords=youtube;spotify;yt-dlp;downloader;jellyfin;navidrome;
+StartupNotify=true

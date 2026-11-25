@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Eye, EyeOff, LogIn, UserPlus, Palette, Sun, Moon, ShieldCheck } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Eye, EyeOff, LogIn, UserPlus, Palette, Sun, Moon, ShieldCheck, BookOpen } from 'lucide-react';
 import { UserAccount } from '../types';
 import { BrandLogo } from './BrandLogo';
 
@@ -7,6 +7,7 @@ interface AuthScreenProps {
   themeMode: 'dark' | 'light';
   onToggleTheme: () => void;
   onOpenTheme: () => void;
+  onOpenSetupGuide?: () => void;
   onAuthenticated: (user: UserAccount) => void;
   onNotify: (type: 'info' | 'success' | 'error', msg: string) => void;
 }
@@ -15,10 +16,12 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   themeMode,
   onToggleTheme,
   onOpenTheme,
+  onOpenSetupGuide,
   onAuthenticated,
   onNotify,
 }) => {
   const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [hasAdmin, setHasAdmin] = useState<boolean>(true);
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
@@ -29,6 +32,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    fetch('/api/quickstart/status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((st) => {
+        if (st && st.has_admin === false) {
+          setHasAdmin(false);
+          setMode('register');
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -145,14 +160,40 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         >
           <div className="flex flex-col gap-1">
             <h1 className="font-display text-lg font-semibold">
-              {mode === 'login' ? 'Sign in to MediaGrabber' : 'Create a MediaGrabber Account'}
+              {mode === 'login'
+                ? 'Sign in to MediaGrabber'
+                : !hasAdmin
+                ? 'Create Administrator Account'
+                : 'Create a MediaGrabber Account'}
             </h1>
             <p className="text-xs" style={{ color: 'var(--mg-muted)' }}>
               {mode === 'login'
                 ? 'Enter your credentials to access your download queue and library.'
+                : !hasAdmin
+                ? 'First-run setup: the first account created will be your server Administrator.'
                 : 'New accounts are created with the standard "user" role by default.'}
             </p>
           </div>
+
+          {!hasAdmin && onOpenSetupGuide && (
+            <div
+              className="px-3.5 py-2.5 rounded-lg border flex items-center justify-between gap-3"
+              style={{ backgroundColor: 'var(--mg-bg)', borderColor: 'var(--mg-border)' }}
+            >
+              <span className="text-xs" style={{ color: 'var(--mg-muted)' }}>
+                New installation detected. Use the step-by-step Setup Guide to configure your admin account and libraries.
+              </span>
+              <button
+                type="button"
+                onClick={onOpenSetupGuide}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-semibold text-white whitespace-nowrap shrink-0"
+                style={{ backgroundColor: 'var(--mg-accent)' }}
+              >
+                <BookOpen className="w-3.5 h-3.5" />
+                <span>Setup Guide</span>
+              </button>
+            </div>
+          )}
 
           <div
             className="grid grid-cols-2 gap-1 p-1 rounded-lg border"
@@ -340,7 +381,13 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               ) : (
                 <>
                   <UserPlus className="w-4 h-4" />
-                  <span>{busy ? 'Creating account...' : 'Create User Account'}</span>
+                  <span>
+                    {busy
+                      ? 'Creating account...'
+                      : !hasAdmin
+                      ? 'Create Administrator Account'
+                      : 'Create User Account'}
+                  </span>
                 </>
               )}
             </button>

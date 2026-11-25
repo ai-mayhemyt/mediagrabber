@@ -1,16 +1,73 @@
 {
   "name": "mediagrabber",
-  "private": true,
-  "version": "2.0.0",
+  "private": false,
+  "version": "2.1.0",
+  "license": "MIT",
   "description": "Self-hosted media ingestion, download queue console, metadata editor, library deduplication, and Jellyfin companion service for Linux, Windows 11, and Windows 10.",
+  "keywords": [
+    "mediagrabber",
+    "yt-dlp",
+    "spotdl",
+    "gallery-dl",
+    "jellyfin",
+    "navidrome",
+    "media-downloader",
+    "self-hosted"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ai-mayhemyt/mediagrabber.git"
+  },
+  "homepage": "https://github.com/ai-mayhemyt/mediagrabber#readme",
+  "bugs": {
+    "url": "https://github.com/ai-mayhemyt/mediagrabber/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "start": "NODE_ENV=production tsx server.ts",
+    "start": "node -e \"const fs=require('fs'),cp=require('child_process');process.env.NODE_ENV=process.env.NODE_ENV||'production';if(!fs.existsSync('dist-server/server.cjs'))cp.execSync('npm run build:server',{stdio:'inherit'});require('./dist-server/server.cjs')\"",
     "build": "vite build",
+    "build:server": "esbuild server.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist-server/server.cjs --banner:js=\"#!/usr/bin/env node\" --external:vite --external:esbuild --external:lightningcss --external:@tailwindcss/* && node -e \"require('fs').chmodSync('dist-server/server.cjs', 0o755)\"",
+    "build:exe": "npm run build && npm run build:server && pkg dist-server/server.cjs --targets node22-win-x64 --output dist-exe/mediagrabber-win-x64.exe",
+    "build:bin:linux": "npm run build && npm run build:server && pkg dist-server/server.cjs --targets node22-linux-x64 --output dist-exe/mediagrabber-linux-x64",
+    "build:binaries": "npm run build && npm run build:server && pkg dist-server/server.cjs --targets node22-win-x64,node22-linux-x64 --out-path dist-exe",
+    "build:deb": "bash deploy/build-deb.sh",
+    "prepublishOnly": "npm run build && npm run build:server",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "node -e \"const fs=require('fs');for(const p of ['dist','dist-server','dist-exe','dist-deb','server.js'])fs.rmSync(p,{recursive:true,force:true})\"",
     "lint": "tsc --noEmit"
+  },
+  "bin": {
+    "mediagrabber": "dist-server/server.cjs"
+  },
+  "files": [
+    "dist/**/*",
+    "!dist/assets/aistudio/**",
+    "dist-server/server.cjs",
+    "public/**/*",
+    "!public/assets/aistudio/**",
+    "grab",
+    "grab.ps1",
+    "deploy/**/*",
+    "README.md",
+    "WINDOWS.md",
+    "LINUX.md",
+    "LICENSE"
+  ],
+  "pkg": {
+    "assets": [
+      "dist/**/*",
+      "public/**/*",
+      "grab",
+      "grab.ps1"
+    ],
+    "targets": [
+      "node22-win-x64",
+      "node22-linux-x64"
+    ]
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -32,14 +89,15 @@
     "web-push": "^4.0.0"
   },
   "devDependencies": {
+    "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@yao-pkg/pkg": "^6.26.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
-    "typescript": "^7.0.2",
-    "@types/express": "^4.17.21"
+    "typescript": "^7.0.2"
   }
 }

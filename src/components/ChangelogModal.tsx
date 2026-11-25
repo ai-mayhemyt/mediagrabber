@@ -17,6 +17,97 @@ interface NightlyReleaseNote {
 
 const NIGHTLY_RELEASES: NightlyReleaseNote[] = [
   {
+    version: 'v2.1',
+    channel: 'Full Stable Release',
+    date: '2026-11-24',
+    summary:
+      'Final v2.1 release promoting all v2.1-pre1 & v2.1-pre2 capabilities to mediagrabber with Keyboard Shortcuts, npm package publishing, Ubuntu App Store (Snapcraft + .deb), dedicated WINDOWS.md & LINUX.md guides, and stability fixes.',
+    items: [
+      {
+        kind: 'new',
+        text: 'Added global Keyboard Shortcuts (/, Ctrl/Cmd+K search, N new grab, Ctrl/Cmd+Enter submit, 1–4 switch views, R refresh, ? open Shortcuts reference, Esc close active modal).',
+      },
+      {
+        kind: 'new',
+        text: 'Prepared public npm CLI package (npm install -g mediagrabber) with executable server.cjs entry, global package path resolution, and Ubuntu App Store packaging (snap/snapcraft.yaml + deploy/build-deb.sh + .desktop launcher).',
+      },
+      {
+        kind: 'new',
+        text: 'Added dedicated WINDOWS.md and LINUX.md documentation plus complete v2.1 feature handoff in HANDOFF.md.',
+      },
+      {
+        kind: 'fix',
+        text: 'Fixed first-install onboarding on Windows & Linux to open directly in the Setup Guide with zero pre-saved accounts, fixed install-windows.ps1 / start-windows.bat / @yao-pkg/pkg Node 22 .exe builds, and made yt-dlp, spotdl, gallery-dl, and FFmpeg mandatory in installers.',
+      },
+    ],
+  },
+  {
+    version: 'v2.1-pre2',
+    channel: 'Nightly Pre-Release',
+    date: '2026-11-24',
+    summary:
+      'Live SSE download log streaming, automated scheduled SHA-256 duplicate cleanup, custom per-site naming templates, and bandwidth rate throttling across Windows 10/11 and Linux.',
+    items: [
+      {
+        kind: 'new',
+        text: 'Added real-time Live Log Streaming via Server-Sent Events (/api/log/:jobId/stream) with live stream status, keepalive pings, and auto-scroll toggle in the Queue log modal.',
+      },
+      {
+        kind: 'new',
+        text: 'Added Automated Duplicate Cleanup Scheduler (Off / Daily / Weekly) using chunked SHA-256 hashing across YouTube, Music, and Gallery roots, plus a 1-click Run All Libraries Now trigger.',
+      },
+      {
+        kind: 'new',
+        text: 'Added Custom Per-Site Naming Templates for yt-dlp (YouTube/YT Music), spotdl (Spotify), and gallery-dl (Instagram/TikTok/X) wired into Linux grab, Windows grab.ps1, and direct fallback.',
+      },
+      {
+        kind: 'new',
+        text: 'Added configurable Bandwidth Limit (--limit-rate, e.g. 2M, 5M, 10M, 25M, or custom) in Settings for yt-dlp and gallery-dl across both Windows and Linux.',
+      },
+      {
+        kind: 'security',
+        text: 'Validated custom naming templates against path traversal (..) and shell operators, enforced admin guards on deduplication routes, and protected log streams with authentication checks.',
+      },
+    ],
+  },
+  {
+    version: 'v2.1-pre1',
+    channel: 'Nightly Pre-Release',
+    date: '2026-11-24',
+    summary:
+      'Standalone Windows (.exe) and Linux binaries, persistent concurrency queue, cookies.txt upload/paste, YouTube RSS Auto-Grab, Subtitle/SponsorBlock/Playlist toggles, Pre-Flight Dependency Updater, and Nightly branch alignment across Windows & Linux.',
+    items: [
+      {
+        kind: 'new',
+        text: 'Added standalone Windows (.exe) and Linux (linux-x64) executable builds via esbuild + pkg, bundled grab/grab.ps1 extraction, --open browser flag, and OS-aware binary self-updating.',
+      },
+      {
+        kind: 'new',
+        text: 'Added persistent queue.json storage (survives restarts/updates) and configurable Max Concurrent Downloads (1–8) worker scheduling across Windows and Linux.',
+      },
+      {
+        kind: 'new',
+        text: 'Added in-UI Netscape cookies.txt upload, paste, status inspection, and clear actions for YouTube and Gallery extractors inside Settings.',
+      },
+      {
+        kind: 'new',
+        text: 'Added YouTube RSS Auto-Grab per followed channel (Video/Audio toggle, 15m background poller, archive deduplication, and Check Now button) in the sidebar.',
+      },
+      {
+        kind: 'new',
+        text: 'Added per-grab Embed Subtitles, SponsorBlock, and Single Video vs. Full Playlist toggles on the Queue submit card wired to grab (Linux), grab.ps1 (Windows), and yt-dlp fallback.',
+      },
+      {
+        kind: 'new',
+        text: 'Added Pre-Flight Dependency Health Check & 1-Click Extractor Updater (yt-dlp, spotdl, gallery-dl, FFmpeg, Deno, grab/grab.ps1) in Utilities → Server Manager.',
+      },
+      {
+        kind: 'fix',
+        text: 'Fixed Version Manager and auto-updater channel branch tracking: Nightly remembers mediagrabber-nightly and Full Releases track mediagrabber, replacing old 2.0-app links.',
+      },
+    ],
+  },
+  {
     version: 'v2.0-pre8',
     channel: 'Nightly Pre-Release',
     date: '2026-11-24',
@@ -272,7 +363,7 @@ export const ChangelogModal: React.FC<{
               </span>
             </div>
             <p className="text-xs mt-1" style={{ color: 'var(--mg-muted)' }}>
-              Recent updates, fixes, and security hardening across MediaGrabber nightly builds.
+              Recent updates, fixes, and security hardening across MediaGrabber stable and nightly releases.
               {versionInfo?.update_available && versionInfo.latest
                 ? ` Upstream ${versionInfo.latest} is available in Utilities → Server Manager.`
                 : ''}

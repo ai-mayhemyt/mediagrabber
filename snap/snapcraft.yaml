@@ -1,0 +1,119 @@
+name: mediagrabber
+base: core22
+version: '2.1.0'
+summary: Self-hosted media downloader, queue console & Jellyfin companion
+description: |
+  MediaGrabber is a self-hosted media ingestion and download queue console
+  supporting YouTube, YouTube Music, Spotify, Instagram, TikTok, and more.
+  Features real-time SSE log streaming, automated scheduled SHA-256 duplicate
+  cleanup, custom per-site naming templates, bandwidth rate limiting, YouTube
+  RSS Auto-Grab, per-grab Subtitle/SponsorBlock controls, keyboard shortcuts,
+  scoped API keys, Navidrome radio sync, and native Jellyfin integration.
+
+grade: stable
+confinement: strict
+license: MIT
+icon: public/pwa-512x512.png
+
+apps:
+  mediagrabber:
+    command: bin/mediagrabber-launcher
+    desktop: share/applications/mediagrabber.desktop
+    plugs:
+      - network
+      - network-bind
+      - home
+      - removable-media
+      - desktop
+      - desktop-legacy
+      - wayland
+      - x11
+  daemon:
+    command: bin/mediagrabber-launcher --port 3000
+    daemon: simple
+    restart-condition: on-failure
+    plugs:
+      - network
+      - network-bind
+      - home
+      - removable-media
+  grab:
+    command: bin/grab
+    plugs:
+      - network
+      - home
+      - removable-media
+
+parts:
+  mediagrabber:
+    plugin: nil
+    source: .
+    build-packages:
+      - curl
+      - ca-certificates
+      - xz-utils
+    stage-packages:
+      - ffmpeg
+      - jq
+      - curl
+      - ca-certificates
+      - xdg-utils
+    override-build: |
+      set -euo pipefail
+      NODE_VERSION="22.14.0"
+      case "$CRAFT_ARCH_BUILD_FOR" in
+        amd64) NODE_ARCH="x64" ;;
+        arm64) NODE_ARCH="arm64" ;;
+        *) echo "Unsupported architecture: $CRAFT_ARCH_BUILD_FOR" && exit 1 ;;
+      esac
+
+      curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" -o /tmp/node.tar.xz
+      tar -xJf /tmp/node.tar.xz -C /tmp
+      export PATH="/tmp/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin:$PATH"
+
+      npm install --no-package-lock --legacy-peer-deps
+      npm run build
+      npm run build:server
+
+      APP_DEST="$CRAFT_PART_INSTALL/opt/mediagrabber"
+      mkdir -p "$APP_DEST" "$CRAFT_PART_INSTALL/bin" "$CRAFT_PART_INSTALL/share/applications" "$CRAFT_PART_INSTALL/share/icons/hicolor/512x512/apps"
+
+      cp -a "/tmp/node-v${NODE_VERSION}-linux-${NODE_ARCH}/bin/node" "$CRAFT_PART_INSTALL/bin/node"
+      cp -a dist "$APP_DEST/dist"
+      cp -a dist-server "$APP_DEST/dist-server"
+      cp -a public "$APP_DEST/public"
+      rm -rf "$APP_DEST/dist/assets/aistudio" "$APP_DEST/public/assets/aistudio"
+      cp -a package.json grab LICENSE "$APP_DEST/"
+      chmod 755 "$APP_DEST/grab" "$APP_DEST/dist-server/server.cjs"
+
+      cp -a grab "$CRAFT_PART_INSTALL/bin/grab"
+      chmod 755 "$CRAFT_PART_INSTALL/bin/grab"
+
+      cp -a deploy/mediagrabber.desktop "$CRAFT_PART_INSTALL/share/applications/mediagrabber.desktop"
+      cp -a public/pwa-512x512.png "$CRAFT_PART_INSTALL/share/icons/hicolor/512x512/apps/mediagrabber.png"
+
+      cat > "$CRAFT_PART_INSTALL/bin/mediagrabber-launcher" <<'EOF'
+      #!/usr/bin/env bash
+      set -euo pipefail
+      export NODE_ENV=production
+      export PATH="$SNAP/bin:$SNAP/usr/bin:$PATH"
+      export MEDIAGRABBER_GRAB_BIN="$SNAP/bin/grab"
+      exec "$SNAP/bin/node" "$SNAP/opt/mediagrabber/dist-server/server.cjs" "$@"
+      EOF
+      chmod 755 "$CRAFT_PART_INSTALL/bin/mediagrabber-launcher"
+
+  extractors:
+    plugin: python
+    source: .
+    python-packages:
+      - yt-dlp
+      - spotdl
+      - gallery-dl
+    override-build: |
+      python3 -m pip install --no-cache-dir --target="$CRAFT_PART_INSTALL/lib/python3/dist-packages" yt-dlp spotdl gallery-dl
+      mkdir -p "$CRAFT_PART_INSTALL/bin"
+      for tool in yt-dlp spotdl gallery-dl; do
+        if [ -f "$CRAFT_PART_INSTALL/lib/python3/dist-packages/bin/$tool" ]; then
+          ln -sf "../lib/python3/dist-packages/bin/$tool" "$CRAFT_PART_INSTALL/bin/$tool"
+        fi
+      done

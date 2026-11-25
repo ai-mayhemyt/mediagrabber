@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActiveView,
+  GrabOptions,
   HistoryItem,
   Job,
   MediaFileItem,
@@ -29,6 +30,7 @@ import {
   QrModal,
   QuickStartModal,
   ScheduleModal,
+  ShortcutsModal,
   THEME_PRESETS,
   ThemeModal,
   ToastContainer,
@@ -43,7 +45,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [storage, setStorage] = useState<StorageMap>({});
   const [searchQuery, setSearchQuery] = useState('');
-  const [appVersion, setAppVersion] = useState('v2.0');
+  const [appVersion, setAppVersion] = useState('v2.1');
 
   const [themeMode, setThemeMode] = useState<'dark' | 'light'>('dark');
   const [themeColors, setThemeColors] = useState<ThemeColors>(THEME_PRESETS.default.colors);
@@ -56,6 +58,7 @@ export default function App() {
   const [accountInitialTab, setAccountInitialTab] = useState<'profile' | 'security' | 'tokens' | 'register'>('profile');
   const [quickStartOpen, setQuickStartOpen] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [quickStartSettings, setQuickStartSettings] = useState<MediaGrabberSettings | null>(null);
   const [settingsRefreshKey, setSettingsRefreshKey] = useState(0);
   const [themeOpen, setThemeOpen] = useState(false);
@@ -212,7 +215,7 @@ export default function App() {
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.current) {
-          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.0';
+          const shortVer = String(data.current).split(/\s+/)[0] || 'v2.1';
           setAppVersion(shortVer);
         }
         if (
@@ -282,6 +285,143 @@ export default function App() {
     if (activeView === 'queue') void fetchStorage();
   }, [user, activeView, fetchHistory, fetchStorage]);
 
+  useEffect(() => {
+    if (!user) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const hasOpenModal = Boolean(
+        confirmState.open ||
+          shortcutsOpen ||
+          changelogOpen ||
+          quickStartOpen ||
+          editingMedia ||
+          themeOpen ||
+          accountOpen ||
+          scheduleModal.open ||
+          previewMedia ||
+          qrUrl ||
+          logJob
+      );
+
+      if (e.key === 'Escape') {
+        if (confirmState.open) {
+          setConfirmState((s) => ({ ...s, open: false }));
+          return;
+        }
+        if (shortcutsOpen) {
+          setShortcutsOpen(false);
+          return;
+        }
+        if (changelogOpen) {
+          setChangelogOpen(false);
+          return;
+        }
+        if (quickStartOpen) {
+          setQuickStartOpen(false);
+          return;
+        }
+        if (editingMedia) {
+          setEditingMedia(null);
+          return;
+        }
+        if (themeOpen) {
+          setThemeOpen(false);
+          return;
+        }
+        if (accountOpen) {
+          setAccountOpen(false);
+          return;
+        }
+        if (scheduleModal.open) {
+          setScheduleModal({ open: false });
+          return;
+        }
+        if (previewMedia) {
+          setPreviewMedia(null);
+          return;
+        }
+        if (qrUrl) {
+          setQrUrl(null);
+          return;
+        }
+        if (logJob) {
+          setLogJob(null);
+        }
+        return;
+      }
+
+      const target = e.target as HTMLElement | null;
+      const isTyping = Boolean(
+        target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.tagName === 'SELECT' ||
+            target.isContentEditable)
+      );
+      if (e.key === '?' && !isTyping && (!hasOpenModal || shortcutsOpen) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setShortcutsOpen((prev) => !prev);
+        return;
+      }
+      if (isTyping || hasOpenModal || e.ctrlKey || e.metaKey || e.altKey) {
+        return;
+      }
+      if (e.key === '/') {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('mg-focus-search'));
+        return;
+      }
+      const lower = e.key.toLowerCase();
+      if (lower === 'n') {
+        e.preventDefault();
+        setActiveView('queue');
+        setTimeout(() => window.dispatchEvent(new CustomEvent('mg-focus-url')), 40);
+        return;
+      }
+      if (lower === 'r') {
+        e.preventDefault();
+        void fetchQueue();
+        void fetchHistory();
+        void fetchStorage();
+        notify('info', 'Refreshed queue, history, and storage.');
+        return;
+      }
+      if (e.key === '1') {
+        e.preventDefault();
+        setActiveView('queue');
+      } else if (e.key === '2') {
+        e.preventDefault();
+        setActiveView('history');
+      } else if (e.key === '3') {
+        e.preventDefault();
+        setActiveView('utilities');
+      } else if (e.key === '4' && user.role === 'admin') {
+        e.preventDefault();
+        setActiveView('settings');
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    user,
+    confirmState.open,
+    shortcutsOpen,
+    changelogOpen,
+    quickStartOpen,
+    editingMedia,
+    themeOpen,
+    accountOpen,
+    scheduleModal.open,
+    previewMedia,
+    qrUrl,
+    logJob,
+    fetchQueue,
+    fetchHistory,
+    fetchStorage,
+    notify,
+  ]);
+
   const persistTheme = async (colors: ThemeColors, isLight?: boolean) => {
     if (!user) return;
     await fetch('/api/theme', {
@@ -319,11 +459,15 @@ export default function App() {
     setActiveView('queue');
   };
 
-  const handleGrab = async (urls: string[], mode: 'video' | 'audio'): Promise<string[]> => {
+  const handleGrab = async (
+    urls: string[],
+    mode: 'video' | 'audio',
+    options?: GrabOptions
+  ): Promise<string[]> => {
     const res = await fetch('/api/grab', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ urls, mode }),
+      body: JSON.stringify({ urls, mode, ...(options ? { options } : {}) }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -419,69 +563,22 @@ export default function App() {
     );
   }
 
-  if (!user) {
-    return (
-      <>
+  return (
+    <>
+      {!user ? (
         <AuthScreen
           themeMode={themeMode}
           onToggleTheme={handleToggleTheme}
           onOpenTheme={() => setThemeOpen(true)}
+          onOpenSetupGuide={() => setQuickStartOpen(true)}
           onAuthenticated={handleAuthSuccess}
           onNotify={notify}
         />
-        <ThemeModal
-          open={themeOpen}
-          colors={themeColors}
-          themeMode={themeMode}
-          onPreview={(colors, isLight) => applyThemeColors(colors, isLight)}
-          onApply={(colors, isLight) => {
-            applyThemeColors(colors, isLight);
-            notify('success', 'Theme updated.');
-          }}
-          onClose={() => setThemeOpen(false)}
-        />
-        <QuickStartModal
-          open={quickStartOpen}
-          user={null}
-          settings={quickStartSettings}
-          notificationsEnabled={notifications.isEnabled}
-          onEnableNotifications={notifications.enableNotifications}
-          onNavigate={(v) => setActiveView(v)}
-          onOpenAccountSecurity={() => {
-            setAccountInitialTab('security');
-            setAccountOpen(true);
-          }}
-          onUserUpdated={handleAuthSuccess}
-          onSettingsSaved={(s) => {
-            setQuickStartSettings(s);
-            setSettingsRefreshKey((k) => k + 1);
-          }}
-          onNotify={notify}
-          onFinish={(dontShowAgain) => {
-            setQuickStartOpen(false);
-            if (dontShowAgain) {
-              try {
-                localStorage.setItem('mg_quickstart_dismissed', '1');
-              } catch {
-                // ignore
-              }
-              fetch('/api/quickstart/complete', { method: 'POST' }).catch(() => {});
-            }
-          }}
-        />
-        <ToastContainer
-          toasts={toasts}
-          onDismiss={(id) => setToasts((prev) => prev.filter((t) => t.id !== id))}
-        />
-      </>
-    );
-  }
-
-  return (
-    <div
-      className="min-h-screen flex flex-col lg:flex-row"
-      style={{ backgroundColor: 'var(--mg-bg)', color: 'var(--mg-text)' }}
-    >
+      ) : (
+        <div
+          className="min-h-screen flex flex-col lg:flex-row"
+          style={{ backgroundColor: 'var(--mg-bg)', color: 'var(--mg-text)' }}
+        >
       <Sidebar
         activeView={activeView}
         onSelectView={setActiveView}
@@ -511,6 +608,7 @@ export default function App() {
           onToggleTheme={handleToggleTheme}
           onOpenTheme={() => setThemeOpen(true)}
           onOpenQuickStart={() => setQuickStartOpen(true)}
+          onOpenShortcuts={() => setShortcutsOpen(true)}
           onOpenChangelog={() => setChangelogOpen(true)}
           onShareQr={() => setQrUrl(window.location.href)}
           onLogout={handleLogout}
@@ -596,12 +694,49 @@ export default function App() {
       <JobLogModal job={logJob} onClose={() => setLogJob(null)} />
       <QrModal url={qrUrl} onClose={() => setQrUrl(null)} />
       <MediaPlayerModal media={previewMedia} onClose={() => setPreviewMedia(null)} />
-      <ChangelogModal
-        open={changelogOpen}
-        currentVersion={appVersion}
-        onClose={() => setChangelogOpen(false)}
-        onOpenQuickStart={() => setQuickStartOpen(true)}
-      />
+          <ChangelogModal
+            open={changelogOpen}
+            currentVersion={appVersion}
+            onClose={() => setChangelogOpen(false)}
+            onOpenQuickStart={() => setQuickStartOpen(true)}
+          />
+          <ShortcutsModal
+            open={shortcutsOpen}
+            isAdmin={user.role === 'admin'}
+            onClose={() => setShortcutsOpen(false)}
+          />
+          <ScheduleModal
+            open={scheduleModal.open}
+            prefillUrl={scheduleModal.prefillUrl}
+            onClose={() => setScheduleModal({ open: false })}
+            onNotify={notify}
+          />
+          <AccountModal
+            open={accountOpen}
+            user={user}
+            initialTab={accountInitialTab}
+            onClose={() => setAccountOpen(false)}
+            onUpdated={(updated) => setUser(updated)}
+            onLogout={handleLogout}
+            onNotify={notify}
+          />
+          <MetadataEditorModal
+            item={editingMedia?.item || null}
+            onClose={() => setEditingMedia(null)}
+            onSaved={() => editingMedia?.onSaved()}
+            onNotify={notify}
+          />
+          <ConfirmDialog
+            open={confirmState.open}
+            title={confirmState.title}
+            message={confirmState.message}
+            onCancel={() => setConfirmState((s) => ({ ...s, open: false }))}
+            onConfirm={confirmState.onConfirm}
+          />
+          <OfflineIndicator />
+        </div>
+      )}
+
       <QuickStartModal
         open={quickStartOpen}
         user={user}
@@ -638,21 +773,6 @@ export default function App() {
           }
         }}
       />
-      <ScheduleModal
-        open={scheduleModal.open}
-        prefillUrl={scheduleModal.prefillUrl}
-        onClose={() => setScheduleModal({ open: false })}
-        onNotify={notify}
-      />
-      <AccountModal
-        open={accountOpen}
-        user={user}
-        initialTab={accountInitialTab}
-        onClose={() => setAccountOpen(false)}
-        onUpdated={(updated) => setUser(updated)}
-        onLogout={handleLogout}
-        onNotify={notify}
-      />
       <ThemeModal
         open={themeOpen}
         colors={themeColors}
@@ -660,29 +780,19 @@ export default function App() {
         onPreview={(colors, isLight) => applyThemeColors(colors, isLight)}
         onApply={async (colors, isLight) => {
           applyThemeColors(colors, isLight);
-          await persistTheme(colors, isLight);
-          notify('success', 'Theme saved.');
+          if (user) {
+            await persistTheme(colors, isLight);
+            notify('success', 'Theme saved.');
+          } else {
+            notify('success', 'Theme updated.');
+          }
         }}
         onClose={() => setThemeOpen(false)}
-      />
-      <MetadataEditorModal
-        item={editingMedia?.item || null}
-        onClose={() => setEditingMedia(null)}
-        onSaved={() => editingMedia?.onSaved()}
-        onNotify={notify}
-      />
-      <ConfirmDialog
-        open={confirmState.open}
-        title={confirmState.title}
-        message={confirmState.message}
-        onCancel={() => setConfirmState((s) => ({ ...s, open: false }))}
-        onConfirm={confirmState.onConfirm}
       />
       <ToastContainer
         toasts={toasts}
         onDismiss={(id) => setToasts((prev) => prev.filter((t) => t.id !== id))}
       />
-      <OfflineIndicator />
-    </div>
+    </>
   );
 }

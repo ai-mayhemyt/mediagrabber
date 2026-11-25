@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { QrCode, Sun, Moon, Palette, LogOut, Search, X, Bell, BellRing, BookOpen } from 'lucide-react';
+import { QrCode, Sun, Moon, Palette, LogOut, Search, X, Bell, BellRing, BookOpen, Keyboard } from 'lucide-react';
 import { ActiveView } from '../types';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -15,6 +15,7 @@ interface TopBarProps {
   onToggleTheme: () => void;
   onOpenTheme: () => void;
   onOpenQuickStart: () => void;
+  onOpenShortcuts?: () => void;
   onOpenChangelog?: () => void;
   onShareQr: () => void;
   onLogout: () => void;
@@ -31,7 +32,7 @@ const VIEW_LABELS: Record<ActiveView, string> = {
 export const TopBar: React.FC<TopBarProps> = ({
   activeView,
   themeMode,
-  version = 'v2.0-pre8',
+  version = 'v2.1',
   searchQuery,
   notificationsEnabled,
   notificationsBusy = false,
@@ -40,6 +41,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onToggleTheme,
   onOpenTheme,
   onOpenQuickStart,
+  onOpenShortcuts,
   onOpenChangelog,
   onShareQr,
   onLogout,
@@ -48,15 +50,22 @@ export const TopBar: React.FC<TopBarProps> = ({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
+    const focusSearch = () => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    };
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        inputRef.current?.focus();
-        inputRef.current?.select();
+        focusSearch();
       }
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('mg-focus-search', focusSearch);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('mg-focus-search', focusSearch);
+    };
   }, []);
 
   return (
@@ -132,11 +141,8 @@ export const TopBar: React.FC<TopBarProps> = ({
             <X className="w-3.5 h-3.5" />
           </button>
         ) : (
-          <span
-            className="hidden md:inline-block absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-mono pointer-events-none"
-            style={{ color: 'var(--mg-muted)' }}
-          >
-            ⌘K
+          <span className="hidden md:inline-block absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-mono pointer-events-none" style={{ color: 'var(--mg-muted)' }}>
+            / · ⌘K
           </span>
         )}
       </div>
@@ -180,6 +186,24 @@ export const TopBar: React.FC<TopBarProps> = ({
           <BookOpen className="w-3.5 h-3.5" />
           <span className="hidden xl:inline">Guide</span>
         </button>
+
+        {onOpenShortcuts && (
+          <button
+            type="button"
+            onClick={onOpenShortcuts}
+            title="Keyboard Shortcuts (?)"
+            aria-label="Keyboard Shortcuts"
+            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors whitespace-nowrap shrink-0"
+            style={{
+              backgroundColor: 'var(--mg-card)',
+              borderColor: 'var(--mg-border)',
+              color: 'var(--mg-text)',
+            }}
+          >
+            <Keyboard className="w-3.5 h-3.5" />
+            <span className="hidden 2xl:inline">Shortcuts</span>
+          </button>
+        )}
 
         <button
           type="button"
