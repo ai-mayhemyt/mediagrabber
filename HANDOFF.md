@@ -1,7 +1,147 @@
-# MediaGrabber `v2.1` (Full Stable Release) — Complete Feature & Deployment Handoff
+# MediaGrabber `v2.1` (Full Stable Release) — Main Handoff & Deployment Guide
 
 ## Summary
-**MediaGrabber `v2.1`** promotes the complete `v2.0` → `v2.1-pre1` → `v2.1-pre2` → `v2.1` feature set to the stable **`mediagrabber`** branch. It unifies **YouTube (`yt-dlp`)**, **Spotify (`spotdl`)**, and **Instagram / TikTok / X (`gallery-dl`)** behind one self-hosted Web UI and CLI across **Windows 10**, **Windows 11**, and **Linux (Ubuntu / Debian / Proxmox LXC)**, with **clean first-run Admin onboarding**, **Keyboard Shortcuts**, **mandatory downloader installation (`yt-dlp`, `spotdl`, `gallery-dl`, `ffmpeg`)**, **public npm packaging (`mediagrabber@2.1.0`)**, and **Ubuntu App Store (`Snap` + `.deb`)** distribution.
+**MediaGrabber `v2.1`** is the full stable release on the **`mediagrabber`** branch (`https://github.com/ai-mayhemyt/mediagrabber/releases/tag/v2.1`) and is live on npm as **`mediagrabber@2.1.0`** (`https://www.npmjs.com/package/mediagrabber`). It unifies **YouTube (`yt-dlp`)**, **Spotify (`spotdl`)**, and **Instagram / TikTok / X (`gallery-dl`)** behind one self-hosted Web UI and CLI across **Windows 10**, **Windows 11**, and **Linux (Ubuntu / Debian / Proxmox LXC)**, with **clean first-run Admin onboarding**, **Keyboard Shortcuts**, **mandatory downloader installation (`yt-dlp`, `spotdl`, `gallery-dl`, `ffmpeg`)**, **public npm CLI (`mediagrabber`)**, **Standalone `.exe` / Linux binaries**, **Unified Release Zip (`mediagrabber-v2.1.zip`)**, and **Ubuntu App Store (`Snap` + `.deb`)** distribution.
+
+---
+
+## Quick Download & Install Overview
+
+| Platform | Fast CLI (`npm` / `npx`) | Standalone Binary (No Node) | Automated Installer (`Git` / `.zip`) | Native Linux Store / Package |
+| --- | --- | --- | --- | --- |
+| **Windows 10 & 11** | `npm install -g mediagrabber`<br>`npx mediagrabber --open` | `mediagrabber-win-x64.exe` ([Releases](https://github.com/ai-mayhemyt/mediagrabber/releases/tag/v2.1)) | `.\deploy\install-windows.ps1 -Channel stable -RegisterStartupTask` | — |
+| **Linux (Ubuntu / Debian / LXC)** | `npm install -g mediagrabber`<br>`npx mediagrabber --open` | `mediagrabber-linux-x64` ([Releases](https://github.com/ai-mayhemyt/mediagrabber/releases/tag/v2.1)) | `sudo bash deploy/install-linux.sh --stable` | **Snap** (`mediagrabber`) & **`.deb`** (`build-deb.sh`) |
+
+> **Mandatory Media Engines**: On every platform, **FFmpeg**, **`yt-dlp`**, **`spotdl`**, and **`gallery-dl`** are required (`ffmpeg` + Python extractors). The automated Windows (`install-windows.ps1`), Linux (`install-linux.sh`), `.deb` (`postinst`), and Snap installers handle all of these automatically; for standalone binary or npm installs, install FFmpeg + Python extractors first using the one-liners below.
+
+---
+
+## Windows 10 & Windows 11 — Download & Install Methods
+
+### Method 1: Global npm CLI or `npx` *(Live on npm: `mediagrabber@2.1.0`)*
+Install mandatory media engines once, then install or launch MediaGrabber from anywhere:
+```powershell
+winget install --id Gyan.FFmpeg -e --accept-package-agreements --accept-source-agreements
+winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
+python -m pip install --upgrade pip yt-dlp spotdl gallery-dl
+
+# Option A: Install globally
+npm install -g mediagrabber
+mediagrabber --open
+
+# Option B: Run directly without installing globally
+npx mediagrabber --open
+```
+
+### Method 2: Standalone Windows Executable (`mediagrabber-win-x64.exe` — No Node.js Required)
+1. Install FFmpeg and the three mandatory extractors:
+   ```powershell
+   winget install --id Gyan.FFmpeg -e --accept-package-agreements --accept-source-agreements
+   winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
+   python -m pip install --upgrade pip yt-dlp spotdl gallery-dl
+   ```
+2. Download **`mediagrabber-win-x64.exe`** from **[GitHub Releases (`v2.1`)](https://github.com/ai-mayhemyt/mediagrabber/releases/tag/v2.1)** and launch it:
+   ```cmd
+   mediagrabber-win-x64.exe --open
+   # Or specify custom port and workspace directory:
+   mediagrabber-win-x64.exe --port 3000 --data-dir "%LOCALAPPDATA%\MediaGrabber" --open
+   ```
+
+### Method 3: Unified Release Zip (`mediagrabber-v2.1.zip` — Windows & Linux in One Archive)
+Download **`mediagrabber-v2.1.zip`** from **[GitHub Releases (`v2.1`)](https://github.com/ai-mayhemyt/mediagrabber/releases/tag/v2.1)** (or **Utilities → Server Manager → Download Bundle (.zip)**), extract to `C:\MediaGrabber`, and run the Windows installer:
+```powershell
+Expand-Archive -Path "$HOME\Downloads\mediagrabber-v2.1.zip" -DestinationPath "C:\MediaGrabber" -Force
+cd C:\MediaGrabber
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy\install-windows.ps1 -Channel stable -RegisterStartupTask
+```
+
+### Method 4: Automated Git Clone Installer (`install-windows.ps1`)
+```powershell
+git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git C:\MediaGrabber
+cd C:\MediaGrabber
+Set-ExecutionPolicy -Scope Process Bypass
+.\deploy\install-windows.ps1 -Channel stable -RegisterStartupTask
+```
+*(Updating an existing clone preserves `%LOCALAPPDATA%\MediaGrabber` accounts & settings: `cd C:\MediaGrabber; git fetch --all --tags; git checkout mediagrabber; git pull; Set-ExecutionPolicy -Scope Process Bypass; .\deploy\install-windows.ps1 -Channel stable`)*
+
+Then launch anytime with:
+```powershell
+.\mediagrabber.exe --open
+# Or via the Node batch launcher:
+.\deploy\start-windows.bat --open
+```
+
+---
+
+## Linux (Ubuntu / Debian / Proxmox LXC) — Download & Install Methods
+
+### Method 1: Automated Linux Installer (`deploy/install-linux.sh` — Recommended for Servers)
+Installs Node/runtime dependencies, `ffmpeg`, `jq`, `python3`, `python3-venv`, provisions `yt-dlp`, `spotdl`, and `gallery-dl` into `/opt/mediagrabber/.venv` symlinked to `/usr/local/bin/`, preserves non-root ownership, sets up `/usr/local/bin/grab`, builds the app, and starts `mediagrabber.service`:
+```bash
+git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git /opt/mediagrabber && \
+cd /opt/mediagrabber && \
+sudo bash deploy/install-linux.sh --stable
+```
+*(Pass `--nightly` instead of `--stable` to track the `mediagrabber-nightly` branch.)*
+
+### Method 2: Unified Release Zip (`mediagrabber-v2.1.zip` via Download / SFTP & SSH)
+Download **`mediagrabber-v2.1.zip`** from GitHub Releases (or upload via SFTP to `~`), extract, and install:
+```bash
+curl -fsSL -o ~/mediagrabber-v2.1.zip https://github.com/ai-mayhemyt/mediagrabber/releases/download/v2.1/mediagrabber-v2.1.zip
+sudo unzip -o ~/mediagrabber-v2.1.zip -d /opt/mediagrabber && \
+cd /opt/mediagrabber && \
+sudo bash deploy/install-linux.sh --stable && \
+sudo systemctl restart mediagrabber && \
+curl -s http://127.0.0.1:3000/healthz
+```
+
+### Method 3: Global npm CLI or `npx` *(Live on npm: `mediagrabber@2.1.0`)*
+Install mandatory system engines once, then install or run via npm:
+```bash
+sudo apt update && sudo apt install -y ffmpeg jq python3 python3-pip
+python3 -m pip install --upgrade yt-dlp spotdl gallery-dl
+
+# Option A: Install globally
+sudo npm install -g mediagrabber
+mediagrabber --open
+
+# Option B: Run directly via npx
+npx mediagrabber --open
+```
+*(Customize workspace/port anytime: `MEDIAGRABBER_DATA_DIR=/var/lib/mediagrabber mediagrabber --port 3000`.)*
+
+### Method 4: Standalone Linux Binary (`mediagrabber-linux-x64` — No Node.js Required)
+Install FFmpeg + Python extractors, then download **`mediagrabber-linux-x64`** from **[GitHub Releases (`v2.1`)](https://github.com/ai-mayhemyt/mediagrabber/releases/tag/v2.1)**:
+```bash
+curl -fsSL -o mediagrabber-linux-x64 https://github.com/ai-mayhemyt/mediagrabber/releases/download/v2.1/mediagrabber-linux-x64
+chmod +x mediagrabber-linux-x64
+./mediagrabber-linux-x64 --port 3000 --data-dir /var/lib/mediagrabber --open
+```
+
+### Method 5: Ubuntu / Debian `.deb` Package
+Builds and installs a native `.deb` package with `systemd` service, `/usr/bin/mediagrabber`, `/usr/local/bin/grab`, desktop launcher, and automatic extractor provisioning:
+```bash
+cd /opt/mediagrabber
+npm run build:deb
+sudo apt install -y ./dist-deb/mediagrabber_2.1.0_amd64.deb
+```
+
+### Method 6: Ubuntu App Store (`Snap`)
+```bash
+# Install from Snap Store (once published):
+sudo snap install mediagrabber
+sudo snap connect mediagrabber:removable-media
+mediagrabber --open
+
+# Or build & publish locally via Snapcraft:
+sudo snap install snapcraft --classic
+snapcraft
+sudo snap install ./mediagrabber_2.1.0_amd64.snap --dangerous
+sudo snap connect mediagrabber:removable-media
+snapcraft login
+snapcraft upload --release=stable mediagrabber_2.1.0_amd64.snap
+```
 
 ---
 
@@ -25,7 +165,7 @@
   - `Esc`: Close the topmost open modal cleanly.
   - Single-key shortcuts automatically ignore typing inside `input`, `textarea`, `select`, and `contentEditable` elements.
 - **Public npm CLI Package (`mediagrabber@2.1.0`)**:
-  - Configured MIT `LICENSE`, `files` allowlist (excluding screenshot uploads), `bin: { "mediagrabber": "dist-server/server.cjs" }`, `prepublishOnly`, and executable Node shebang in `build:server`.
+  - Live at `https://www.npmjs.com/package/mediagrabber` with MIT `LICENSE`, clean `files` allowlist, `bin: { "mediagrabber": "dist-server/server.cjs" }`, `prepublishOnly`, and executable Node shebang in `build:server`.
   - Fixed global npm path resolution (`IS_COMPILED_CJS`, `PACKAGE_ROOT`, `BUNDLE_ROOT`) so `npm install -g mediagrabber` / `npx mediagrabber --open` works from any working directory.
 - **Ubuntu App Store (`Snap`) & `.deb` Packaging**:
   - [`snap/snapcraft.yaml`](./snap/snapcraft.yaml) (`base: core22`, `confinement: strict`) bundling Node 22, FFmpeg, `jq`, `yt-dlp`, `spotdl`, `gallery-dl`, desktop app, `daemon`, and `grab` CLI, with `SNAP_USER_COMMON` / `SNAP_COMMON` storage detection.
@@ -51,9 +191,8 @@
 
 ---
 
-## Windows 10 & Windows 11 Deployment (Fixed for `v2.1`)
+## Windows Deployment Fixes Included in `v2.1`
 
-### What Was Fixed on Windows
 1. **Cross-Platform `npm start` & `npm run clean`**: Replaced POSIX-only `NODE_ENV=production tsx server.ts` in `package.json` with a cross-platform Node launcher targeting `dist-server/server.cjs` (auto-building if needed) so `cmd.exe` and PowerShell never fail with `'NODE_ENV' is not recognized`.
 2. **Working Standalone `.exe` Builds (`@yao-pkg/pkg`)**: Replaced legacy `pkg@5.8.1` (which crashed on `node22-win-x64` with `No available node version satisfies 'node22'`) with `@yao-pkg/pkg@6.26.0` so `npm run build:exe` builds `dist-exe\mediagrabber-win-x64.exe` reliably.
 3. **Robust `deploy/install-windows.ps1`**:
@@ -65,93 +204,37 @@
 4. **Fixed `deploy/start-windows.bat`, `server.ts` & `grab.ps1`**:
    - Fixed batch `.env` `#` comment skipping and dynamic scanning of `%LOCALAPPDATA%\Programs\Python\Python*\Scripts`, `%APPDATA%\Python\Python*\Scripts`, and `%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg*\*\bin`.
 
-### Windows Deploy Commands (PowerShell)
-
-**Method A — Automated Windows Installer (Recommended):**
-```powershell
-git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git C:\MediaGrabber
-cd C:\MediaGrabber
-Set-ExecutionPolicy -Scope Process Bypass
-.\deploy\install-windows.ps1 -Channel stable -RegisterStartupTask
-```
-*(If updating an existing clone: `cd C:\MediaGrabber; git fetch --all --tags; git pull; Set-ExecutionPolicy -Scope Process Bypass; .\deploy\install-windows.ps1 -Channel stable`)*
-
-Then launch MediaGrabber and open your browser:
-```powershell
-.\mediagrabber.exe --open
-# or via Node batch launcher:
-.\deploy\start-windows.bat --open
-```
-
-**Method B — Standalone `.exe` Binary (No Node.js Required):**
-1. Install mandatory tools in PowerShell:
-   ```powershell
-   winget install --id Gyan.FFmpeg -e --accept-package-agreements --accept-source-agreements
-   winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
-   python -m pip install --upgrade pip yt-dlp spotdl gallery-dl
-   ```
-2. Download `mediagrabber-win-x64.exe` from [GitHub Releases](https://github.com/ai-mayhemyt/mediagrabber/releases) and run:
-   ```cmd
-   mediagrabber-win-x64.exe --open
-   ```
-
-**Method C — Global npm CLI on Windows:**
-```powershell
-npm install -g mediagrabber
-mediagrabber --open
-```
-
 ---
 
-## Linux / Ubuntu / Debian Deployment (`v2.1`)
+## Maintainer Sync & Release Reference (`v2.1`)
 
-### Method A — Automated Server Installer (`systemd` + Mandatory Extractors)
-```bash
-git clone -b mediagrabber https://github.com/ai-mayhemyt/mediagrabber.git /opt/mediagrabber && \
-cd /opt/mediagrabber && \
-sudo bash deploy/install-linux.sh --stable
-```
-`install-linux.sh` installs `curl`, `git`, `ffmpeg`, `jq`, `unzip`, `python3`, `python3-pip`, `python3-venv`, provisions `yt-dlp`, `spotdl`, and `gallery-dl` into `/opt/mediagrabber/.venv` symlinked to `/usr/local/bin/`, preserves your non-root owner on `/opt/mediagrabber` & `/var/lib/mediagrabber`, installs `/usr/local/bin/grab`, builds `dist/` + `dist-server/server.cjs`, and starts `mediagrabber.service`.
+If updating the **`mediagrabber`** branch, release notes, or release assets on GitHub from `/opt/mediagrabber`:
 
-### Method B — Deploy Source `.zip` via SFTP & SSH
-```bash
-unzip -o mediagrabber-v2.1.zip -d /opt/mediagrabber && \
-cd /opt/mediagrabber && \
-sudo bash deploy/install-linux.sh --stable && \
-sudo systemctl restart mediagrabber && \
-curl -s http://127.0.0.1:3000/healthz
-```
-
-### Method C — Ubuntu App Store (Snap) & `.deb` Package
-```bash
-# .deb package:
-npm run build:deb
-sudo apt install -y ./dist-deb/mediagrabber_2.1.0_amd64.deb
-
-# Ubuntu App Store (Snap):
-sudo snap install snapcraft --classic
-snapcraft
-sudo snap install ./mediagrabber_2.1.0_amd64.snap --dangerous
-sudo snap connect mediagrabber:removable-media
-snapcraft login
-snapcraft upload --release=stable mediagrabber_2.1.0_amd64.snap
-```
-
-### Publishing to npm (`mediagrabber@2.1.0`)
 ```bash
 cd /opt/mediagrabber
 sudo chown -R "$USER:$USER" /opt/mediagrabber
-# Requires npm 2FA OTP (--otp=123456) or a Granular Access Token with Bypass 2FA enabled:
-npm publish --access public
+git checkout mediagrabber
+git add -A
+git commit -m "Update MediaGrabber v2.1 handoff and download docs"
+git push --force-with-lease origin mediagrabber
+git tag -f -a v2.1 -m "MediaGrabber v2.1 Full Stable Release"
+git push -f origin v2.1
+
+gh release edit v2.1 \
+  --title "MediaGrabber v2.1 (Full Stable Release)" \
+  --notes-file HANDOFF.md
 ```
+
+*(Note: Pushing a `v*` tag triggers [`.github/workflows/build-binaries.yml`](./.github/workflows/build-binaries.yml), which builds and attaches `mediagrabber-win-x64.exe`, `mediagrabber-linux-x64`, and the unified `mediagrabber-v2.1.zip` directly to the release. To publish a follow-up npm patch version, bump `"version"` in `package.json` and run `npm publish --access public --otp=123456`.)*
 
 ---
 
-## GitHub Branches & Publishing Reference
-- **Repository**: `https://github.com/ai-mayhemyt/mediagrabber`
+## Distribution & Repository Links
+- **GitHub Repository**: `https://github.com/ai-mayhemyt/mediagrabber`
 - **Full Release Branch**: `mediagrabber` (target for **`v2.1`**)
 - **Nightly Branch**: `mediagrabber-nightly`
+- **GitHub Release (`v2.1`)**: `https://github.com/ai-mayhemyt/mediagrabber/releases/tag/v2.1`
+- **npm Package (`mediagrabber@2.1.0`)**: `https://www.npmjs.com/package/mediagrabber`
 - **Companion Jellyfin Plugin**: `https://github.com/ai-mayhemyt/MediaGrabber-Jellyfin-Edition`
-- **npm Package**: `mediagrabber` (`2.1.0`)
 - **Ubuntu App Store (Snap)**: `mediagrabber` (`snap/snapcraft.yaml`)
 - **Debian/Ubuntu Package**: `deploy/build-deb.sh` → `dist-deb/mediagrabber_2.1.0_<arch>.deb`
